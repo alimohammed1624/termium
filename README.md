@@ -97,13 +97,21 @@ divider between panes.
   -9`), the next start stops the browser it left behind.
 - Logs: `~/.local/state/termium/termium.log` (set `TERMIUM_DEBUG=1` to log
   DevTools traffic) and `browser.log` next to it.
+- Downloads go to `$TERMIUM_DOWNLOAD_DIR`, else your XDG download directory
+  (`xdg-user-dir DOWNLOAD`), else `~/Downloads`, and never replace an
+  existing file (`name (1).ext`).
+- Closing a pane or tab lets the page ask "Leave this page?" first, as a
+  browser would. A dialog from a page you're not looking at waits (its tab
+  shows `!`) instead of taking focus.
 - The page is a bitmap, so termium needs a graphics-capable terminal. It
   checks on startup and says so if yours is not.
 
 ## How it works
 
-termium starts Helium with `--headless=new`, connects to its DevTools
-WebSocket and auto-attaches to every page. Each visible pane gets a
+termium starts Helium with `--headless=new` and speaks the DevTools
+protocol over a private pipe (`--remote-debugging-pipe`, so no port is open
+for other local programs), auto-attaching to every page, cross-site iframe
+and worker. Each visible pane gets a
 viewport matching its size in device pixels (cell size × cells) and a PNG
 screencast; frames are sent to the terminal as kitty graphics images,
 placed and scaled to the pane's cells, and acknowledged only once the
@@ -128,6 +136,8 @@ Options:
 
 - `TERMIUM_INSTALL_DIR=/some/dir` — install somewhere else.
 - `TERMIUM_VERSION=v0.1.0` — install a specific release instead of the latest.
+- `TERMIUM_TARGET=x86_64-apple-darwin` — pick the archive yourself (any
+  target from the table below).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alimohammed1624/termium/main/install.sh | TERMIUM_INSTALL_DIR=~/bin sh
@@ -234,6 +244,7 @@ page state through DevTools. Needs Helium and Python 3 with `pyte` and
 
 ```sh
 python3 tests/e2e.py /tmp/termium-e2e    # screenshots land there
+python3 tests/lifecycle.py               # second instances, kill -9 recovery, bad terminals
 ```
 
 `scripts/screenshots.sh` regenerates `docs/screenshots/` from a real Ghostty

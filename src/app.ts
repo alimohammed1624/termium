@@ -1,9 +1,9 @@
 // termium's core: spaces (windows) -> tabs -> split panes, each pane showing
 // one headless browser page rendered with the kitty graphics protocol.
 
-import { existsSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import type { CDP } from "./cdp";
 import type { InputEvent, KeyEvent, MouseEvent, Mods } from "./input";
 import {
@@ -34,7 +34,10 @@ export interface Page {
   title: string;
   loading: boolean;
   crashed: boolean;
-  dialog: { type: string; message: string; defaultPrompt: string } | null;
+  /** A pending JavaScript dialog, and the session (page or iframe) to answer it on. */
+  dialog: { type: string; message: string; defaultPrompt: string; sessionId: string } | null;
+  /** Set while termium is closing the page (beforeunload may still keep it). */
+  closing: boolean;
   /** Viewport we last gave the page, in CSS px. */
   css: { w: number; h: number; dsf: number } | null;
   casting: { w: number; h: number } | null;
@@ -63,12 +66,12 @@ interface Space {
 }
 
 type Placement =
-  | { kind: "tab"; space: Space; index: number; editUrl: boolean; url?: string }
+  | { kind: "tab"; space: Space; index: number; editUrl: boolean; url?: string; background?: boolean }
   | { kind: "split"; tab: Tab; next: Page; dir: Dir; editUrl: boolean; url?: string };
 
 type Prompt =
   | { kind: "url"; edit: LineEdit; page: Page }
-  | { kind: "file"; edit: LineEdit; page: Page; backendNodeId: number; multiple: boolean }
+  | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page };
 
@@ -78,6 +81,8 @@ export interface AppOptions {
   scale: number | null; // explicit device scale factor
   search: string;
   downloadDir: string;
+  /** Where downloads land (under generated names) before being moved to downloadDir. */
+  downloadStaging: string;
   quit: () => void;
   log: (msg: string) => void;
 }
@@ -117,7 +122,8 @@ const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 
 const SIDEBAR_W = 22;
 const TOP_ROWS = 2;
-const MARKER = "#termium-";
+/** URL fragment that marks pages termium created; random so real URLs never match. */
+const MARKER = `#termium-${crypto.randomUUID().slice(0, 8)}-`;
 
 const HELP: [string, string][] = [
   ["Ctrl+L / F6", "edit address"],
@@ -181,7 +187,12 @@ export class App {
   private nextSpaceId = 1;
   private nextMarker = 1;
   private placements = new Map<string, Placement>(); // by marker
-  private pageKeysDown = new Set<string>();
+  /** Keys whose keydown went to a page, and which page, so the keyup follows it. */
+  private pageKeysDown = new Map<string, Page>();
+  /** iframe (out-of-process) and worker sessions, mapped to the page they belong to. */
+  private frameOwner = new Map<string, Page>();
+  private downloads = new Map<string, string>(); // guid -> suggested file name
+  private lastMiddlePress = 0;
   private mouseCapture: Page | null = null;
   private mouseButtons = 0;
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
@@ -204,8 +215,11 @@ export class App {
 
   async start(initialUrl: string | null): Promise<void> {
     const cdp = this.cdp;
-    cdp.on("Target.attachedToTarget", (p) => this.onAttached(p).catch((e) => this.opts.log(String(e))));
-    cdp.on("Target.detachedFromTarget", (p) => this.onGone(this.pages.get(p.sessionId)));
+    cdp.on("Target.attachedToTarget", (p, parent) => this.onAttached(p, parent).catch((e) => this.opts.log(String(e))));
+    cdp.on("Target.detachedFromTarget", (p) => {
+      this.frameOwner.delete(p.sessionId);
+      this.onGone(this.pages.get(p.sessionId));
+    });
     cdp.on("Target.targetDestroyed", (p) => this.onGone(this.byTarget.get(p.targetId)));
     cdp.on("Target.targetInfoChanged", ({ targetInfo }) => {
       const page = this.byTarget.get(targetInfo.targetId);
@@ -223,7 +237,7 @@ export class App {
     });
     cdp.on("Page.javascriptDialogOpening", (p, sid) => this.onDialog(sid, p));
     cdp.on("Page.javascriptDialogClosed", (_p, sid) => {
-      const page = sid ? this.pages.get(sid) : undefined;
+      const page = this.ownerOf(sid);
       if (!page) return;
       page.dialog = null;
       if (this.prompt?.kind === "dialog" && this.prompt.page === page) this.prompt = null;
@@ -237,31 +251,45 @@ export class App {
       this.showToast("Page crashed. Ctrl+R reloads it.");
     });
     cdp.on("Page.fileChooserOpened", (p, sid) => {
-      const page = sid ? this.pages.get(sid) : undefined;
-      if (!page || p.backendNodeId === undefined) return;
+      const page = this.ownerOf(sid);
+      if (!page || !sid || p.backendNodeId === undefined) return;
       if (page !== this.focused) this.focusPage(page);
       this.prompt = {
         kind: "file",
         edit: new LineEdit(this.lastUploadDir, false),
         page,
+        sessionId: sid,
         backendNodeId: p.backendNodeId,
         multiple: p.mode === "selectMultiple",
       };
       this.queueChrome();
     });
-    cdp.on("Browser.downloadWillBegin", (p) => this.showToast(`Downloading ${p.suggestedFilename}…`));
+    cdp.on("Browser.downloadWillBegin", (p) => {
+      this.downloads.set(p.guid, p.suggestedFilename || "download");
+      this.showToast(`Downloading ${p.suggestedFilename}…`);
+    });
     cdp.on("Browser.downloadProgress", (p) => {
-      if (p.state === "completed") this.showToast(`Saved to ${this.opts.downloadDir}`);
-      else if (p.state === "canceled") this.showToast("Download canceled");
+      if (p.state === "completed") this.finishDownload(p.guid);
+      else if (p.state === "canceled") {
+        this.downloads.delete(p.guid);
+        this.showToast("Download canceled");
+      }
     });
 
+    // Downloads land under generated names in a staging dir and are moved
+    // into place with a name that never replaces an existing file.
+    mkdirSync(this.opts.downloadStaging, { recursive: true });
     await cdp
       .send("Browser.setDownloadBehavior", {
-        behavior: "allow",
-        downloadPath: this.opts.downloadDir,
+        behavior: "allowAndName",
+        downloadPath: this.opts.downloadStaging,
         eventsEnabled: true,
       })
       .catch((e) => this.opts.log(`downloads: ${e}`));
+    // Lets bracketed paste go through the page's clipboard, so paste events fire.
+    await cdp
+      .send("Browser.grantPermissions", { permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"] })
+      .catch((e) => this.opts.log(`permissions: ${e}`));
 
     // Present as regular Chrome: "HeadlessChrome" in the user agent and
     // client hints gets pages to serve bot checks (DuckDuckGo does).
@@ -305,7 +333,8 @@ export class App {
       autoAttach: true,
       waitForDebuggerOnStart: true,
       flatten: true,
-      filter: [{ type: "page", exclude: false }, { exclude: true }],
+      // Pages, plus workers that run on their own (they need the user agent too).
+      filter: [{ type: "page" }, { type: "service_worker" }, { type: "shared_worker" }, { exclude: true }],
     });
     const url = initialUrl ? toUrl(initialUrl, this.opts.search) : null;
     // Script title changes (document.title = ...) don't produce
@@ -366,30 +395,62 @@ export class App {
     }
   }
 
-  private holding: string | null = null;
-  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Reasons input is currently queued (a page being created, a paste in progress). */
+  private holds = new Map<string, ReturnType<typeof setTimeout>>();
 
-  private holdInput(marker: string): void {
-    this.holding = marker;
-    if (this.holdTimer) clearTimeout(this.holdTimer);
-    this.holdTimer = setTimeout(() => this.releaseInput(marker), 5000);
+  private holdInput(reason: string): void {
+    const old = this.holds.get(reason);
+    if (old) clearTimeout(old);
+    this.holds.set(reason, setTimeout(() => this.releaseInput(reason), 5000));
   }
 
-  private releaseInput(marker: string): void {
-    if (this.holding !== marker) return;
-    this.holding = null;
-    if (this.holdTimer) clearTimeout(this.holdTimer);
-    this.holdTimer = null;
-    this.flushEarlyInput();
+  private releaseInput(reason: string): void {
+    const timer = this.holds.get(reason);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.holds.delete(reason);
+    if (this.holds.size === 0) this.flushEarlyInput();
   }
 
-  private async onAttached(p: any): Promise<void> {
+  private ownerOf(sid: string | undefined): Page | undefined {
+    return sid ? (this.pages.get(sid) ?? this.frameOwner.get(sid)) : undefined;
+  }
+
+  /** What every document session (page or out-of-process iframe) gets. */
+  private documentSetup(sid: string): Promise<unknown> {
+    return Promise.all([
+      this.cdp.send("Page.enable", {}, sid),
+      this.ua ? this.cdp.send("Emulation.setUserAgentOverride", this.ua, sid) : null,
+      this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: SELECT_POPUP, worldName: "termium", runImmediately: true }, sid),
+      this.cdp.send("Page.setInterceptFileChooserDialog", { enabled: true }, sid),
+      // Cross-site iframes and dedicated workers are separate targets.
+      this.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sid),
+    ]).catch((e) => this.opts.log(`setup ${sid}: ${e}`));
+  }
+
+  private async onAttached(p: any, parent?: string): Promise<void> {
     const { sessionId, targetInfo, waitingForDebugger } = p;
     const run = () =>
       waitingForDebugger
         ? this.cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(() => {})
         : Promise.resolve();
-    if (targetInfo.type !== "page" || this.byTarget.has(targetInfo.targetId)) {
+    if (targetInfo.type === "iframe") {
+      const owner = this.ownerOf(parent);
+      if (owner) this.frameOwner.set(sessionId, owner);
+      const setup = this.documentSetup(sessionId);
+      await run();
+      await setup;
+      return;
+    }
+    if (targetInfo.type !== "page") {
+      // Workers: same user agent as their pages, then let them run.
+      if (this.ua && /worker/.test(targetInfo.type)) {
+        this.cdp.send("Network.setUserAgentOverride", this.ua, sessionId).catch(() => {});
+      }
+      await run();
+      return;
+    }
+    if (this.byTarget.has(targetInfo.targetId)) {
       await run();
       return;
     }
@@ -403,6 +464,7 @@ export class App {
       loading: false,
       crashed: false,
       dialog: null,
+      closing: false,
       css: null,
       casting: null,
       lastFrame: null,
@@ -429,7 +491,9 @@ export class App {
       const loc = opener ? this.locate(opener) : null;
       const space = loc?.space ?? this.space ?? this.spaces[0]!;
       const index = loc ? space.tabs.indexOf(loc.tab) + 1 : space.tabs.length;
-      placement = { kind: "tab", space, index, editUrl: false };
+      // A middle-clicked link opens in the background, as in Chrome.
+      const background = Date.now() - this.lastMiddlePress < 1500;
+      placement = { kind: "tab", space, index, editUrl: false, background };
     }
 
     this.pages.set(sessionId, page);
@@ -439,11 +503,8 @@ export class App {
     // Don't await these before resuming: a page opened by another page
     // (target=_blank, window.open) only answers once it runs.
     const setup = Promise.all([
-      this.cdp.send("Page.enable", {}, sid),
+      this.documentSetup(sid),
       this.cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sid),
-      this.ua ? this.cdp.send("Emulation.setUserAgentOverride", this.ua, sid) : null,
-      this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: SELECT_POPUP, worldName: "termium", runImmediately: true }, sid),
-      this.cdp.send("Page.setInterceptFileChooserDialog", { enabled: true }, sid),
     ]).catch((e) => this.opts.log(`setup ${sid}: ${e}`));
 
     // Put it into the model before applying metrics so it gets the right size.
@@ -452,8 +513,12 @@ export class App {
       const tab: Tab = { id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false };
       const index = Math.min(placement.index, space.tabs.length);
       space.tabs.splice(index, 0, tab);
-      space.active = index;
-      this.activeSpace = Math.max(0, this.spaces.indexOf(space));
+      if (placement.background) {
+        if (space.active >= index && space.tabs.length > 1) space.active++;
+      } else {
+        space.active = index;
+        this.activeSpace = Math.max(0, this.spaces.indexOf(space));
+      }
     } else {
       const tab = placement.tab;
       if (this.locateTab(tab)) {
@@ -586,18 +651,25 @@ export class App {
   }
 
   private onDialog(sid: string | undefined, p: any): void {
-    const page = sid ? this.pages.get(sid) : undefined;
-    if (!page) return;
-    page.dialog = { type: p.type, message: p.message, defaultPrompt: p.defaultPrompt ?? "" };
+    const page = this.ownerOf(sid);
+    if (!page || !sid) return;
+    page.dialog = { type: p.type, message: p.message, defaultPrompt: p.defaultPrompt ?? "", sessionId: sid };
     const loc = this.locate(page);
-    if (loc) {
+    // A page termium is closing asks "leave?": show it. Otherwise a dialog in
+    // a page you're not looking at waits (marked "!") instead of grabbing focus.
+    if (loc && (page === this.focused || page.closing)) {
       this.activeSpace = this.spaces.indexOf(loc.space);
       loc.space.active = loc.space.tabs.indexOf(loc.tab);
       loc.tab.focused = page;
+      if (this.prompt?.kind !== "dialog") this.prompt = null;
+      this.relayout();
+      this.fullRedraw();
+    } else if (loc) {
+      const where = this.spaces.indexOf(loc.space) === this.activeSpace
+        ? `tab ${loc.space.tabs.indexOf(loc.tab) + 1}`
+        : `${loc.space.name}, tab ${loc.space.tabs.indexOf(loc.tab) + 1}`;
+      this.showToast(`A page in ${where} is waiting for an answer`, 4000);
     }
-    this.prompt = { kind: "dialog", edit: new LineEdit(page.dialog.defaultPrompt, true), page };
-    this.relayout();
-    this.fullRedraw();
   }
 
   navigate(page: Page, url: string, attempt = 0): void {
@@ -621,6 +693,27 @@ export class App {
     this.queueChrome();
   }
 
+  /** Moves a finished download into the download dir under a name that is free. */
+  private finishDownload(guid: string): void {
+    const suggested = this.downloads.get(guid) ?? "download";
+    this.downloads.delete(guid);
+    const from = join(this.opts.downloadStaging, guid);
+    try {
+      mkdirSync(this.opts.downloadDir, { recursive: true });
+      const to = freeName(this.opts.downloadDir, safeFileName(suggested));
+      try {
+        renameSync(from, to);
+      } catch (e: any) {
+        if (e?.code !== "EXDEV") throw e;
+        copyFileSync(from, to);
+        unlinkSync(from);
+      }
+      this.showToast(`Saved ${to}`);
+    } catch (e) {
+      this.showToast(`Download failed: ${e}`);
+    }
+  }
+
   private async history(page: Page, delta: number): Promise<void> {
     try {
       const h = await this.cdp.send("Page.getNavigationHistory", {}, page.sessionId);
@@ -636,8 +729,15 @@ export class App {
     this.cdp.send("Page.reload", { ignoreCache }, page.sessionId).catch(() => {});
   }
 
+  /** Closes a page the way a browser does: its beforeunload handler may ask first. */
   private closePage(page: Page): void {
-    this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
+    page.closing = true;
+    const force = () => this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
+    this.cdp.send("Page.close", {}, page.sessionId).catch(force);
+    // A hung page never answers; close it anyway unless it's asking the user.
+    setTimeout(() => {
+      if (this.pages.has(page.sessionId) && page.closing && !page.dialog) void force();
+    }, 4000);
   }
 
   private closeTab(tab: Tab): void {
@@ -715,6 +815,11 @@ export class App {
           screenHeight: h,
         }, sid)
         .catch((e) => this.opts.log(`metrics: ${e}`));
+      // Keep window.outerWidth/outerHeight consistent with the viewport.
+      this.cdp
+        .send("Browser.getWindowForTarget", { targetId: page.targetId })
+        .then(({ windowId }) => this.cdp.send("Browser.setWindowBounds", { windowId, bounds: { width: w, height: h } }))
+        .catch(() => {});
     }
     if (!page.casting || page.casting.w !== devW || page.casting.h !== devH) {
       const restart = !!page.casting;
@@ -769,7 +874,7 @@ export class App {
   /** Draws the page's latest frame into its pane; false if there was nothing to draw. */
   private paint(page: Page, done?: () => void): boolean {
     const g = this.geom.get(page);
-    if (!g || !page.lastFrame || this.mode === "help") return false;
+    if (!g || !page.lastFrame || this.mode === "help" || this.closingAll) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
     const id = this.nextImage++;
@@ -793,7 +898,7 @@ export class App {
 
   /** Clears everything and redraws chrome and every visible page. */
   fullRedraw(): void {
-    if (!this.started) return;
+    if (!this.started || this.closingAll) return;
     for (const page of this.pages.values()) {
       page.imageId = null;
       page.placed = null;
@@ -805,7 +910,7 @@ export class App {
   }
 
   private drawChrome(): void {
-    if (!this.started) return;
+    if (!this.started || this.closingAll) return;
     let s = "\x1b[?25l";
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
@@ -876,14 +981,27 @@ export class App {
     let s = at(1, col) + bg(C.crust);
     let used = 0;
     this.tabHits = [];
+    if (first > 0) {
+      // Tabs scrolled off to the left.
+      s += fg(C.peach) + "‹";
+      used += 1;
+    }
+    let last = first - 1;
     for (let i = first; i < items.length; i++) {
       const text = items[i]!;
       const tw = width(text);
-      if (used + tw + width(plus) > w) break;
+      const more = i < items.length - 1 ? 1 : 0; // room for a "›" if tabs follow
+      if (used + tw + width(plus) + more > w) break;
+      last = i;
       const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
       s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
       used += tw + 1;
+    }
+    if (last < items.length - 1) {
+      // Tabs that don't fit on the right.
+      s += bg(C.crust) + fg(C.peach) + "›";
+      used += 1;
     }
     this.newTabHit = { start: col + used, end: col + used + width(plus) };
     s += bg(C.crust) + fg(C.subtext) + plus;
@@ -1014,26 +1132,39 @@ export class App {
     return s + RESET;
   }
 
-  /** The key reference, drawn over the (blanked) pane area. */
+  /** The key reference, drawn over the (blanked) pane area; two columns if it's short. */
   private helpOverlay(): string {
     const area = this.paneArea();
     const keyW = Math.max(...HELP.map(([k]) => width(k)));
     const descW = Math.max(...HELP.map(([, d]) => width(d)));
-    const boxW = Math.min(area.cols - 2, keyW + descW + 7);
-    const boxH = Math.min(area.rows - 1, HELP.length + 4);
+    const colW = keyW + descW + 6;
+    const fitsOne = HELP.length + 4 <= area.rows;
+    const columns = !fitsOne && area.cols >= colW * 2 + 2 ? 2 : 1;
+    const perCol = Math.ceil(HELP.length / columns);
+    const boxW = Math.min(area.cols, colW * columns + 2);
+    const boxH = Math.min(area.rows, perCol + 4);
+    const shown = Math.max(0, Math.min(perCol, boxH - 4)); // entry rows per column that fit
     const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 2));
     const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
     let s = deleteAllImages();
     for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
     const panel = bg(C.base) + fg(C.text);
+    const hidden = Math.max(0, HELP.length - shown * columns);
     s += at(top, left) + panel + BOLD + fg(C.mauve) + fit(" termium keys", boxW) + RESET;
     s += at(top + 1, left) + panel + fit("", boxW);
-    HELP.slice(0, boxH - 4).forEach(([k, d], i) => {
-      const line = `  ${k.padEnd(keyW)}  ${d}`;
-      s += at(top + 2 + i, left) + panel + (d === "" ? fg(C.mauve) : "") + fit(line, boxW) + RESET;
-    });
+    for (let r = 0; r < shown; r++) {
+      let line = "";
+      for (let c = 0; c < columns; c++) {
+        const entry = HELP[c * perCol + r];
+        const text = entry && entry[0] ? `  ${entry[0].padEnd(keyW)}  ${entry[1]}` : "";
+        line += columns === 1 ? text : fit(text, c === 0 ? colW : boxW - colW);
+      }
+      const heading = columns === 1 && HELP[r]?.[1] === "" && HELP[r]?.[0] !== "";
+      s += at(top + 2 + r, left) + panel + (heading ? fg(C.mauve) : "") + fit(line, boxW) + RESET;
+    }
     s += at(top + boxH - 2, left) + panel + fit("", boxW);
-    s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit("  any key closes", boxW) + RESET;
+    const footer = hidden > 0 ? `  ${hidden} more: make the terminal taller · any key closes` : "  any key closes";
+    s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(footer, boxW) + RESET;
     return s + RESET;
   }
 
@@ -1051,7 +1182,7 @@ export class App {
       this.opts.quit();
       return;
     }
-    if (!this.ready || this.holding) {
+    if (!this.ready || this.holds.size > 0) {
       this.early.push(ev);
       return;
     }
@@ -1070,7 +1201,7 @@ export class App {
           p.edit.insert(ev.text);
           this.queueChrome();
         } else if (this.focused) {
-          this.cdp.send("Input.insertText", { text: ev.text }, this.focused.sessionId).catch(() => {});
+          void this.pastePage(this.focused, ev.text);
         }
         return;
       }
@@ -1083,7 +1214,10 @@ export class App {
     const release = ev.event === "release";
     if (release) {
       // Only release keys whose press reached the page.
-      if (this.pageKeysDown.delete(ev.code || ev.key) && this.focused) this.sendKey(this.focused, ev);
+      const k = ev.code || ev.key;
+      const target = this.pageKeysDown.get(k);
+      this.pageKeysDown.delete(k);
+      if (target && this.pages.has(target.sessionId)) this.sendKey(target, ev);
       return;
     }
     if (isModifier(ev)) {
@@ -1118,8 +1252,21 @@ export class App {
     if (this.globalShortcut(combo)) return;
     const page = this.focused;
     if (!page) return;
+    if (combo === "ctrl+c" || combo === "ctrl+x") {
+      // Read the selection once earlier keys have landed (key events travel
+      // through the browser process, evaluation goes straight to the page),
+      // and before the key itself (a cut removes the text). Later input waits.
+      const hold = `copy-${++this.pasteSeq}`;
+      this.holdInput(hold);
+      void (async () => {
+        await this.inputTail;
+        await this.copySelection(page);
+        this.sendKey(page, ev);
+        this.releaseInput(hold);
+      })();
+      return;
+    }
     this.sendKey(page, ev);
-    if (combo === "ctrl+c" || combo === "ctrl+x") void this.copySelection(page);
   }
 
   private globalShortcut(combo: string): boolean {
@@ -1176,7 +1323,7 @@ export class App {
       case "ctrl+b":
         if (page) {
           this.sendKey(page, ev);
-          this.pageKeysDown.delete(ev.code || ev.key);
+          this.pageKeysDown.delete(ev.code || ev.key); // its release is sent right here
           this.sendKey(page, { ...ev, event: "release" });
         }
         return;
@@ -1317,15 +1464,18 @@ export class App {
     }
     this.lastUploadDir = `${dirname(files[0]!)}/`;
     this.cdp
-      .send("DOM.setFileInputFiles", { files, backendNodeId: prompt.backendNodeId }, prompt.page.sessionId)
+      .send("DOM.setFileInputFiles", { files, backendNodeId: prompt.backendNodeId }, prompt.sessionId)
       .then(() => this.showToast(`Attached ${files.length === 1 ? files[0] : `${files.length} files`}`))
       .catch((e) => this.showToast(`Upload failed: ${e}`));
   }
 
   private answerDialog(page: Page, accept: boolean, promptText: string): void {
-    if (page.dialog?.type === "beforeunload" && !accept) page.navSeq++;
+    if (page.dialog?.type === "beforeunload" && !accept) {
+      page.navSeq++; // a cancelled navigation is not something to retry
+      page.closing = false; // and a cancelled close stays open
+    }
     this.cdp
-      .send("Page.handleJavaScriptDialog", { accept, promptText }, page.sessionId)
+      .send("Page.handleJavaScriptDialog", { accept, promptText }, page.dialog?.sessionId ?? page.sessionId)
       .catch((e) => this.opts.log(`dialog: ${e}`));
     page.dialog = null;
     this.prompt = null;
@@ -1349,7 +1499,7 @@ export class App {
       location: ev.location,
     };
     const sid = page.sessionId;
-    const send = (params: object) => this.cdp.send("Input.dispatchKeyEvent", params, sid).catch(() => {});
+    const send = (params: object) => (this.inputTail = this.cdp.send("Input.dispatchKeyEvent", params, sid).catch(() => {}));
     if (ev.event === "release") {
       void send({ type: "keyUp", ...base });
       return;
@@ -1364,18 +1514,61 @@ export class App {
       commands: editCommands(ev),
     });
     if (ev.legacy) void send({ type: "keyUp", ...base });
-    else this.pageKeysDown.add(ev.code || ev.key);
+    else this.pageKeysDown.set(ev.code || ev.key, page);
   }
+
+  /**
+   * Pastes like a real paste: the text goes on the page's clipboard, then
+   * Ctrl+V runs the paste command, so `paste` events fire. Input waits until
+   * it's done so later keys can't overtake it.
+   */
+  private async pastePage(page: Page, text: string): Promise<void> {
+    const hold = `paste-${++this.pasteSeq}`;
+    this.holdInput(hold);
+    try {
+      await this.inputTail;
+      const sid = page.sessionId;
+      const r = await this.cdp.send(
+        "Runtime.evaluate",
+        {
+          expression: `navigator.clipboard.writeText(${JSON.stringify(text)}).then(() => true, () => false)`,
+          awaitPromise: true,
+          userGesture: true,
+          returnByValue: true,
+        },
+        sid,
+      );
+      if (r?.result?.value === true) {
+        const key = { key: "v", code: "KeyV", windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 };
+        await this.cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...key, commands: ["paste"] }, sid);
+        await this.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...key }, sid);
+      } else {
+        await this.cdp.send("Input.insertText", { text }, sid);
+      }
+    } catch {
+      await this.cdp.send("Input.insertText", { text }, page.sessionId).catch(() => {});
+    } finally {
+      this.releaseInput(hold);
+    }
+  }
+
+  private pasteSeq = 0;
+  /** The most recent input dispatch; resolves once the page has handled it. */
+  private inputTail: Promise<unknown> = Promise.resolve();
 
   private async copySelection(page: Page): Promise<void> {
     try {
       const { result } = await this.cdp.send(
         "Runtime.evaluate",
         {
-          expression: `(() => { const a = document.activeElement;
+          // Follows focus into same-origin iframes.
+          expression: `(() => { let d = document, a = d.activeElement;
+            while (a && a.tagName === "IFRAME") {
+              try { if (!a.contentDocument) break; d = a.contentDocument; a = d.activeElement; } catch { break; }
+            }
             if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA") && typeof a.selectionStart === "number")
               return a.value.slice(a.selectionStart, a.selectionEnd);
-            return String(getSelection()); })()`,
+            return String(d.getSelection()); })()`,
           returnByValue: true,
         },
         page.sessionId,
@@ -1607,6 +1800,7 @@ export class App {
     if (name === "none" || !name) return;
     if (ev.action === "press") {
       const now = Date.now();
+      if (ev.button === 1) this.lastMiddlePress = now;
       const lc = this.lastClick;
       const near = Math.abs(lc.x - px) < this.cellW && Math.abs(lc.y - py) < this.cellH;
       lc.count = now - lc.time < 450 && near && lc.button === ev.button ? Math.min(3, lc.count + 1) : 1;
@@ -1680,6 +1874,25 @@ function hostOf(url: string): string {
     return u.host || (u.protocol === "about:" ? url : "");
   } catch {
     return "";
+  }
+}
+
+/** A download's suggested name, made safe to use as a file name. */
+export function safeFileName(name: string): string {
+  const clean = basename(name.replace(/\\/g, "/"))
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .replace(/^\.+/, "")
+    .trim();
+  return clean || "download";
+}
+
+/** `name` in `dir`, or "name (1).ext", "name (2).ext", … if taken. */
+export function freeName(dir: string, name: string): string {
+  const ext = extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  for (let i = 0; ; i++) {
+    const candidate = join(dir, i === 0 ? name : `${stem} (${i})${ext}`);
+    if (!existsSync(candidate)) return candidate;
   }
 }
 

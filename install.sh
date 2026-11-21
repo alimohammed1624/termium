@@ -10,6 +10,7 @@
 # Options (environment variables):
 #   TERMIUM_INSTALL_DIR    install directory (default: $HOME/.local/bin)
 #   TERMIUM_VERSION        release tag to install, e.g. v0.2.0 (default: latest)
+#   TERMIUM_TARGET         force an archive, e.g. x86_64-apple-darwin (default: detected)
 #   TERMIUM_DOWNLOAD_BASE  fetch the assets from here instead of GitHub
 #                          (any URL curl/wget accept, e.g. file:///path/dist;
 #                          used by the release workflow's install test)
@@ -67,6 +68,17 @@ detect_libc() {
 
 # Prints the release target triple for this machine, or exits with an error.
 detect_target() {
+    if [ -n "${TERMIUM_TARGET:-}" ]; then
+        case "$TERMIUM_TARGET" in
+            x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | \
+                x86_64-unknown-linux-musl | aarch64-unknown-linux-musl | \
+                x86_64-apple-darwin | aarch64-apple-darwin)
+                echo "$TERMIUM_TARGET"
+                return
+                ;;
+            *) err "unknown TERMIUM_TARGET '$TERMIUM_TARGET'" ;;
+        esac
+    fi
     _os=$(uname -s 2>/dev/null || echo unknown)
     _arch=$(uname -m 2>/dev/null || echo unknown)
 

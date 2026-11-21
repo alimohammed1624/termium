@@ -183,18 +183,23 @@ jobs:
   # (file:// download base) and run it, so asset names, layout and
   # SHA256SUMS are checked against the real installer. The alpine entry runs
   # install.sh in an Alpine container to cover the musl archives.
+  # Every archive is installed and run before anything is published:
+  # glibc x86_64/aarch64 and macOS arm64 natively, macOS x86_64 under
+  # Rosetta, and both musl builds in Alpine containers.
   install-test:
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
-        alpine: [false]
         include:
-          - os: ubuntu-latest
-            alpine: true
+          - { os: ubuntu-latest, mode: native }
+          - { os: ubuntu-24.04-arm, mode: native }
+          - { os: macos-latest, mode: native }
+          - { os: macos-latest, mode: rosetta }
+          - { os: ubuntu-latest, mode: alpine }
+          - { os: ubuntu-24.04-arm, mode: alpine }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -202,13 +207,23 @@ jobs:
           name: dist
           path: out
       - name: install.sh
-        if: ${{ !matrix.alpine }}
+        if: ${{ matrix.mode == 'native' }}
         shell: bash
         run: |
           TERMIUM_DOWNLOAD_BASE="file://$PWD/out/dist" TERMIUM_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
           "$RUNNER_TEMP/bin/termium" --version
+      - name: install.sh (macOS x86_64 under Rosetta)
+        if: ${{ matrix.mode == 'rosetta' }}
+        shell: bash
+        run: |
+          /usr/sbin/softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1 || true
+          # install.sh prefers arm64 on Apple silicon; force the Intel archive.
+          TERMIUM_TARGET=x86_64-apple-darwin TERMIUM_DOWNLOAD_BASE="file://$PWD/out/dist" \
+            TERMIUM_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          file "$RUNNER_TEMP/bin/termium" | grep -q x86_64
+          arch -x86_64 "$RUNNER_TEMP/bin/termium" --version
       - name: install.sh (Alpine, musl)
-        if: ${{ matrix.alpine }}
+        if: ${{ matrix.mode == 'alpine' }}
         shell: bash
         run: |
           docker run --rm -v "$PWD:/w:ro" alpine:3 sh -euc '

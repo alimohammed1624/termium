@@ -11,6 +11,7 @@ from drive import Term
 OUT = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="termium-e2e-")
 os.makedirs(OUT, exist_ok=True)
 profile = tempfile.mkdtemp(prefix="termium-e2e-profile-")
+dl_dir = tempfile.mkdtemp(prefix="termium-e2e-dl-")
 
 # Serve the fixtures from a separate process so the driver's busy reader
 # thread can't starve the server.
@@ -41,6 +42,19 @@ def center(id_, skip=("popup=1", "right=1")):
             return p["value"]
     return None
 
+def top_left(id_):
+    for p in pages(f"(() => {{ const e = document.getElementById('{id_}'); if (!e) return null; const r = e.getBoundingClientRect(); return [r.x, r.y]; }})()"):
+        if p["value"] and not any(k in p["url"] for k in ("popup=1", "right=1")):
+            return p["value"]
+    return None
+
+def blue_pixels():
+    """Pixels of the select menu's highlight colour in the newest frame."""
+    img = t.latest_image()
+    if img is None:
+        return 0
+    return sum(1 for (r, g, b) in img.get_flattened_data() if abs(r - 26) < 25 and abs(g - 115) < 30 and abs(b - 232) < 30)
+
 def click_el(id_, x0=220, y0=40):
     c = center(id_)
     t.click(x0 + int(c[0]), y0 + int(c[1]))
@@ -51,7 +65,8 @@ def state(match="page.html"):
             return p["value"]
     return None
 
-t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "--profile", profile], cols=160, rows=45, cwd=ROOT)
+t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "--profile", profile], cols=160, rows=45, cwd=ROOT,
+         env={"TERMIUM_TEST_DEVTOOLS_PORT": "1", "TERMIUM_DOWNLOAD_DIR": dl_dir})
 try:
     # 1. starts with the URL bar focused; type a URL
     check("starts with the URL bar focused", t.wait_for(lambda: not t.screen.cursor.hidden and t.screen.cursor.y == 1, 20))
@@ -74,6 +89,12 @@ try:
     check("ctrl+a selects all in input", (state() or {}).get("inp") == "x", state() and state().get("inp"))
     t.key("backspace"); t.paste("pasted text"); time.sleep(0.4)
     check("bracketed paste inserts text", (state() or {}).get("inp") == "pasted text", state() and state().get("inp"))
+    check("paste fires the page's paste event", (state() or {}).get("pastes", 0) >= 1, state() and state().get("pastes"))
+    t.key("ctrl+a"); mark = len(t.raw); t.key("ctrl+x"); time.sleep(0.6)
+    import base64
+    check("ctrl+x cuts and copies to the clipboard", (state() or {}).get("inp") == "" and
+          b"\x1b]52;c;" + base64.b64encode(b"pasted text") in bytes(t.raw[mark:]), state() and state().get("inp"))
+    t.paste("pasted text"); time.sleep(0.4)
 
     # 3. button clicks, double click
     btn = pages("(() => { const r = document.getElementById('btn').getBoundingClientRect(); return [r.x + r.width/2, r.y + r.height/2]; })()")[0]["value"]
@@ -128,6 +149,27 @@ try:
     t.type(os.path.join(ROOT, "tests", "fixtures", "page.html")); t.key("enter"); time.sleep(0.6)
     check("file attached to input", (state() or {}).get("file") == "page.html", state() and state().get("file"))
 
+    # 6e. cross-site iframe: user agent, select menu and file input work inside it
+    check("cross-site iframe loaded", t.wait_for(lambda: ((state() or {}).get("frame") or {}).get("ua"), 10))
+    fr = (state() or {}).get("frame") or {}
+    check("iframe user agent hides HeadlessChrome", "HeadlessChrome" not in fr.get("ua", "x") and "HeadlessChrome" not in fr.get("brands", ""), fr.get("ua"))
+    xf = top_left("xf")
+    before_blue = blue_pixels()
+    t.click(220 + int(xf[0] + 1 + fr["selRect"][0]), 40 + int(xf[1] + 1 + fr["selRect"][1])); time.sleep(0.8)
+    check("select menu opens inside a cross-site iframe", blue_pixels() > before_blue + 200, (before_blue, blue_pixels()))
+    t.shot(f"{OUT}/02c-iframe-select.png")
+    t.key("down"); t.key("enter"); time.sleep(0.6)
+    check("iframe select picks a value", ((state() or {}).get("frame") or {}).get("sel") == "two", (state() or {}).get("frame"))
+    t.click(220 + int(xf[0] + 1 + fr["fileRect"][0]), 40 + int(xf[1] + 1 + fr["fileRect"][1]))
+    check("iframe file input asks for a path", t.wait_text("Upload file:", 5), t.line(2))
+    t.key("ctrl+a"); t.key("ctrl+k"); t.type(os.path.join(ROOT, "tests", "fixtures", "dl.txt")); t.key("enter"); time.sleep(0.8)
+    check("iframe file attached", ((state() or {}).get("frame") or {}).get("file") == "dl.txt", (state() or {}).get("frame"))
+
+    # 6f. downloads never overwrite
+    click_el("dl"); time.sleep(1.5); click_el("dl"); time.sleep(1.5)
+    got = sorted(os.listdir(dl_dir))
+    check("second download gets a new name", got == ["dl (1).txt", "dl.txt"], got)
+
     # 7. target=_blank opens a new tab
     pop = pages("(() => { const r = document.getElementById('pop').getBoundingClientRect(); return [r.x + 5, r.y + r.height/2]; })()")[0]["value"]
     t.click(220 + int(pop[0]), 40 + int(pop[1]))
@@ -149,6 +191,30 @@ try:
     t.key("enter"); time.sleep(0.5)
     h = pages("document.getElementById('h') && document.getElementById('h').textContent")
     check("restored dialog can be answered", any(p["value"] == "confirm: true" for p in h), h)
+
+    # 8b2. a dialog in a background tab doesn't steal focus or the address bar
+    click_el("later"); time.sleep(0.2)
+    t.key("ctrl+b"); t.key("2"); time.sleep(0.4)
+    t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type("half typed"); time.sleep(2.5)
+    check("background dialog leaves typing alone", "half typed" in t.line(2), t.line(2))
+    check("background dialog is announced", "waiting" in t.line(2) or "!" in t.line(1), (t.line(1), t.line(2)))
+    t.key("escape"); t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
+    check("dialog shown on return", "delayed alert" in t.line(2), t.line(2))
+    t.key("enter"); time.sleep(0.4)
+
+    # 8b3. middle-clicked link opens in the background; a guarded page asks before closing
+    tabs_before = t.line(1).count("│")
+    c = center("pop"); t.click(220 + int(c[0]), 40 + int(c[1]), button=1); time.sleep(2)
+    check("middle click opens a background tab", t.line(1).count("│") == tabs_before + 1 and "popup" not in t.line(2), (t.line(1), t.line(2)))
+    t.key("ctrl+b"); t.key("2"); time.sleep(1.0)
+    click_el("guard", ); time.sleep(0.2); t.type("x"); time.sleep(0.3)
+    t.key("ctrl+w")
+    check("ctrl+w on an edited page asks to leave", t.wait_text("Leave this page?", 5), t.line(2))
+    t.key("escape"); time.sleep(0.8)
+    check("staying keeps the page", t.line(1).count("│") == tabs_before + 1, t.line(1))
+    t.key("ctrl+w"); t.wait_text("Leave this page?", 5); t.key("enter"); time.sleep(1.0)
+    check("leaving closes it", t.line(1).count("│") == tabs_before, t.line(1))
+    t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
 
     # 8c. Ctrl+T then immediate paste lands in the new tab's address bar, not the old page
     click_el("inp"); time.sleep(0.2)
@@ -179,8 +245,13 @@ try:
     t.shot(f"{OUT}/04-split.png")
     widths = [p["value"]["w"] for p in pages() if p["value"] and "popup" not in p["url"]]
     check("split halves the viewport", len(widths) == 2 and all(600 < w < 700 for w in widths), widths)
+    t.write("\x1b[113;1;113u"); time.sleep(0.2)          # hold q in the right pane...
     t.key("ctrl+b"); t.key("h"); time.sleep(0.3)
     check("prefix+h focuses left pane", "right=1" not in t.line(2), t.line(2))
+    t.write("\x1b[113;1:3u"); time.sleep(0.5)             # ...release it in the left one
+    logs = {p["url"]: p["value"] for p in pages("document.getElementById('log') ? document.getElementById('log').textContent : ''")}
+    right_log = next((v for u, v in logs.items() if "right=1" in u), "")
+    check("keyup goes to the pane that got the keydown", right_log.rstrip().endswith("up q"), right_log[-60:])
     t.key("ctrl+b"); t.key("z"); time.sleep(0.8)
     zw = [p["value"]["w"] for p in pages() if p["value"] and "right" not in p["url"] and "popup" not in p["url"]]
     check("zoom gives full width", zw == [1380], zw)
@@ -228,13 +299,39 @@ try:
     check("survivor fills the pane area after closes", len(placed) == 1 and placed[0][2] == full_w, placed)
     t.shot(f"{OUT}/09-after-close.png")
 
-    # 15. Ctrl+Q quits even while the address bar is open
+    # 15. a real URL with a #termium-... fragment is shown as-is
+    t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/page.html#termium-heading"); t.key("enter")
+    check("URL with #termium- fragment shown", t.wait_for(lambda: "#termium-heading" in t.line(2), 10), t.line(2))
+
+    # 15b. select menu still shows under a strict Content-Security-Policy (style-src 'none')
+    t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/csp.html"); t.key("enter")
+    t.wait_for(lambda: any("csp.html" in p["url"] and p["value"] for p in pages()), 10); time.sleep(1)
+    cs = next(p["value"] for p in pages("(() => { const r = document.getElementById('csel').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()") if "csp.html" in p["url"])
+    before_blue = blue_pixels()
+    t.click(220 + int(cs[0]), 40 + int(cs[1])); time.sleep(0.8)
+    check("select menu shows under style-src 'none'", blue_pixels() > before_blue + 200, (before_blue, blue_pixels()))
+    t.key("down"); t.key("enter"); time.sleep(0.5)
+    v = next((p["value"] for p in pages("document.getElementById('csel') && document.getElementById('csel').value") if "csp.html" in p["url"]), None)
+    check("CSP page select picks a value", v == "Green", v)
+
+    # 16. Ctrl+B q from the address bar quits, and nothing is drawn after the terminal is restored
     t.key("ctrl+l"); time.sleep(0.3)
+    t.key("ctrl+b"); t.key("q")
+    status, end = None, time.time() + 10
+    while time.time() < end and status is None:
+        pid, st = os.waitpid(t.pid, os.WNOHANG)
+        if pid:
+            status = os.waitstatus_to_exitcode(st)
+        time.sleep(0.1)
+    t.exit_code = status
+    tail = bytes(t.raw).rsplit(b"\x1b[?1049l", 1)[-1]
+    check("nothing drawn after leaving the alternate screen", b"\x1b[" not in tail.replace(b"\x1b[0m", b""), tail[:120])
 finally:
     t.close()
     srv.terminate()
-    check("exits cleanly with ctrl+q", getattr(t, "exit_code", 1) == 0, getattr(t, "exit_code", None))
+    check("exits with status 0", getattr(t, "exit_code", 1) == 0, getattr(t, "exit_code", None))
     shutil.rmtree(profile, ignore_errors=True)
+    shutil.rmtree(dl_dir, ignore_errors=True)
 
 print(f"\nscreenshots: {OUT}")
 print("FAILED: " + ", ".join(failures) if failures else "ALL PASSED")

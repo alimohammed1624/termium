@@ -16,6 +16,11 @@ let entered = false;
  * runs once the terminal has taken the data, which paces screencast frames.
  */
 export function out(data: string, done?: () => void): void {
+  if (!entered) {
+    // After restoreTerminal nothing may reach the shell's screen.
+    done?.();
+    return;
+  }
   if (done) process.stdout.write(data, () => done());
   else process.stdout.write(data);
 }
@@ -59,7 +64,7 @@ export function restoreTerminal(): void {
       `${ESC}_Ga=d,d=A,q=2${ST}` + // delete all images
         `${ESC}[<u` + // pop kitty keyboard flags
         `${ESC}[?2004l${ESC}[?1016l${ESC}[?1006l${ESC}[?1003l` +
-        `${ESC}[0m${ESC}[?25h` +
+        `${ESC}[0m${ESC}[0 q${ESC}[?25h` + // default cursor shape, visible
         `${ESC}[?1049l`,
     );
   } catch {}

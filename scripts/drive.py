@@ -383,7 +383,10 @@ class Term:
 
     def close(self):
         try:
-            self.key("ctrl+q")
+            try:
+                self.key("ctrl+q")
+            except OSError:
+                pass  # already gone
             end = time.time() + 6
             while time.time() < end:
                 pid, _ = os.waitpid(self.pid, os.WNOHANG)

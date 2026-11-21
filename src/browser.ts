@@ -6,12 +6,12 @@ import {
   appendFileSync,
   closeSync,
   constants,
-  existsSync,
   openSync,
   readFileSync,
-  readdirSync,
   readlinkSync,
+  rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -70,28 +70,70 @@ export function profileOwner(profileDir: string): number | null {
   return alive(pid) ? pid : null;
 }
 
+// ------------------------------------------------------------- ownership
+//
+// termium records which of its processes owns the browser on a profile in
+// <profile>/termium.owner. A termium killed outright (SIGKILL) can't stop
+// its browser, which then keeps the profile locked; on the next start the
+// record tells us, without guessing from command lines, that the browser is
+// ours and its termium is gone.
+
+interface Owner {
+  termium: number;
+  termiumStart: string;
+  browsers: number[];
+}
+
+const OWNER_FILE = "termium.owner";
+
+/** When a process started (ps lstart), to tell a live pid from a reused one. */
+function startTime(pid: number): string {
+  try {
+    const r = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+    return r.exitCode === 0 ? r.stdout.toString().trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function commandOf(pid: number): string {
+  try {
+    const r = Bun.spawnSync(["ps", "-ww", "-o", "command=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+    return r.exitCode === 0 ? r.stdout.toString().trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+export function writeOwner(profileDir: string, browserPids: number[]): void {
+  const owner: Owner = { termium: process.pid, termiumStart: startTime(process.pid), browsers: browserPids };
+  try {
+    writeFileSync(join(profileDir, OWNER_FILE), JSON.stringify(owner));
+  } catch {}
+}
+
+export function clearOwner(profileDir: string): void {
+  try {
+    const owner = JSON.parse(readFileSync(join(profileDir, OWNER_FILE), "utf8")) as Owner;
+    if (owner.termium === process.pid) rmSync(join(profileDir, OWNER_FILE), { force: true });
+  } catch {}
+}
+
 /**
- * Stops headless browsers left behind on this profile by a termium that was
- * killed outright (SIGKILL gives it no chance to clean up). Only processes
- * started the way termium starts them, on this exact profile, with no live
- * termium among their ancestors, qualify. Linux only (it reads /proc).
+ * Stops a browser left on this profile by a termium that is no longer
+ * running. Returns how many processes it stopped. Browsers termium didn't
+ * record, and browsers whose termium is still alive, are never touched.
  */
 export async function reapOrphans(profileDir: string): Promise<number> {
-  if (process.platform !== "linux") return 0;
-  const want = `--user-data-dir=${profileDir}`;
-  const victims: number[] = [];
-  for (const entry of readdirSync("/proc")) {
-    if (!/^\d+$/.test(entry)) continue;
-    const args = cmdline(Number(entry));
-    if (!args) continue;
-    // Chromium rewrites its process title into one space-joined string, so
-    // match on the joined command line rather than on separate arguments.
-    const line = ` ${args.join(" ").trim()} `;
-    const has = (flag: string) => line.includes(` ${flag} `);
-    if (!has(want) || !has("--headless=new") || !has("--remote-debugging-port=0")) continue;
-    if (line.includes(" --type=")) continue; // a child of the browser, not the browser
-    if (!ownedByTermium(Number(entry))) victims.push(Number(entry));
+  let owner: Owner;
+  try {
+    owner = JSON.parse(readFileSync(join(profileDir, OWNER_FILE), "utf8")) as Owner;
+  } catch {
+    return 0;
   }
+  if (alive(owner.termium) && startTime(owner.termium) === owner.termiumStart) return 0;
+  const flag = `--user-data-dir=${profileDir}`;
+  const victims = (owner.browsers ?? []).filter((pid) => alive(pid) && commandOf(pid).includes(flag));
   for (const pid of victims) {
     try {
       process.kill(pid, "SIGTERM");
@@ -104,36 +146,8 @@ export async function reapOrphans(profileDir: string): Promise<number> {
       process.kill(pid, "SIGKILL");
     } catch {}
   }
+  rmSync(join(profileDir, OWNER_FILE), { force: true });
   return victims.length;
-}
-
-function cmdline(pid: number): string[] | null {
-  try {
-    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
-  } catch {
-    return null;
-  }
-}
-
-function parentOf(pid: number): number {
-  try {
-    // The command name can contain spaces and parentheses; fields follow the last ")".
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
-  } catch {
-    return 0;
-  }
-}
-
-/** True if some ancestor of `pid` is a running termium (the binary, or bun running termium's main.ts). */
-function ownedByTermium(pid: number): boolean {
-  for (let p = parentOf(pid), hops = 0; p > 1 && hops < 32; p = parentOf(p), hops++) {
-    const args = cmdline(p);
-    if (!args) return false;
-    const exe = args[0]?.split("/").pop() ?? "";
-    if (exe === "termium" || args.some((a) => /(^|\/)termium\/src\/main\.ts$/.test(a) || a === "src/main.ts")) return true;
-  }
-  return false;
 }
 
 /** Running, not merely an exited process its parent hasn't collected yet. */
@@ -143,30 +157,36 @@ function alive(pid: number): boolean {
   } catch {
     return false;
   }
+  if (process.platform !== "linux") return true;
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
   } catch {
-    return process.platform !== "linux";
+    return false;
   }
 }
 
+// ------------------------------------------------------------- launching
+
 export interface LaunchedBrowser {
-  proc: Subprocess<"ignore", "ignore", number>;
-  wsUrl: string;
+  proc: Subprocess;
+  toBrowser: number;
+  fromBrowser: number;
+  /** The browser's main process (the launcher may be a wrapper script). */
+  browserPid: number;
 }
 
 /**
- * Starts the browser headless and waits for its DevTools endpoint. The
- * browser's own output goes straight to `logPath`: piping it through our
- * event loop could fill the pipe and freeze the browser while we're busy
- * writing frames to the terminal.
+ * Starts the browser headless with DevTools on a private pipe. Its own
+ * output goes straight to `logPath`: piping it through our event loop could
+ * fill the pipe and freeze the browser while we're busy writing frames.
+ * `tmpDir`, if given, becomes the browser's TMPDIR (removed by the caller).
  */
 export async function launchBrowser(
   bin: string,
   profileDir: string,
   logPath: string,
-  tmpDir: string,
+  tmpDir: string | null,
   timeoutMs = 30_000,
 ): Promise<LaunchedBrowser> {
   const owner = profileOwner(profileDir);
@@ -179,61 +199,56 @@ export async function launchBrowser(
   const args = [
     bin,
     "--headless=new",
-    "--remote-debugging-port=0",
+    "--remote-debugging-pipe",
     `--user-data-dir=${profileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-session-crashed-bubble",
     // Don't advertise automation (navigator.webdriver) to every page.
     "--disable-blink-features=AutomationControlled",
-    "about:blank",
   ];
-  // DevToolsActivePort may be stale from an earlier run; wait for a new one
-  // rather than deleting it.
-  const portFile = join(profileDir, "DevToolsActivePort");
-  const stale = readPortFile(portFile);
+  // Tests inspect pages over a DevTools port; termium itself never uses one.
+  if (process.env.TERMIUM_TEST_DEVTOOLS_PORT) args.push("--remote-debugging-port=0");
+  args.push("about:blank");
+
   appendFileSync(logPath, `\n--- ${new Date().toISOString()} ${args.join(" ")}\n`);
+  const logStart = statSync(logPath).size;
   const logFd = openSync(logPath, "a");
+  const env = { ...process.env };
+  if (tmpDir) env.TMPDIR = tmpDir;
   const proc = Bun.spawn(args, {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: logFd,
-    env: { ...process.env, TMPDIR: tmpDir },
+    stdio: ["ignore", "ignore", logFd, "pipe", "pipe"],
+    env,
   });
   closeSync(logFd);
+  const [, , , toBrowser, fromBrowser] = proc.stdio as unknown as number[];
 
+  // Ready once the browser holds the profile lock (Chromium takes it early
+  // in startup); the pipe itself then answers once the browser reads it.
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null) {
-      const tail = readTail(logPath);
+      const tail = readTail(logPath, logStart);
       const hint = /ProcessSingleton|profile.*in use|SingletonLock/i.test(tail)
         ? " The profile seems to be in use; pass --profile <dir> or --incognito."
-        : "";
+        : /Socket path too long/.test(tail)
+          ? " Its temp directory path is too long; set a shorter TMPDIR."
+          : "";
       throw new Error(`Browser exited with code ${proc.exitCode} before it was ready.${hint}\n${tail}`);
     }
-    const now = readPortFile(portFile);
-    if (now && (!stale || now.text !== stale.text || now.mtime > stale.mtime)) {
-      const [port, path] = now.text.split("\n");
-      if (port && path) return { proc, wsUrl: `ws://127.0.0.1:${port.trim()}${path.trim()}` };
-    }
+    const pid = profileOwner(profileDir);
+    if (pid !== null) return { proc, toBrowser: toBrowser!, fromBrowser: fromBrowser!, browserPid: pid };
     await Bun.sleep(25);
   }
   proc.kill(9);
-  throw new Error(`Browser did not start within ${timeoutMs / 1000}s. See ${logPath}`);
+  const tail = readTail(logPath, logStart);
+  throw new Error(`Browser did not start within ${timeoutMs / 1000}s. See ${logPath}\n${tail}`);
 }
 
-function readPortFile(path: string): { text: string; mtime: number } | null {
+/** What the browser logged since `from` (this run only), last 1500 characters. */
+function readTail(path: string, from: number): string {
   try {
-    if (!existsSync(path)) return null;
-    return { text: readFileSync(path, "utf8"), mtime: statSync(path).mtimeMs };
-  } catch {
-    return null;
-  }
-}
-
-function readTail(path: string): string {
-  try {
-    return readFileSync(path, "utf8").trim().slice(-1500);
+    return readFileSync(path).subarray(from).toString("utf8").trim().slice(-1500);
   } catch {
     return "";
   }

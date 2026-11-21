@@ -1,5 +1,8 @@
-// Minimal Chrome DevTools Protocol client over a single browser-level
-// WebSocket, using flattened sessions for per-tab traffic.
+// Minimal Chrome DevTools Protocol client over one browser-level
+// connection (the --remote-debugging-pipe file descriptors, or a WebSocket),
+// using flattened sessions for per-tab traffic.
+
+import { writeSync } from "node:fs";
 
 type Handler = (params: any, sessionId?: string) => void;
 
@@ -18,16 +21,78 @@ export class CDP {
   /** Called with every message (frames abbreviated) when set; for TERMIUM_DEBUG. */
   trace?: (dir: "->" | "<-", msg: string) => void;
 
-  private constructor(private ws: WebSocket) {
-    ws.addEventListener("message", (ev) => this.onMessage(String(ev.data)));
-    ws.addEventListener("close", () => {
-      this.closed = true;
-      for (const p of this.pending.values()) p.reject(new Error("CDP connection closed"));
-      this.pending.clear();
-      this.onClose?.();
-    });
+  private constructor(
+    private write: (text: string) => void,
+    private hangup: () => void,
+  ) {}
+
+  private gone(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const p of this.pending.values()) p.reject(new Error("CDP connection closed"));
+    this.pending.clear();
+    this.onClose?.();
   }
 
+  /**
+   * Speaks CDP over Chromium's --remote-debugging-pipe: NUL-terminated JSON
+   * written to `toBrowser`, read from `fromBrowser`. Nothing listens on a
+   * port, so no other local process can drive the browser.
+   */
+  static fromPipe(toBrowser: number, fromBrowser: number): CDP {
+    let queue: Buffer[] = [];
+    let flushing = false;
+    const flush = () => {
+      // The pipe is non-blocking: write what fits and retry the rest shortly.
+      while (queue.length) {
+        try {
+          const head = queue[0]!;
+          const n = writeSync(toBrowser, head);
+          if (n < head.length) queue[0] = head.subarray(n);
+          else queue.shift();
+        } catch (err: any) {
+          if (err?.code === "EAGAIN") {
+            if (!flushing) {
+              flushing = true;
+              setTimeout(() => {
+                flushing = false;
+                flush();
+              }, 2);
+            }
+            return;
+          }
+          queue = [];
+          cdp.gone();
+          return;
+        }
+      }
+    };
+    const cdp = new CDP(
+      (text) => {
+        queue.push(Buffer.from(text + "\0", "utf8"));
+        if (!flushing) flush();
+      },
+      () => cdp.gone(),
+    );
+    (async () => {
+      const decoder = new TextDecoder();
+      let buf = "";
+      for await (const chunk of Bun.file(fromBrowser).stream()) {
+        buf += decoder.decode(chunk, { stream: true });
+        let i: number;
+        while ((i = buf.indexOf("\0")) >= 0) {
+          const msg = buf.slice(0, i);
+          buf = buf.slice(i + 1);
+          cdp.onMessage(msg);
+        }
+      }
+    })()
+      .catch(() => {})
+      .finally(() => cdp.gone());
+    return cdp;
+  }
+
+  /** Connects to a DevTools WebSocket (used by tests and tools, not by termium itself). */
   static connect(url: string, timeoutMs = 10_000): Promise<CDP> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
@@ -39,7 +104,13 @@ export class CDP {
         "open",
         () => {
           clearTimeout(timer);
-          resolve(new CDP(ws));
+          const cdp = new CDP(
+            (text) => ws.send(text),
+            () => ws.close(),
+          );
+          ws.addEventListener("message", (ev) => cdp.onMessage(String(ev.data)));
+          ws.addEventListener("close", () => cdp.gone());
+          resolve(cdp);
         },
         { once: true },
       );
@@ -63,7 +134,7 @@ export class CDP {
       this.pending.set(id, { resolve, reject, method });
       const text = JSON.stringify(msg);
       this.trace?.("->", text);
-      this.ws.send(text);
+      this.write(text);
     });
   }
 
@@ -75,7 +146,7 @@ export class CDP {
 
   close(): void {
     try {
-      this.ws.close();
+      this.hangup();
     } catch {}
   }
 

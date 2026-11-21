@@ -27,5 +27,9 @@ Initial release.
   paints native ones).
 - Presents as regular Chrome (no "HeadlessChrome" or `navigator.webdriver`),
   so sites don't serve bot checks.
-- Persistent profile or `--incognito`; leftover browsers from a killed
-  termium are stopped on the next start.
+- Persistent profile or `--incognito`; leftover browsers and incognito
+  profiles from a killed termium are cleaned up on the next start, and a
+  second termium on a profile in use refuses without disturbing the first.
+- DevTools over a private pipe rather than a TCP port.
+- Closing a pane runs the page's beforeunload check; downloads never
+  replace existing files; paste fires the page's paste event.

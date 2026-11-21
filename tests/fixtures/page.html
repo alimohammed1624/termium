@@ -23,15 +23,26 @@
 <span id="selout"></span>
 <input id="file" type="file">
 <a id="next" href="/page.html?step=2">Next page</a>
+<a id="dl" href="/dl.txt" download="dl.txt">Download</a>
+<button id="later" onclick="setTimeout(() => alert('delayed alert'), 1500)">Alert later</button>
+<input id="guard" placeholder="edit to guard" oninput="window.onbeforeunload = (e) => { e.preventDefault(); return ''; }">
+<br>
+<iframe id="xf" width="420" height="90" style="border:1px solid #999"></iframe>
 <div id="log"></div>
 <div class="tall"></div>
 <script>
- var clicks = 0;
+ var clicks = 0, pastes = 0;
+ addEventListener('paste', () => pastes++, true);
+ window.frameState = null;
+ addEventListener('message', (e) => { window.frameState = e.data; });
+ // A cross-site iframe: the page is served from 127.0.0.1, the frame from localhost.
+ if (location.hostname === '127.0.0.1')
+   document.getElementById('xf').src = 'http://localhost:' + location.port + '/frame.html';
  const log = (s) => { const l = document.getElementById('log'); l.textContent += s + "\n"; l.scrollTop = 1e9; };
  addEventListener('keydown', e => log(`down ${e.key} ${e.code} ${e.ctrlKey?'C':''}${e.shiftKey?'S':''}${e.altKey?'A':''}`));
  addEventListener('keyup', e => log(`up ${e.key}`));
  addEventListener('dblclick', e => log(`dblclick`));
  addEventListener('scroll', () => { document.title = 'scrolled ' + Math.round(scrollY); });
- window.termiumState = () => ({ sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
+ window.termiumState = () => ({ pastes, frame: window.frameState, sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
 </script>
 </body></html>

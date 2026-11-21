@@ -1,7 +1,9 @@
 // Headless Chromium never paints native <select> popups, so a page's
 // dropdowns would open invisibly. This script (injected into every page in
 // an isolated world) replaces the popup with an in-page menu that the
-// screencast does capture, driven by the same mouse and keys.
+// screencast does capture, driven by the same mouse and keys. Styles are
+// set through the CSSOM (element.style), which a page's Content-Security-
+// Policy can't block, unlike a <style> element.
 
 export const SELECT_POPUP = String.raw`(() => {
   if (window.__termiumSelectPopup) return;
@@ -32,33 +34,42 @@ export const SELECT_POPUP = String.raw`(() => {
     const maxH = Math.max(itemH * 3, Math.min(itemH * 12 + 8, Math.max(below, above) - 4));
     host = document.createElement("termium-select");
     const root = host.attachShadow({ mode: "closed" });
-    const style = document.createElement("style");
-    style.textContent = ":host{all:initial}" +
-      ".m{position:fixed;z-index:2147483647;box-sizing:border-box;background:#fff;color:#111;border:1px solid #888;" +
-      "box-shadow:0 4px 14px rgba(0,0,0,.35);font:14px system-ui,sans-serif;overflow-y:auto;padding:4px 0;border-radius:4px}" +
-      ".o,.g{padding:0 10px;height:" + itemH + "px;line-height:" + itemH + "px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
-      ".o.a{background:#1a73e8;color:#fff}.o.d{color:#999}.g{font-weight:600;color:#555}.o.i{padding-left:22px}";
+    const css = (el, props) => { for (const k in props) el.style.setProperty(k, props[k], "important"); };
     const menu = document.createElement("div");
-    menu.className = "m";
+    css(menu, {
+      position: "fixed", "z-index": "2147483647", "box-sizing": "border-box", background: "#fff", color: "#111",
+      border: "1px solid #888", "box-shadow": "0 4px 14px rgba(0,0,0,.35)", font: "14px system-ui, sans-serif",
+      "overflow-y": "auto", padding: "4px 0", "border-radius": "4px",
+    });
+    const rowCss = (el, extra) => css(el, Object.assign({
+      padding: "0 10px", height: itemH + "px", "line-height": itemH + "px", "white-space": "nowrap",
+      overflow: "hidden", "text-overflow": "ellipsis", background: "transparent", color: "#111",
+    }, extra));
     const rows = [];
     let active = -1, lastGroup = null;
-    const setActive = (i) => {
-      if (rows[active]) rows[active].classList.remove("a");
-      active = i;
-      if (rows[i]) { rows[i].classList.add("a"); rows[i].scrollIntoView({ block: "nearest" }); }
+    const disabled = [];
+    const paint = (i, on) => {
+      if (!rows[i]) return;
+      css(rows[i], on ? { background: "#1a73e8", color: "#fff" } : { background: "transparent", color: disabled[i] ? "#999" : "#111" });
     };
-    const enabled = (i) => !!rows[i] && !rows[i].classList.contains("d");
+    const setActive = (i) => {
+      paint(active, false);
+      active = i;
+      if (rows[i]) { paint(i, true); rows[i].scrollIntoView({ block: "nearest" }); }
+    };
+    const enabled = (i) => !!rows[i] && !disabled[i];
     opts.forEach((o, i) => {
       const g = o.parentElement && o.parentElement.tagName === "OPTGROUP" ? o.parentElement : null;
       if (g && g !== lastGroup) {
         const gh = document.createElement("div");
-        gh.className = "g";
+        rowCss(gh, { "font-weight": "600", color: "#555" });
         gh.textContent = g.label;
         menu.appendChild(gh);
       }
       lastGroup = g;
       const d = document.createElement("div");
-      d.className = "o" + (g ? " i" : "") + (o.disabled || (g && g.disabled) ? " d" : "");
+      disabled[i] = !!(o.disabled || (g && g.disabled));
+      rowCss(d, { "padding-left": g ? "22px" : "10px", color: disabled[i] ? "#999" : "#111" });
       d.textContent = o.label || o.text || " ";
       d.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); });
       d.addEventListener("mouseup", (e) => { e.preventDefault(); e.stopPropagation(); if (enabled(i)) choose(sel, i); });
@@ -73,7 +84,7 @@ export const SELECT_POPUP = String.raw`(() => {
     menu.style.maxHeight = maxH + "px";
     if (below >= Math.min(maxH, opts.length * itemH + 8) || below >= above) menu.style.top = r.bottom + "px";
     else menu.style.bottom = (vh - r.top) + "px";
-    root.append(style, menu);
+    root.append(menu);
     document.documentElement.appendChild(host);
     setActive(Math.max(0, sel.selectedIndex));
     const step = (dir) => {

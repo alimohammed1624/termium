@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { App } from "./app";
-import { findBrowser, launchBrowser, reapOrphans, type LaunchedBrowser } from "./browser";
+import { clearOwner, findBrowser, launchBrowser, reapOrphans, writeOwner, type LaunchedBrowser } from "./browser";
 import { CDP } from "./cdp";
 import { InputParser, type InputEvent } from "./input";
 import { DEFAULT_SEARCH } from "./text";
@@ -85,29 +85,60 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-/** Removes browser temp dirs left by termiums that died without cleaning up. */
-function sweepBrowserTmp(): void {
-  try {
-    for (const name of readdirSync(tmpdir())) {
-      const m = name.match(/^termium-browser-(\d+)-/);
-      if (!m) continue;
-      try {
-        process.kill(Number(m[1]), 0);
-        continue; // still running
-      } catch {}
-      rmSync(join(tmpdir(), name), { recursive: true, force: true });
-    }
-  } catch {}
+/**
+ * Where per-run temp dirs go. Chromium puts a Unix socket a few levels
+ * below TMPDIR, and socket paths are limited to ~107 bytes, so a long TMPDIR
+ * falls back to /tmp.
+ */
+function tempBase(): string {
+  const base = tmpdir();
+  return base.length <= 40 ? base : "/tmp";
 }
 
-/** XDG download directory (xdg-user-dir), else ~/Downloads. */
+/**
+ * Removes what termiums that died without cleaning up (SIGKILL) left in the
+ * temp dir: browser temp dirs, and incognito profiles along with any
+ * browser still running on them.
+ */
+async function sweepTemp(): Promise<void> {
+  const base = tempBase();
+  let names: string[] = [];
+  try {
+    names = readdirSync(base);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const m = name.match(/^(tmb|termium-incognito)-(\d+)-/);
+    if (!m) continue;
+    try {
+      process.kill(Number(m[2]), 0);
+      continue; // that termium is still running
+    } catch {}
+    const dir = join(base, name);
+    if (m[1] === "termium-incognito") await reapOrphans(dir).catch(() => 0);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** $TERMIUM_DOWNLOAD_DIR, else the XDG download directory (xdg-user-dir), else ~/Downloads. */
 function downloadDir(): string {
+  if (process.env.TERMIUM_DOWNLOAD_DIR) return process.env.TERMIUM_DOWNLOAD_DIR;
   try {
     const r = Bun.spawnSync(["xdg-user-dir", "DOWNLOAD"], { stdout: "pipe", stderr: "ignore" });
     const dir = r.stdout.toString().trim();
     if (r.exitCode === 0 && dir && dir !== homedir()) return dir;
   } catch {}
   return join(homedir(), "Downloads");
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function fail(msg: string): never {
@@ -183,14 +214,14 @@ async function main(): Promise<void> {
   enterTerminal();
   queryCapabilities();
 
+  await sweepTemp();
   const profile = args.incognito
-    ? mkdtempSync(join(tmpdir(), "termium-"))
+    ? mkdtempSync(join(tempBase(), `termium-incognito-${process.pid}-`))
     : (args.profile ?? join(dataDir, "profile"));
   mkdirSync(profile, { recursive: true });
 
   // The browser's temp files (it makes a few per run) go here and are removed on exit.
-  sweepBrowserTmp();
-  const browserTmp = mkdtempSync(join(tmpdir(), `termium-browser-${process.pid}-`));
+  const browserTmp = mkdtempSync(join(tempBase(), `tmb-${process.pid}-`));
   let browser: LaunchedBrowser | null = null;
   let launching: Promise<{ bin: string; b: LaunchedBrowser }> | null = null;
   let cdp: CDP | null = null;
@@ -217,6 +248,17 @@ async function main(): Promise<void> {
       browser.proc.kill();
       await Promise.race([browser.proc.exited, Bun.sleep(1500)]);
       if (browser.proc.exitCode === null) browser.proc.kill(9);
+    }
+    if (browser) {
+      // The launcher may be a wrapper script; make sure the browser itself is gone.
+      const pid = browser.browserPid;
+      for (let i = 0; i < 30 && isRunning(pid); i++) await Bun.sleep(50);
+      if (isRunning(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      clearOwner(profile);
     }
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
     rmSync(browserTmp, { recursive: true, force: true });
@@ -257,7 +299,14 @@ async function main(): Promise<void> {
     const launched = await launching;
     bin = launched.bin;
     browser = launched.b;
-    cdp = await CDP.connect(browser.wsUrl);
+    writeOwner(profile, [browser.browserPid, browser.proc.pid]);
+    cdp = CDP.fromPipe(browser.toBrowser, browser.fromBrowser);
+    await Promise.race([
+      cdp.send("Browser.getVersion"),
+      Bun.sleep(15_000).then(() => {
+        throw new Error("the browser did not answer on its DevTools pipe");
+      }),
+    ]);
   } catch (e) {
     await shutdown(1, e);
     return;
@@ -287,6 +336,7 @@ async function main(): Promise<void> {
     scale: args.scale,
     search: args.search,
     downloadDir: downloadDir(),
+    downloadStaging: join(profile, "termium-downloads"),
     quit: () => void shutdown(0),
     log,
   });
