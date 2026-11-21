@@ -1,0 +1,247 @@
+# Releases for termium on GitHub Actions (the primary release path).
+#
+# Push a tag like v0.2.0 from main to build every archive and publish a
+# GitHub release for it:
+#
+#   git tag -a v0.2.0 -m "termium v0.2.0" && git push origin v0.2.0
+#
+# The tag must equal "v" + the version in package.json, point at a commit on
+# main, and CHANGELOG.md must have a "## [X.Y.Z]" section: its body is the
+# release text. A tag with a "-suffix" (v0.2.0-rc.1) makes a pre-release.
+#
+# Running the workflow by hand (workflow_dispatch, on any branch or tag) is a
+# dry run: it checks, builds, packages and test-installs every archive and
+# keeps them as the "dist" artifact, but never publishes anything.
+#
+# Bun cross-compiles every target, so one Linux job builds them all
+# (`bun build --compile`); the install-test job then runs them on matching
+# runners.
+#
+# Assets match scripts/release.sh (the local fallback) and install.sh
+# exactly: termium-<target>.tar.gz, each containing a top-level
+# termium-<target>/ dir with termium (mode 755), README.md, LICENSE and
+# CHANGELOG.md, owned by 0:0; plus SHA256SUMS ("<hash>  termium-<target>.tar.gz"
+# lines). The names are deliberately version-independent so that
+# https://github.com/alimohammed1624/termium/releases/latest/download/<asset>
+# always resolves. Targets and their bun --target live in TERMIUM_TARGETS in
+# scripts/lib.sh; keep this file, scripts/lib.sh and install.sh in sync.
+#
+# If a release for the tag already exists (e.g. scripts/release.sh made it
+# and pushed the tag), the publish job leaves it alone.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Release binaries embed the Bun runtime; pin it so a release is
+  # reproducible. Keep in step with ci.yml.
+  BUN_VERSION: "1.4.5"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Version, tag and changelog
+        id: version
+        shell: bash
+        env:
+          PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          # Same as pkg_version in scripts/lib.sh.
+          version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n1)
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          # A pushed tag fails on any problem; a dry run only warns.
+          level=warning
+          [ "$PUBLISH" = true ] && level=error
+          bad=0
+          problem() { echo "::$level::$*"; bad=1; }
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
+              problem "tag $GITHUB_REF_NAME must look like v1.2.3 or v1.2.3-rc.1"
+            if [ "$GITHUB_REF_NAME" = "v$version" ]; then
+              echo "tag $GITHUB_REF_NAME matches package.json version $version"
+            else
+              problem "tag $GITHUB_REF_NAME does not match package.json version $version (expected v$version)"
+            fi
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main ||
+              problem "tag $GITHUB_REF_NAME (${GITHUB_SHA:0:7}) is not on main"
+          fi
+          grep -q "^## \[$version\]" CHANGELOG.md ||
+            problem "CHANGELOG.md has no '## [$version]' section (the release notes)"
+          if [ "$bad" = 1 ] && [ "$PUBLISH" = true ]; then
+            exit 1
+          fi
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test --pass-with-no-tests
+
+  # Builds and packages every target on one runner. Packaging mirrors
+  # scripts/release.sh line for line (GNU tar, sha256sum).
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Build
+        shell: bash
+        run: |
+          # <target triple>:<bun --target>, as TERMIUM_TARGETS in scripts/lib.sh.
+          targets=(
+            x86_64-unknown-linux-gnu:bun-linux-x64-baseline
+            aarch64-unknown-linux-gnu:bun-linux-arm64
+            x86_64-unknown-linux-musl:bun-linux-x64-musl-baseline
+            aarch64-unknown-linux-musl:bun-linux-arm64-musl
+            x86_64-apple-darwin:bun-darwin-x64-baseline
+            aarch64-apple-darwin:bun-darwin-arm64
+          )
+          for e in "${targets[@]}"; do
+            t=${e%%:*}
+            mkdir -p "bin/$t"
+            bun build --compile --minify --target="${e#*:}" src/main.ts --outfile "bin/$t/termium"
+          done
+          got=$(bin/x86_64-unknown-linux-gnu/termium --version)
+          echo "x86_64-unknown-linux-gnu: $got"
+          [ "$got" = "termium $VERSION" ] || { echo "::error::--version printed '$got', expected 'termium $VERSION'"; exit 1; }
+      - name: Package
+        shell: bash
+        run: |
+          targets=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+                   x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+                   x86_64-apple-darwin aarch64-apple-darwin)
+          payload=(README.md LICENSE CHANGELOG.md)
+          mkdir -p dist pkg
+          for t in "${targets[@]}"; do
+            name="termium-$t"
+            [ -f "bin/$t/termium" ] || { echo "::error::missing binary for $t"; exit 1; }
+            mkdir -p "pkg/$name"
+            cp "bin/$t/termium" "pkg/$name/termium"
+            chmod 755 "pkg/$name/termium"
+            for f in "${payload[@]}"; do cp "$f" "pkg/$name/"; done
+            tar -C pkg --owner=0 --group=0 --numeric-owner -czf "dist/$name.tar.gz" "$name"
+          done
+          # install.sh looks up "<hash>  termium-<target>.tar.gz" lines here.
+          (cd dist && sha256sum -- *.tar.gz >SHA256SUMS)
+          for t in "${targets[@]}"; do
+            echo "== termium-$t.tar.gz"
+            tar -tvzf "dist/termium-$t.tar.gz"
+            file "pkg/termium-$t/termium"
+          done
+          cat dist/SHA256SUMS
+      - name: Release notes
+        shell: bash
+        run: |
+          # Same as changelog_section in scripts/release.sh: the body of
+          # "## [X.Y.Z]" in CHANGELOG.md (Unreleased if there is none, which
+          # only a dry run gets past the check job with).
+          section() {
+            awk -v v="$1" '
+                /^## \[/ { if (on) exit; on = index($0, "## [" v "]") == 1; next }
+                /^\[[^]]+\]: / { if (on) exit }
+                on { print }
+            ' CHANGELOG.md | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
+          }
+          mkdir -p notes
+          notes=$(section "$VERSION")
+          [ -n "$notes" ] || notes=$(section Unreleased)
+          printf '%s\n' "$notes" >notes/RELEASE_NOTES.md
+          { echo "## Release notes for v$VERSION"; echo; cat notes/RELEASE_NOTES.md; } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/
+            notes/
+          if-no-files-found: error
+
+  # Install each platform's archive with install.sh from the packaged dist/
+  # (file:// download base) and run it, so asset names, layout and
+  # SHA256SUMS are checked against the real installer. The alpine entry runs
+  # install.sh in an Alpine container to cover the musl archives.
+  install-test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        alpine: [false]
+        include:
+          - os: ubuntu-latest
+            alpine: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: out
+      - name: install.sh
+        if: ${{ !matrix.alpine }}
+        shell: bash
+        run: |
+          TERMIUM_DOWNLOAD_BASE="file://$PWD/out/dist" TERMIUM_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/termium" --version
+      - name: install.sh (Alpine, musl)
+        if: ${{ matrix.alpine }}
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/w:ro" alpine:3 sh -euc '
+            apk add --no-cache curl libstdc++ libgcc >/dev/null
+            TERMIUM_DOWNLOAD_BASE=file:///w/out/dist TERMIUM_INSTALL_DIR=/tmp/bin sh /w/install.sh
+            /tmp/bin/termium --version'
+
+  publish:
+    needs: [build, install-test]
+    # Only a pushed v* tag publishes; a manual run is always a dry run.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: out
+      - name: gh release create
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::release $TAG already exists (made by scripts/release.sh?); leaving it alone"
+            exit 0
+          fi
+          pre=()
+          [[ "$TAG" == *-* ]] && pre=(--prerelease)
+          gh release create "$TAG" --verify-tag --title "termium $TAG" \
+            --notes-file out/notes/RELEASE_NOTES.md "${pre[@]}" \
+            out/dist/*.tar.gz out/dist/SHA256SUMS

@@ -1,0 +1,286 @@
+# termium
+
+A Chromium browser in your terminal: termium drives a headless
+[Helium](https://helium.computer) (Chromium) over the DevTools protocol and
+draws the page with the kitty graphics protocol. Written in TypeScript for
+[Bun](https://bun.sh).
+
+![termium in Ghostty: Wikipedia and Hacker News side by side](docs/screenshots/split.png)
+
+It is to [Carbonyl](https://github.com/fathyb/carbonyl) what
+[Browsh](https://www.brow.sh) is to Firefox, minus the fork: no Chromium
+build, just your installed Helium (so you get its patches, including the
+built-in content blocker) running headless. Pages are drawn as real images,
+not character art, so text is sharp and video, canvas and WebGL work.
+
+## Features
+
+- **Spaces, tabs and split panes**, arranged like
+  [herdr](https://herdr.dev): spaces (think browser windows) in a sidebar,
+  tabs along the top, and any tab split into panes, each a live page.
+- **Real input.** Pixel-precise mouse (click, double click, drag, hover,
+  wheel), full keyboard via the kitty keyboard protocol (key up and down,
+  modifiers, shortcuts inside web apps), bracketed paste.
+- **Address bar** with search (DuckDuckGo by default), back, forward,
+  reload; JavaScript `alert`, `confirm` and `prompt` dialogs; popups and
+  `target=_blank` links open as tabs; downloads go to `~/Downloads`.
+- **Copy** the page selection to your clipboard with Ctrl+C (OSC 52).
+- **Zoom** with Alt+= / Alt+- / Alt+0; the page scale follows your terminal
+  font size by default.
+- A persistent profile (logins survive restarts), or `--incognito`.
+
+| | |
+| --- | --- |
+| ![Browsing Wikipedia](docs/screenshots/browse.png) | ![A second space with two tabs](docs/screenshots/spaces.png) |
+| Browsing | Spaces in the sidebar, tabs on top |
+| ![Split view](docs/screenshots/split.png) | ![Key reference](docs/screenshots/help.png) |
+| Two panes in one tab | Ctrl+B ? shows every key |
+
+## Usage
+
+```sh
+termium                         # opens with the address bar focused
+termium news.ycombinator.com    # or start on a page
+termium --incognito             # throwaway profile, deleted on exit
+termium --help
+```
+
+Options: `--browser <path>` (default: Helium on `PATH`, or
+`$TERMIUM_BROWSER`), `--profile <dir>` (default
+`~/.local/share/termium/profile`), `--incognito`, `--scale <n>` (device
+pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
+
+### Keys
+
+Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
+
+| Key | Action |
+| --- | --- |
+| Ctrl+L, F6, Alt+D | edit the address (Enter goes, Esc cancels) |
+| Ctrl+T / Ctrl+W | new tab / close pane |
+| Alt+← / Alt+→, mouse back/forward | back / forward |
+| Ctrl+R, F5 (Ctrl+Shift+R hard) | reload |
+| Alt+= / Alt+- / Alt+0 | zoom in / out / reset |
+| Ctrl+C | copy the selection to the clipboard |
+| Ctrl+Q | quit |
+| **Ctrl+B then** | |
+| `c`, `n` / `p`, `1`-`9`, `X` | new / next / previous / go to / close tab |
+| `v` / `-` | split right / down |
+| `h` `j` `k` `l` (or arrows) | focus the pane in that direction |
+| `z` | zoom the focused pane |
+| `r` | resize mode: `h` `j` `k` `l` (Shift for bigger steps), Esc ends |
+| `x` | close pane |
+| `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
+| `N` / `W` / `D` | new / rename / close space |
+| `b` | show or hide the sidebar |
+| `Ctrl+B` | send Ctrl+B to the page |
+| `q` / `?` | quit / show keys |
+
+The mouse works on everything: click tabs (middle click closes), spaces,
+the back, forward and reload buttons, the address, pane titles, and drag the
+divider between panes.
+
+### Good to know
+
+- Helium holds network requests for a few seconds after it starts while its
+  built-in content blocker loads, so the very first page can take a moment.
+- Only one termium can use a profile at a time; use `--profile` or
+  `--incognito` for a second one.
+- Logs: `~/.local/state/termium/termium.log` (set `TERMIUM_DEBUG=1` to log
+  DevTools traffic) and `browser.log` next to it.
+- The page is a bitmap, so termium needs a graphics-capable terminal. It
+  checks on startup and says so if yours is not.
+
+## How it works
+
+termium starts Helium with `--headless=new`, connects to its DevTools
+WebSocket and auto-attaches to every page. Each visible pane gets a
+viewport matching its size in device pixels (cell size × cells) and a PNG
+screencast; frames are sent to the terminal as kitty graphics images,
+placed and scaled to the pane's cells, and acknowledged only once the
+terminal has taken them, so the frame rate adapts to the terminal. Input
+arrives through the kitty keyboard protocol and SGR-pixel mouse reports and
+goes back as `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alimohammed1624/termium/main/install.sh | sh
+```
+
+The script picks the prebuilt binary for your machine — Linux x86_64 or
+aarch64 (glibc, or musl on Alpine and similar), macOS Intel or Apple
+silicon — from the latest
+[GitHub release](https://github.com/alimohammed1624/termium/releases),
+checks it against the release's `SHA256SUMS` and installs it to
+`~/.local/bin` without sudo (it tells you the line to add if that is not on
+your `PATH`). The binary bundles the Bun runtime, so Bun is not needed.
+Options:
+
+- `TERMIUM_INSTALL_DIR=/some/dir` — install somewhere else.
+- `TERMIUM_VERSION=v0.1.0` — install a specific release instead of the latest.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alimohammed1624/termium/main/install.sh | TERMIUM_INSTALL_DIR=~/bin sh
+```
+
+To read the script before running it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alimohammed1624/termium/main/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+**What termium needs at run time:**
+
+- [Helium](https://helium.computer) (or another Chromium-based browser)
+  installed.
+- A terminal that speaks the kitty graphics protocol.
+  [Ghostty](https://ghostty.org) is recommended.
+
+**Uninstall:** delete the binary (`rm ~/.local/bin/termium`).
+
+**Release archives by hand.** Each release has these archives plus
+`SHA256SUMS`; each `termium-<target>.tar.gz` contains a `termium-<target>/`
+directory with the binary:
+
+| Archive | Platform |
+| --- | --- |
+| `termium-x86_64-unknown-linux-gnu.tar.gz` | Linux x86_64 (glibc) |
+| `termium-aarch64-unknown-linux-gnu.tar.gz` | Linux aarch64 (glibc) |
+| `termium-x86_64-unknown-linux-musl.tar.gz` | Linux x86_64 (musl; needs `libstdc++`, `libgcc`) |
+| `termium-aarch64-unknown-linux-musl.tar.gz` | Linux aarch64 (musl; needs `libstdc++`, `libgcc`) |
+| `termium-x86_64-apple-darwin.tar.gz` | macOS Intel |
+| `termium-aarch64-apple-darwin.tar.gz` | macOS Apple silicon |
+
+```sh
+base=https://github.com/alimohammed1624/termium/releases/latest/download
+curl -fsSLO "$base/termium-aarch64-apple-darwin.tar.gz" -O "$base/SHA256SUMS"
+grep ' termium-aarch64-apple-darwin.tar.gz$' SHA256SUMS | shasum -a 256 -c
+tar xzf termium-aarch64-apple-darwin.tar.gz
+install -m 755 termium-aarch64-apple-darwin/termium ~/.local/bin/
+```
+
+On Linux, use `sha256sum -c` and the `-unknown-linux-gnu` archive name.
+
+**With Bun:**
+
+```sh
+bun install -g github:alimohammed1624/termium
+```
+
+**From source:**
+
+```sh
+git clone https://github.com/alimohammed1624/termium && cd termium
+bun install
+bun src/main.ts                  # run it straight from source
+bun run build                    # standalone binary: dist/termium
+```
+
+## Releasing
+
+Releases run on GitHub Actions (`.github/workflows/release.yml`). Bump
+`version` in `package.json`, add a `## [X.Y.Z]` CHANGELOG section (it
+becomes the release text), merge to `main`, then push a matching tag:
+
+```sh
+git tag -a v0.2.0 -m "termium v0.2.0" && git push origin v0.2.0
+```
+
+The workflow checks that the tag equals `v` + the `package.json` version
+and is on `main`, runs the typecheck and tests, cross-compiles every target
+on one Linux runner with `bun build --compile`, installs each platform's
+archive with `install.sh` on a matching runner (Linux x86_64 and aarch64,
+macOS, and Alpine for musl), and publishes the archives with `SHA256SUMS`.
+A tag with a `-suffix` (`v0.2.0-rc.1`) makes a pre-release. Running it by
+hand from the Actions tab is a dry run: everything except publishing, with
+the archives kept as the `dist` artifact.
+
+Asset names carry no version, so
+`https://github.com/alimohammed1624/termium/releases/latest/download/<asset>`
+always points at the newest release. `install.sh`, `scripts/release.sh`
+(via `TERMIUM_TARGETS` in `scripts/lib.sh`) and `release.yml` share the
+target list and archive layout; change them together.
+
+`scripts/release.sh vX.Y.Z` is the fallback when Actions is unavailable; see
+[Optional local tooling](#optional-local-tooling).
+
+## Development
+
+```sh
+bun install
+bun src/main.ts       # run from source
+bun run typecheck     # tsc --noEmit
+bun test              # tests in tests/
+bun run build         # dist/termium for this machine
+```
+
+End-to-end check against the real stack (real termium, real headless
+Helium, a local test page) in a pseudo-terminal that answers like Ghostty;
+it types, clicks, scrolls, splits, opens spaces and dialogs, and checks the
+page state through DevTools. Needs Helium and Python 3 with `pyte` and
+`Pillow`:
+
+```sh
+python3 tests/e2e.py /tmp/termium-e2e    # screenshots land there
+```
+
+`scripts/screenshots.sh` regenerates `docs/screenshots/` from a real Ghostty
+window (KDE's Spectacle captures it; keep that window focused).
+
+CI runs on GitHub Actions (`.github/workflows/ci.yml`) on every push to
+`main`, every pull request and by hand: `bun install --frozen-lockfile`,
+typecheck and tests on Linux and macOS, a `bun build --compile` of every
+release target (the Linux and macOS binaries must answer `--version`),
+shellcheck and actionlint. A new push to a pull request cancels its older
+runs. Both workflows pin the Bun version (`BUN_VERSION`), since the release
+binaries embed the runtime.
+
+### Optional local tooling
+
+Nothing below is required; it is a local pre-flight and a fallback for when
+GitHub Actions is unavailable.
+
+```sh
+scripts/ci.sh              # install, typecheck, tests, every target build, lints
+scripts/setup-hooks.sh     # opt in to the git hooks below, check tools
+```
+
+- `scripts/ci.sh` runs the CI checks on the committed `HEAD` (`--sha REV`
+  for another commit). `--quick` runs only install, typecheck and tests;
+  `--mac` also runs them (plus a native `bun-darwin-arm64` build and
+  `--version`) on a Mac over ssh, reported as skipped if the Mac is
+  offline. The log and result go to `.git/termium-ci/<sha>.log` and
+  `.status`.
+- Git hooks, off until you run `scripts/setup-hooks.sh` (it sets
+  `core.hooksPath=.githooks`; `git config --unset core.hooksPath` turns them
+  off again):
+  - `post-commit` runs `scripts/ci.sh --mac` in the background for every
+    commit on `main` and shows a desktop notification when it is done
+    (`notify-send` or D-Bus; if neither works, or on failure, the next hook
+    prints the result). `TERMIUM_SKIP_CI=1` skips it; `TERMIUM_CI_ARGS`
+    overrides the flags.
+  - `pre-push` refuses to push `main` if its local CI failed. If CI is
+    missing or still running, `TERMIUM_PREPUSH=wait` (default) waits for it
+    or runs it, `warn` pushes anyway, `block` refuses. `git push
+    --no-verify` bypasses it.
+- `scripts/release.sh vX.Y.Z` is the fallback release path: from a clean,
+  pushed `main` that has passed local CI, it cross-compiles every target
+  here, runs this machine's binary (and the Apple silicon one on the Mac,
+  if reachable) with `--version`, writes `dist/` with the same assets and
+  `SHA256SUMS` as the workflow, then tags, pushes the tag and runs
+  `gh release create`. `--dry-run` stops after `dist/`. The pushed tag also
+  starts the release workflow, which leaves the existing release alone.
+
+The local tools need Bun and `flock`; `ssh`, shellcheck, actionlint,
+`notify-send` and `gh` are optional (`gh` publishes releases). The Mac is
+the ssh host `TERMIUM_MAC_HOST` (default `mba`); it needs non-interactive
+ssh (`BatchMode`) and Bun (`scripts/setup-hooks.sh --mac` installs it for
+the user). It gets the exact commit via `git archive` over ssh and works in
+`~/.cache/termium-ci/`.
+
+
+Release history: [CHANGELOG.md](CHANGELOG.md). License: MIT, see
+[LICENSE](LICENSE).

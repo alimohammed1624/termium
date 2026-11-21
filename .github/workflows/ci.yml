@@ -1,0 +1,105 @@
+# CI for termium on GitHub Actions (the primary CI). Runs on every push to
+# main, on every pull request and by hand from the Actions tab.
+#
+#   linux     bun install --frozen-lockfile, typecheck, tests (ubuntu-latest)
+#   build     `bun build --compile` of every release target; the Linux x64
+#             binary must answer --version
+#   macos     typecheck, tests and a native build + --version (macos-latest,
+#             Apple silicon)
+#   lint      shellcheck (install.sh, scripts/*.sh, .githooks/*), actionlint
+#
+# scripts/ci.sh runs the same checks locally; it is an optional pre-flight
+# (see README "Development"). Keep the two in step.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request cancels its older runs; every push to main
+# gets a complete run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with release.yml.
+  BUN_VERSION: "1.4.5"
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test --pass-with-no-tests
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      # The targets of TERMIUM_TARGETS in scripts/lib.sh.
+      - name: Compile every release target
+        shell: bash
+        run: |
+          for bt in bun-linux-x64-baseline bun-linux-arm64 bun-linux-x64-musl-baseline \
+                    bun-linux-arm64-musl bun-darwin-x64-baseline bun-darwin-arm64; do
+            bun build --compile --minify --target="$bt" src/main.ts --outfile "out/$bt/termium"
+          done
+          file out/*/termium
+          out/bun-linux-x64-baseline/termium --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: termium-x86_64-unknown-linux-gnu
+          path: out/bun-linux-x64-baseline/termium
+          retention-days: 7
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test --pass-with-no-tests
+      - name: Native build
+        run: |
+          bun build --compile --minify --target=bun-darwin-arm64 src/main.ts --outfile out/termium
+          out/termium --version
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: shellcheck
+      - name: shellcheck
+        run: shellcheck -x install.sh scripts/*.sh .githooks/*
+      # actionlint's own installer, pinned; it also runs shellcheck on the
+      # workflows' run: blocks.
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          bash <(curl -sSfL "https://raw.githubusercontent.com/rhysd/actionlint/v$ACTIONLINT_VERSION/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION" "$RUNNER_TEMP"
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/*.yml

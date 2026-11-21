@@ -1,0 +1,18 @@
+{
+  "name": "termium",
+  "version": "0.1.0",
+  "description": "A Chromium (Helium) browser in your terminal, rendered with the kitty graphics protocol",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "termium": "src/main.ts" },
+  "scripts": {
+    "start": "bun src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build --compile --minify src/main.ts --outfile dist/termium"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
