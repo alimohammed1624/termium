@@ -56,6 +56,12 @@ export function splitLeaf<T>(node: Node<T>, item: T, added: T, dir: Dir): Node<T
   return { ...node, a: splitLeaf(node.a, item, added, dir), b: splitLeaf(node.b, item, added, dir) };
 }
 
+/** Puts `next` where `item` was. */
+export function replaceLeaf<T>(node: Node<T>, item: T, next: T): Node<T> {
+  if (node.kind === "leaf") return node.item === item ? leaf(next) : node;
+  return { ...node, a: replaceLeaf(node.a, item, next), b: replaceLeaf(node.b, item, next) };
+}
+
 /** Removes the leaf holding `item`; its sibling takes the parent's place. */
 export function removeLeaf<T>(node: Node<T>, item: T): Node<T> | null {
   if (node.kind === "leaf") return node.item === item ? null : node;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // termium: a Chromium (Helium) browser in your terminal.
 
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
@@ -46,6 +46,7 @@ function parseArgs(argv: string[]): Args {
     scale: null,
     search: process.env.TERMIUM_SEARCH || DEFAULT_SEARCH,
   };
+  if (!args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const value = () => {
@@ -114,10 +115,16 @@ async function sweepTemp(): Promise<void> {
     try {
       process.kill(Number(m[2]), 0);
       continue; // that termium is still running
-    } catch {}
+    } catch (e: any) {
+      if (e?.code === "EPERM") continue; // alive, and someone else's
+    }
     const dir = join(base, name);
-    if (m[1] === "termium-incognito") await reapOrphans(dir).catch(() => 0);
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      if (m[1] === "termium-incognito") await reapOrphans(dir).catch(() => 0);
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Not ours to remove (another user's); never a reason not to start.
+    }
   }
 }
 
@@ -213,12 +220,16 @@ async function main(): Promise<void> {
   process.stdin.resume();
   enterTerminal();
   queryCapabilities();
+  parser.expectApc = true;
 
   await sweepTemp();
-  const profile = args.incognito
+  const chosen = args.incognito
     ? mkdtempSync(join(tempBase(), `termium-incognito-${process.pid}-`))
     : (args.profile ?? join(dataDir, "profile"));
-  mkdirSync(profile, { recursive: true });
+  mkdirSync(chosen, { recursive: true });
+  // One spelling per directory, so locks and leftover-browser records match
+  // however the path was typed (relative, symlinked, trailing slash).
+  const profile = realpathSync(chosen);
 
   // The browser's temp files (it makes a few per run) go here and are removed on exit.
   const browserTmp = mkdtempSync(join(tempBase(), `tmb-${process.pid}-`));
@@ -285,6 +296,8 @@ async function main(): Promise<void> {
   launching.catch(() => {}); // handled below; avoid an unhandled rejection meanwhile
   await Promise.race([new Promise<void>((r) => (onCapsDone = r)), Bun.sleep(1500)]);
   onCapsDone = null;
+  // From here on ESC _ is a legacy Alt+_ keypress, not a reply we're waiting for.
+  parser.expectApc = false;
 
   if (!caps.graphics) {
     await shutdown(
@@ -299,14 +312,8 @@ async function main(): Promise<void> {
     const launched = await launching;
     bin = launched.bin;
     browser = launched.b;
-    writeOwner(profile, [browser.browserPid, browser.proc.pid]);
-    cdp = CDP.fromPipe(browser.toBrowser, browser.fromBrowser);
-    await Promise.race([
-      cdp.send("Browser.getVersion"),
-      Bun.sleep(15_000).then(() => {
-        throw new Error("the browser did not answer on its DevTools pipe");
-      }),
-    ]);
+    writeOwner(profile, [...new Set([browser.browserPid, browser.proc.pid])]);
+    cdp = browser.cdp;
   } catch (e) {
     await shutdown(1, e);
     return;

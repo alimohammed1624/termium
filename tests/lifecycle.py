@@ -62,6 +62,29 @@ try:
     c = Term(["bun", main, "--profile", prof], cwd=ROOT)
     check("restart after SIGKILL reaches the address bar", at_address_bar(c))
 
+    # a relative --profile, killed, then reopened by its absolute path, recovers
+    rel_parent = tmp
+    r1 = Term(["bun", main, "--profile", "p3"], cwd=rel_parent)
+    check("relative profile starts", at_address_bar(r1))
+    os.kill(r1.pid, signal.SIGKILL); os.waitpid(r1.pid, 0); r1.alive = False
+    time.sleep(1)
+    r2 = Term(["bun", main, "--profile", os.path.join(tmp, "p3") + "/"], cwd="/")
+    check("reopened by absolute path after SIGKILL", at_address_bar(r2))
+    r2.close()
+
+    # two termiums started at the same moment on one profile: one runs, the other refuses
+    prof4 = os.path.join(tmp, "p4")
+    x = Term(["bun", main, "--profile", prof4], cwd=ROOT)
+    y = Term(["bun", main, "--profile", prof4], cwd=ROOT)
+    time.sleep(12)
+    alive = [z for z in (x, y) if running(z)]
+    check("simultaneous start: exactly one survives", len(alive) == 1, [running(x), running(y)])
+    if alive:
+        check("simultaneous start: the survivor works", at_address_bar(alive[0], 5) and helium_on(prof4) > 0)
+        loser = y if alive[0] is x else x
+        check("simultaneous start: the other says why", "in use" in output(loser), output(loser)[-200:])
+        alive[0].close()
+
     # garbage input doesn't crash it
     c.write("\x1b[1114112u\x1b[99999999;5u\x1b[;;u\x1b[;;;;;;;u\x1b[<;;M\x1b_Gq=1\x1b\\")
     time.sleep(1.5)

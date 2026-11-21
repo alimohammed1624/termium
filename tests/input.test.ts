@@ -88,6 +88,14 @@ describe("robustness", () => {
   test("out-of-range and empty code points are ignored, not thrown", () => {
     expect(() => parse("\x1b[1114112u\x1b[99999999;5u\x1b[;;u\x1b[97;1;1114112u")).not.toThrow();
   });
+  test("legacy Alt+_ is a key once capability replies are done", () => {
+    const events: any[] = [];
+    const p = new InputParser((e) => events.push(e));
+    p.kittyActive = false;
+    p.expectApc = false;
+    p.feed("\x1b_x");
+    expect(events.map((e) => [e.key, e.mods.alt])).toEqual([["_", true], ["x", false]]);
+  });
   test("legacy Alt+] and Alt+P are keys, not string sequences", () => {
     const evs = parse("\x1b]\x1bPx", false) as any[];
     expect(evs.map((e) => [e.key, e.mods.alt])).toEqual([["]", true], ["P", true], ["x", false]]);

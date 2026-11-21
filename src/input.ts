@@ -287,9 +287,10 @@ export class InputParser {
         i += 3;
         continue;
       }
-      // Only APC (our kitty graphics replies) is a string sequence we expect;
-      // a legacy Alt+] or Alt+P must stay a key.
-      if (n === "_" || ((n === "]" || n === "P") && this.kittyActive)) {
+      // String sequences are only replies to our queries (kitty graphics
+      // replies are APC "ESC _ G"); otherwise a legacy Alt+_ / Alt+] / Alt+P
+      // must stay a key rather than swallow all input after it.
+      if ((n === "_" && (this.expectApc || buf[i + 2] === "G" && this.kittyActive)) || ((n === "]" || n === "P") && this.kittyActive)) {
         // String sequence terminated by ST (ESC \) or BEL.
         let end = -1;
         let termLen = 0;
@@ -418,6 +419,8 @@ export class InputParser {
 
   /** Set when the terminal confirmed the kitty keyboard protocol with event types. */
   kittyActive = false;
+  /** True while capability replies (APC) may still arrive. */
+  expectApc = true;
 
   private mouse(body: string, final: string): void {
     const [bRaw, xRaw, yRaw] = body.split(";").map(Number);

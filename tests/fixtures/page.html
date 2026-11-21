@@ -28,6 +28,8 @@
 <input id="guard" placeholder="edit to guard" oninput="window.onbeforeunload = (e) => { e.preventDefault(); return ''; }">
 <br>
 <iframe id="xf" width="420" height="90" style="border:1px solid #999"></iframe>
+<span id="shadowhost"></span>
+<button id="filelater" onclick="setTimeout(() => document.getElementById('file').click(), 1500)">File later</button>
 <div id="log"></div>
 <div class="tall"></div>
 <script>
@@ -35,6 +37,9 @@
  addEventListener('paste', () => pastes++, true);
  window.frameState = null;
  addEventListener('message', (e) => { window.frameState = e.data; });
+ // A <select> inside an open shadow root.
+ { const root = document.getElementById('shadowhost').attachShadow({ mode: 'open' });
+   root.innerHTML = '<select id="ssel"><option>North</option><option>South</option><option>East</option></select>'; }
  // A cross-site iframe: the page is served from 127.0.0.1, the frame from localhost.
  if (location.hostname === '127.0.0.1')
    document.getElementById('xf').src = 'http://localhost:' + location.port + '/frame.html';
@@ -43,6 +48,6 @@
  addEventListener('keyup', e => log(`up ${e.key}`));
  addEventListener('dblclick', e => log(`dblclick`));
  addEventListener('scroll', () => { document.title = 'scrolled ' + Math.round(scrollY); });
- window.termiumState = () => ({ pastes, frame: window.frameState, sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
+ window.termiumState = () => ({ ssel: document.getElementById('shadowhost').shadowRoot.getElementById('ssel').value, focused: document.hasFocus(), pastes, frame: window.frameState, sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
 </script>
 </body></html>

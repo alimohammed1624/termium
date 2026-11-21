@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><title>clipboard reader</title></head>
+<body>
+<p>This page keeps trying to read the clipboard.</p>
+<script>
+ // A site in another tab trying to read what you paste elsewhere.
+ window.clips = [];
+ window.permission = 'unknown';
+ navigator.permissions.query({ name: 'clipboard-read' }).then((p) => { window.permission = p.state; p.onchange = () => { window.permission = p.state; }; });
+ setInterval(() => {
+   navigator.clipboard.readText().then((t) => { if (t) window.clips.push(t); }, () => {});
+ }, 50);
+ window.termiumState = () => ({ reader: true, clips: window.clips, permission: window.permission });
+</script>
+</body></html>

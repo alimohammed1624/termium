@@ -16,6 +16,7 @@ import {
 import { hostname } from "node:os";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
+import { CDP } from "./cdp";
 
 const CANDIDATES = [
   "helium-browser",
@@ -67,7 +68,9 @@ export function profileOwner(profileDir: string): number | null {
   const m = target.match(/^(.*)-(\d+)$/);
   if (!m || m[1] !== hostname()) return null;
   const pid = Number(m[2]);
-  return alive(pid) ? pid : null;
+  // A lock left by a crash can name a pid that now belongs to something
+  // else: only a live browser on this very profile counts.
+  return alive(pid) && commandOf(pid).includes(`--user-data-dir=${profileDir}`) ? pid : null;
 }
 
 // ------------------------------------------------------------- ownership
@@ -170,8 +173,7 @@ function alive(pid: number): boolean {
 
 export interface LaunchedBrowser {
   proc: Subprocess;
-  toBrowser: number;
-  fromBrowser: number;
+  cdp: CDP;
   /** The browser's main process (the launcher may be a wrapper script). */
   browserPid: number;
 }
@@ -223,26 +225,37 @@ export async function launchBrowser(
   closeSync(logFd);
   const [, , , toBrowser, fromBrowser] = proc.stdio as unknown as number[];
 
-  // Ready once the browser holds the profile lock (Chromium takes it early
-  // in startup); the pipe itself then answers once the browser reads it.
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) {
-      const tail = readTail(logPath, logStart);
-      const hint = /ProcessSingleton|profile.*in use|SingletonLock/i.test(tail)
-        ? " The profile seems to be in use; pass --profile <dir> or --incognito."
-        : /Socket path too long/.test(tail)
-          ? " Its temp directory path is too long; set a shorter TMPDIR."
-          : "";
-      throw new Error(`Browser exited with code ${proc.exitCode} before it was ready.${hint}\n${tail}`);
-    }
-    const pid = profileOwner(profileDir);
-    if (pid !== null) return { proc, toBrowser: toBrowser!, fromBrowser: fromBrowser!, browserPid: pid };
-    await Bun.sleep(25);
+  // Ready once the browser answers on our pipe. Asking it for its own pid
+  // (rather than reading the profile lock) means a second termium racing
+  // us for the same profile can never mistake our browser for its own.
+  const cdp = CDP.fromPipe(toBrowser!, fromBrowser!);
+  const failed = (why: string) => {
+    const tail = readTail(logPath, logStart);
+    const hint = /ProcessSingleton|profile.*in use|SingletonLock/i.test(tail)
+      ? " The profile is in use; close the other termium, or pass --profile <dir> or --incognito."
+      : /Socket path too long/.test(tail)
+        ? " Its temp directory path is too long; set a shorter TMPDIR."
+        : "";
+    return new Error(`${why}.${hint}\n${tail}`);
+  };
+  const exited = proc.exited.then((code) => {
+    throw failed(`Browser exited with code ${code} before it was ready`);
+  });
+  const timeout = Bun.sleep(timeoutMs).then(() => {
+    throw failed(`Browser did not start within ${timeoutMs / 1000}s (see ${logPath})`);
+  });
+  try {
+    const info = await Promise.race([cdp.send("SystemInfo.getProcessInfo"), exited, timeout]);
+    const browserPid = (info as any)?.processInfo?.find((p: any) => p.type === "browser")?.id ?? proc.pid;
+    exited.catch(() => {});
+    timeout.catch(() => {});
+    return { proc, cdp, browserPid };
+  } catch (e) {
+    proc.kill(9);
+    exited.catch(() => {});
+    timeout.catch(() => {});
+    throw e;
   }
-  proc.kill(9);
-  const tail = readTail(logPath, logStart);
-  throw new Error(`Browser did not start within ${timeoutMs / 1000}s. See ${logPath}\n${tail}`);
 }
 
 /** What the browser logged since `from` (this run only), last 1500 characters. */

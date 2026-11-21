@@ -101,7 +101,12 @@ divider between panes.
   (`xdg-user-dir DOWNLOAD`), else `~/Downloads`, and never replace an
   existing file (`name (1).ext`).
 - Closing a pane or tab lets the page ask "Leave this page?" first, as a
-  browser would. A dialog from a page you're not looking at waits (its tab
+  browser would; choosing to stay keeps the whole tab (or space) open.
+- Pasting gives clipboard access to the page you paste into, for that
+  paste only, and empties the browser's clipboard afterwards, so no other
+  site can read it.
+- A page that crashed or hung (Helium blocks some `chrome://` pages that
+  way) is replaced by a fresh one on the next reload or address. A dialog from a page you're not looking at waits (its tab
   shows `!`) instead of taking focus.
 - The page is a bitmap, so termium needs a graphics-capable terminal. It
   checks on startup and says so if yours is not.

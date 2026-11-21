@@ -165,6 +165,20 @@ try:
     t.key("ctrl+a"); t.key("ctrl+k"); t.type(os.path.join(ROOT, "tests", "fixtures", "dl.txt")); t.key("enter"); time.sleep(0.8)
     check("iframe file attached", ((state() or {}).get("frame") or {}).get("file") == "dl.txt", (state() or {}).get("frame"))
 
+    # 6e2. copy from inside a cross-site iframe
+    t.click(220 + int(xf[0] + 1 + fr["textRect"][0]), 40 + int(xf[1] + 1 + fr["textRect"][1])); time.sleep(0.3)
+    t.key("ctrl+a"); mark = len(t.raw); t.key("ctrl+c"); time.sleep(0.8)
+    check("ctrl+c copies a selection inside a cross-site iframe",
+          b"\x1b]52;c;" + base64.b64encode(b"framed text") in bytes(t.raw[mark:]))
+
+    # 6e3. a <select> inside an open shadow root
+    sh = top_left("shadowhost")
+    before_blue = blue_pixels()
+    t.click(220 + int(sh[0]) + 15, 40 + int(sh[1]) + 8); time.sleep(0.8)
+    check("select menu opens inside a shadow root", blue_pixels() > before_blue + 200, (before_blue, blue_pixels()))
+    t.key("down"); t.key("enter"); time.sleep(0.5)
+    check("shadow-root select picks a value", (state() or {}).get("ssel") == "South", (state() or {}).get("ssel"))
+
     # 6f. downloads never overwrite
     click_el("dl"); time.sleep(1.5); click_el("dl"); time.sleep(1.5)
     got = sorted(os.listdir(dl_dir))
@@ -201,6 +215,34 @@ try:
     t.key("escape"); t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
     check("dialog shown on return", "delayed alert" in t.line(2), t.line(2))
     t.key("enter"); time.sleep(0.4)
+
+    # 8b2b. a page in another tab can't read what you paste, and only the visible page has focus
+    t.key("ctrl+t"); time.sleep(0.8)
+    t.type(f"http://localhost:{PORT}/reader.html"); t.key("enter")
+    check("reader tab loads", t.wait_for(lambda: any(p["value"] and p["value"].get("reader") for p in pages()), 10))
+    t.key("ctrl+b"); t.key("1"); time.sleep(0.6)
+    click_el("inp"); time.sleep(0.2); t.key("ctrl+a"); t.key("backspace")
+    t.paste("hunter2-secret"); time.sleep(1.5)
+    check("paste still works", (state() or {}).get("inp") == "hunter2-secret", state() and state().get("inp"))
+    rd = next((p["value"] for p in pages() if p["value"] and p["value"].get("reader")), {})
+    check("another site can't read the pasted text", "hunter2-secret" not in (rd.get("clips") or []), rd)
+    check("another site has no clipboard permission", rd.get("permission") != "granted", rd.get("permission"))
+    foc = {("reader" if (p["value"] or {}).get("reader") else "main"): (p["value"] or {}).get("focused", (p["value"] or {}).get("reader") and None)
+           for p in pages("({ reader: !!window.clips, focused: document.hasFocus() })") if p["value"] and "popup" not in p["url"] and "right" not in p["url"]}
+    check("only the visible page has focus", foc.get("main") is True and foc.get("reader") is False, foc)
+    # the reader tab is the one after tab 1: close it
+    t.key("ctrl+b"); t.key("2"); time.sleep(0.4); t.key("ctrl+w"); time.sleep(1.0)
+    t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
+
+    # 8b2c. a file chooser opened by a background tab waits for that tab
+    click_el("filelater"); time.sleep(0.2)
+    title1 = t.line(1)
+    t.key("ctrl+b"); t.key("2"); time.sleep(2.5)
+    check("background file chooser doesn't prompt in the wrong tab", "Upload file" not in t.line(2), t.line(2))
+    t.key("ctrl+b"); t.key("1"); time.sleep(0.6)
+    check("file chooser asks when its tab is shown", "Upload file" in t.line(2), t.line(2))
+    t.key("escape"); time.sleep(0.3)
+    check("tab titles unharmed", t.line(1).split("│")[0] == title1.split("│")[0], (title1, t.line(1)))
 
     # 8b3. middle-clicked link opens in the background; a guarded page asks before closing
     tabs_before = t.line(1).count("│")
@@ -257,6 +299,19 @@ try:
     check("zoom gives full width", zw == [1380], zw)
     t.key("ctrl+b"); t.key("z"); time.sleep(0.5)
 
+    # 9b. closing a split tab: staying on the guarded pane keeps every pane
+    t.key("ctrl+b"); t.key("l"); time.sleep(0.3)  # right pane (right=1)
+    rc = next(p["value"] for p in pages("(() => { const r = document.getElementById('guard').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()") if "right=1" in p["url"])
+    right_x0 = 220 + (t.cols - 22) // 2 * 10 + 10
+    t.click(right_x0 + int(rc[0]), 60 + int(rc[1])); time.sleep(0.2); t.type("x"); time.sleep(0.3)
+    n_before = len(pages("1"))
+    t.key("ctrl+b"); t.key("shift+x")
+    check("closing a split tab asks the guarded pane", t.wait_text("Leave this page?", 6), t.line(2))
+    t.key("escape"); time.sleep(1.5)
+    check("staying keeps every pane of the tab", len(pages("1")) == n_before, (n_before, len(pages("1"))))
+    pages("window.onbeforeunload = null")
+    t.key("ctrl+b"); t.key("h"); time.sleep(0.3)
+
     # 10. split down
     t.key("ctrl+b"); t.key("minus")
     check("split down creates pane", t.wait_for(lambda: len(pages("1")) == 4, 8))
@@ -298,6 +353,13 @@ try:
     full_w = t.cols - 22
     check("survivor fills the pane area after closes", len(placed) == 1 and placed[0][2] == full_w, placed)
     t.shot(f"{OUT}/09-after-close.png")
+
+    # 14b. a page stuck in a navigation that never answers (Helium blocks chrome://crash)
+    # is replaced by a fresh one on the next navigation
+    t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type("chrome://crash"); t.key("enter"); time.sleep(5)
+    t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/page.html?recovered=1"); t.key("enter")
+    check("stuck page recovers on the next navigation", t.wait_for(lambda: any("recovered=1" in p["url"] and p["value"] for p in pages()), 15),
+          [p["url"] for p in pages("1")])
 
     # 15. a real URL with a #termium-... fragment is shown as-is
     t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/page.html#termium-heading"); t.key("enter")

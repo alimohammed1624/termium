@@ -167,6 +167,14 @@ export class CDP {
       return;
     }
     const set = this.handlers.get(msg.method);
-    if (set) for (const h of set) h(msg.params, msg.sessionId);
+    if (!set) return;
+    for (const h of set) {
+      // One bad handler must not take the whole connection down.
+      try {
+        h(msg.params, msg.sessionId);
+      } catch (e) {
+        this.trace?.("<-", `handler for ${msg.method} threw: ${e instanceof Error ? e.stack : e}`);
+      }
+    }
   }
 }

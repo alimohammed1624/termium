@@ -3,6 +3,7 @@
 <body>
 <select id="fsel" onchange="report()"><option value="one">One</option><option value="two">Two</option><option value="three">Three</option></select>
 <input id="ffile" type="file" onchange="report()">
+<input id="ftext" value="framed text" size="12">
 <script>
  // Reports to the parent page (tests read it there), with element positions
  // inside the frame so the test can click them.
@@ -10,7 +11,7 @@
  function report() {
    parent.postMessage({ ua: navigator.userAgent, brands: navigator.userAgentData ? navigator.userAgentData.brands.map(b => b.brand).join(',') : '',
      sel: document.getElementById('fsel').value, file: (document.getElementById('ffile').files[0] || {}).name || '',
-     selRect: rect('fsel'), fileRect: rect('ffile') }, '*');
+     selRect: rect('fsel'), fileRect: rect('ffile'), textRect: rect('ftext') }, '*');
  }
  report();
 </script>

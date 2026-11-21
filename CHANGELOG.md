@@ -31,5 +31,8 @@ Initial release.
   profiles from a killed termium are cleaned up on the next start, and a
   second termium on a profile in use refuses without disturbing the first.
 - DevTools over a private pipe rather than a TCP port.
-- Closing a pane runs the page's beforeunload check; downloads never
-  replace existing files; paste fires the page's paste event.
+- Closing a pane runs the page's beforeunload check (closing a tab or space
+  keeps everything if you stay); downloads never replace existing files,
+  even from two termiums at once; paste fires the page's paste event
+  without exposing the clipboard to other sites.
+- Crashed or hung pages are replaced on the next reload or navigation.

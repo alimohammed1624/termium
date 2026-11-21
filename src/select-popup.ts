@@ -129,9 +129,16 @@ export const SELECT_POPUP = String.raw`(() => {
     const s = t && t.closest ? t.closest("select") : null;
     return s && !s.multiple && s.size <= 1 && !s.disabled ? s : null;
   };
+  // The real focused element, inside open shadow roots too.
+  const deepActive = () => {
+    let a = document.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    return a;
+  };
   addEventListener("mousedown", (e) => {
     if (host && e.composedPath().includes(host)) return;
-    const s = popupSelect(e.target);
+    // composedPath()[0] is the real target even inside an (open) shadow root.
+    const s = popupSelect(e.composedPath()[0]);
     if (!s || e.button !== 0) return;
     e.preventDefault();
     s.focus();
@@ -140,7 +147,7 @@ export const SELECT_POPUP = String.raw`(() => {
   }, true);
   addEventListener("keydown", (e) => {
     if (host) return;
-    const s = popupSelect(document.activeElement);
+    const s = popupSelect(deepActive());
     if (!s) return;
     if (e.key === " " || e.key === "F4" || (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp"))) {
       e.preventDefault();

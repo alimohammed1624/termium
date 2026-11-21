@@ -16,10 +16,9 @@ describe("download names", () => {
   test("existing files are never replaced", () => {
     const dir = mkdtempSync(join(tmpdir(), "termium-test-"));
     try {
+      // Each call claims its file, so repeated calls never return the same path.
       expect(freeName(dir, "report.pdf")).toBe(join(dir, "report.pdf"));
-      writeFileSync(join(dir, "report.pdf"), "x");
       expect(freeName(dir, "report.pdf")).toBe(join(dir, "report (1).pdf"));
-      writeFileSync(join(dir, "report (1).pdf"), "x");
       expect(freeName(dir, "report.pdf")).toBe(join(dir, "report (2).pdf"));
       writeFileSync(join(dir, "archive"), "x");
       expect(freeName(dir, "archive")).toBe(join(dir, "archive (1)"));
