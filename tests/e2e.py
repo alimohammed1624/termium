@@ -17,7 +17,9 @@ profile = tempfile.mkdtemp(prefix="termium-e2e-profile-")
 import socket
 with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0)); PORT = sock.getsockname()[1]
-srv = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1",
+# sys.executable can be a host app (not python) when run from some IDEs.
+PY = shutil.which("python3") or sys.executable
+srv = subprocess.Popen([PY, "-m", "http.server", str(PORT), "--bind", "127.0.0.1",
                         "--directory", os.path.join(ROOT, "tests", "fixtures")],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(0.5)
@@ -31,6 +33,17 @@ def check(name, cond, detail=""):
 def pages(expr="window.termiumState ? termiumState() : null"):
     r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), profile, expr], capture_output=True, text=True, timeout=20)
     return json.loads(r.stdout or "[]")
+
+def center(id_, skip=("popup=1", "right=1")):
+    """Center of an element in the visible fixture page (other tabs share the layout code, not the layout)."""
+    for p in pages(f"(() => {{ const e = document.getElementById('{id_}'); if (!e) return null; const r = e.getBoundingClientRect(); return [r.x + Math.min(r.width/2, 40), r.y + r.height/2]; }})()"):
+        if p["value"] and not any(k in p["url"] for k in skip):
+            return p["value"]
+    return None
+
+def click_el(id_, x0=220, y0=40):
+    c = center(id_)
+    t.click(x0 + int(c[0]), y0 + int(c[1]))
 
 def state(match="page.html"):
     for p in pages():
@@ -74,6 +87,7 @@ try:
     t.scroll(700, 500, down=True, n=5); time.sleep(0.8)
     check("wheel scrolls page", (state() or {}).get("scrollY", 0) > 100, state() and state().get("scrollY"))
     t.wait_idle(0.5, 5); t.shot(f"{OUT}/02-scrolled.png")
+    check("script title changes reach the tab bar", t.wait_for(lambda: "scrolled" in t.line(1), 5), t.line(1))
     t.scroll(700, 500, down=False, n=10); time.sleep(0.6)
 
     # 5. alert dialog
@@ -92,6 +106,28 @@ try:
     h = pages("document.getElementById('h') && document.getElementById('h').textContent")
     check("prompt answer reaches page", any(p["value"] == "prompt: Ada" for p in h), h)
 
+    # 6b. user agent does not say HeadlessChrome / webdriver
+    st = state() or {}
+    check("user agent hides HeadlessChrome", "HeadlessChrome" not in st.get("ua", "x") and st.get("webdriver") is False, (st.get("ua"), st.get("webdriver")))
+
+    # 6c. <select> opens an in-page menu; keyboard picks a value
+    t.scroll(700, 500, down=False, n=10); time.sleep(0.5)
+    click_el("sel"); time.sleep(0.6)
+    t.shot(f"{OUT}/02b-select-open.png")
+    t.key("down"); t.key("down"); t.key("enter"); time.sleep(0.5)
+    st = state() or {}
+    check("select menu picks a value", st.get("sel") == "gamma" and st.get("selout") == "changed:gamma", (st.get("sel"), st.get("selout")))
+    click_el("sel"); time.sleep(0.5)
+    t.key("escape"); time.sleep(0.3)
+    check("select menu Esc keeps value", (state() or {}).get("sel") == "gamma")
+
+    # 6d. file input asks for a path in the address line
+    click_el("file")
+    check("file chooser prompt", t.wait_text("Upload file:", 5), t.line(2))
+    t.key("ctrl+a"); t.key("ctrl+k")
+    t.type(os.path.join(ROOT, "tests", "fixtures", "page.html")); t.key("enter"); time.sleep(0.6)
+    check("file attached to input", (state() or {}).get("file") == "page.html", state() and state().get("file"))
+
     # 7. target=_blank opens a new tab
     pop = pages("(() => { const r = document.getElementById('pop').getBoundingClientRect(); return [r.x + 5, r.y + r.height/2]; })()")[0]["value"]
     t.click(220 + int(pop[0]), 40 + int(pop[1]))
@@ -102,6 +138,36 @@ try:
     # 8. tab switching with prefix
     t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
     check("prefix+1 switches tab", "page.html" in t.line(2) and "popup" not in t.line(2), t.line(2))
+
+    # 8b. a pending dialog survives switching away and back
+    click_el("cf")
+    check("confirm shown", t.wait_text("Proceed?", 5), t.line(2))
+    t.key("ctrl+b"); t.key("2"); time.sleep(0.5)
+    check("other tab shows its own address", "Proceed?" not in t.line(2), t.line(2))
+    t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
+    check("dialog restored after switching back", "Proceed?" in t.line(2), t.line(2))
+    t.key("enter"); time.sleep(0.5)
+    h = pages("document.getElementById('h') && document.getElementById('h').textContent")
+    check("restored dialog can be answered", any(p["value"] == "confirm: true" for p in h), h)
+
+    # 8c. Ctrl+T then immediate paste lands in the new tab's address bar, not the old page
+    click_el("inp"); time.sleep(0.2)
+    before_inp = (state() or {}).get("inp")
+    t.key("ctrl+t"); t.paste("example.org")
+    time.sleep(1.5)
+    check("paste after Ctrl+T goes to the new address bar", "example.org" in t.line(2), t.line(2))
+    check("old page input untouched", (state() or {}).get("inp") == before_inp, state() and state().get("inp"))
+    t.key("escape"); t.key("ctrl+w")
+    t.wait_for(lambda: " 3 " not in t.line(1), 5); time.sleep(0.5)
+    t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
+
+    # 8d. mouse back button goes back exactly once
+    click_el("next")
+    check("link click navigates", t.wait_for(lambda: any("step=2" in p["url"] for p in pages("1")), 10), [p["url"] for p in pages("1")])
+    time.sleep(0.8)
+    t.write("\x1b[<128;700;500M\x1b[<128;700;500m"); time.sleep(1.5)
+    urls = [p["url"] for p in pages("1")]
+    check("mouse back goes back one page", any(u.endswith("/page.html") for u in urls) and not any("about:blank" in u for u in urls), urls)
 
     # 9. split right and load a second page
     t.key("ctrl+b"); t.key("v")
@@ -152,6 +218,18 @@ try:
     before = len(pages("1"))
     t.key("ctrl+w")
     check("ctrl+w closes pane", t.wait_for(lambda: len(pages("1")) == before - 1, 5))
+    time.sleep(1.0)
+    t.key("ctrl+b"); t.key("x")
+    check("prefix+x closes the other pane", t.wait_for(lambda: len(pages("1")) == before - 2, 5))
+    time.sleep(1.2)
+    with t.lock:
+        placed = list(t.placements.values())
+    full_w = t.cols - 22
+    check("survivor fills the pane area after closes", len(placed) == 1 and placed[0][2] == full_w, placed)
+    t.shot(f"{OUT}/09-after-close.png")
+
+    # 15. Ctrl+Q quits even while the address bar is open
+    t.key("ctrl+l"); time.sleep(0.3)
 finally:
     t.close()
     srv.terminate()

@@ -161,6 +161,9 @@ class Term:
         hold = b""
         if start >= 0 and buf.find(b"\x1b\\", start) < 0:
             buf, hold = buf[:start], buf[start:]
+        elif buf.endswith(b"\x1b"):
+            # Could be the start of an APC split across reads.
+            buf, hold = buf[:-1], b"\x1b"
         self._answer_queries(buf)
         text = bytearray()
         pos = 0

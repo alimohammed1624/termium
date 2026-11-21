@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LineEdit, fit, toUrl, truncate } from "../src/text";
+import { LineEdit, fit, splitPaths, toUrl, truncate } from "../src/text";
 import type { KeyEvent } from "../src/input";
 
 const key = (k: string, mods: Partial<KeyEvent["mods"]> = {}, text = ""): KeyEvent => ({
@@ -52,5 +52,19 @@ describe("LineEdit", () => {
     const e = new LineEdit("", false);
     e.insert("a\nb\tc");
     expect(e.text).toBe("a b c");
+  });
+});
+
+describe("splitPaths", () => {
+  test("quotes and escapes", () => {
+    expect(splitPaths(`a.txt "my file.pdf" b\\ c.png  'd e'`)).toEqual(["a.txt", "my file.pdf", "b c.png", "d e"]);
+    expect(splitPaths("   ")).toEqual([]);
+  });
+});
+
+describe("control characters never reach the terminal", () => {
+  test("C0 and C1 controls are replaced", () => {
+    expect(fit("evil\x1b]52;c;AAAA\x07title\x9b2J", 30)).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+    expect(truncate("a\x1b[31mb", 10)).toBe("a [31mb");
   });
 });

@@ -43,6 +43,11 @@ export type InputEvent =
   | { type: "deviceAttributes" }
   | { type: "focus"; focused: boolean };
 
+/** String.fromCodePoint that tolerates garbage (out-of-range values give ""). */
+function cpString(n: number): string {
+  return Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "";
+}
+
 const NO_MODS: Mods = { shift: false, alt: false, ctrl: false, meta: false };
 
 function decodeMods(raw: number): Mods {
@@ -282,7 +287,9 @@ export class InputParser {
         i += 3;
         continue;
       }
-      if (n === "_" || n === "]" || n === "P") {
+      // Only APC (our kitty graphics replies) is a string sequence we expect;
+      // a legacy Alt+] or Alt+P must stay a key.
+      if (n === "_" || ((n === "]" || n === "P") && this.kittyActive)) {
         // String sequence terminated by ST (ESC \) or BEL.
         let end = -1;
         let termLen = 0;
@@ -367,7 +374,7 @@ export class InputParser {
       const [cpRaw, shiftedRaw] = (fields[0] ?? "").split(":");
       const cp = Number(cpRaw);
       const text = fields[2]
-        ? fields[2].split(":").map((n) => String.fromCodePoint(Number(n))).join("")
+        ? fields[2].split(":").map((n) => cpString(Number(n))).join("")
         : "";
       const legacy = !this.kittyActive;
       const info = KITTY_KEYS[cp];
@@ -377,9 +384,10 @@ export class InputParser {
         return this.emit(makeKey(info, mods, event, legacy, t));
       }
       if (cp >= 57344 && cp <= 63743) return; // other private-use functional keys
-      let ch = String.fromCodePoint(cp);
+      let ch = cpString(cp);
+      if (!ch) return;
       if (mods.shift) {
-        if (shiftedRaw) ch = String.fromCodePoint(Number(shiftedRaw));
+        if (shiftedRaw) ch = cpString(Number(shiftedRaw)) || ch;
         else if (text) ch = text;
         else ch = ch.toUpperCase();
       }

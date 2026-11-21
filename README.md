@@ -23,7 +23,11 @@ not character art, so text is sharp and video, canvas and WebGL work.
   modifiers, shortcuts inside web apps), bracketed paste.
 - **Address bar** with search (DuckDuckGo by default), back, forward,
   reload; JavaScript `alert`, `confirm` and `prompt` dialogs; popups and
-  `target=_blank` links open as tabs; downloads go to `~/Downloads`.
+  `target=_blank` links open as tabs; downloads go to your download
+  directory; file inputs ask for a path; `<select>` dropdowns open as an
+  in-page menu (headless Chromium never paints native ones).
+- **Looks like regular Chrome** to sites (no `HeadlessChrome` user agent or
+  `navigator.webdriver`), so they don't serve bot checks.
 - **Copy** the page selection to your clipboard with Ctrl+C (OSC 52).
 - **Zoom** with Alt+= / Alt+- / Alt+0; the page scale follows your terminal
   font size by default.
@@ -62,7 +66,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | Ctrl+R, F5 (Ctrl+Shift+R hard) | reload |
 | Alt+= / Alt+- / Alt+0 | zoom in / out / reset |
 | Ctrl+C | copy the selection to the clipboard |
-| Ctrl+Q | quit |
+| Ctrl+Q | quit (works everywhere, even mid-prompt) |
 | **Ctrl+B then** | |
 | `c`, `n` / `p`, `1`-`9`, `X` | new / next / previous / go to / close tab |
 | `v` / `-` | split right / down |
@@ -76,6 +80,10 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `Ctrl+B` | send Ctrl+B to the page |
 | `q` / `?` | quit / show keys |
 
+While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
+`Ctrl+B` prefix still work; its own editing keys are Ctrl+A/E (start/end),
+Ctrl+U/K (delete to start/end), Ctrl+W (delete word) and Alt/Ctrl+←/→.
+
 The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
 divider between panes.
@@ -85,7 +93,8 @@ divider between panes.
 - Helium holds network requests for a few seconds after it starts while its
   built-in content blocker loads, so the very first page can take a moment.
 - Only one termium can use a profile at a time; use `--profile` or
-  `--incognito` for a second one.
+  `--incognito` for a second one. If termium was killed outright (`kill
+  -9`), the next start stops the browser it left behind.
 - Logs: `~/.local/state/termium/termium.log` (set `TERMIUM_DEBUG=1` to log
   DevTools traffic) and `browser.log` next to it.
 - The page is a bitmap, so termium needs a graphics-capable terminal. It

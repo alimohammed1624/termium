@@ -1,6 +1,9 @@
 // termium's core: spaces (windows) -> tabs -> split panes, each pane showing
 // one headless browser page rendered with the kitty graphics protocol.
 
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname } from "node:path";
 import type { CDP } from "./cdp";
 import type { InputEvent, KeyEvent, MouseEvent, Mods } from "./input";
 import {
@@ -19,7 +22,8 @@ import {
   type SepGeom,
 } from "./layout";
 import { deleteAllImages, drawImage, out, setClipboard } from "./terminal";
-import { DEFAULT_SEARCH, LineEdit, fit, toUrl, truncate, width } from "./text";
+import { SELECT_POPUP } from "./select-popup";
+import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 
 // ---------------------------------------------------------------- model
 
@@ -37,6 +41,8 @@ export interface Page {
   lastFrame: string | null;
   frameSeq: number;
   navSeq: number;
+  /** When title/URL were last fetched. */
+  infoAt: number;
   imageId: number | null;
   /** Where its image currently sits, so a stale placement can be redrawn. */
   placed: Rect | null;
@@ -62,6 +68,7 @@ type Placement =
 
 type Prompt =
   | { kind: "url"; edit: LineEdit; page: Page }
+  | { kind: "file"; edit: LineEdit; page: Page; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page };
 
@@ -99,6 +106,14 @@ const bg = (hex: string) => `\x1b[48;2;${rgb(hex)}m`;
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
 const at = (row: number, col: number) => `\x1b[${row};${col}H`;
+
+/** Shortcuts that still work while the address bar (or another text prompt) is open. */
+const PROMPT_GLOBALS = new Set([
+  "ctrl+t", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
+  "alt+=", "alt++", "alt+-", "alt+0",
+]);
+/** While a page is blocked on a JavaScript dialog, only these make sense. */
+const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 
 const SIDEBAR_W = 22;
 const TOP_ROWS = 2;
@@ -175,6 +190,9 @@ export class App {
   private pendingMove: (() => Promise<unknown>) | null = null;
   private chromeQueued = false;
   private started = false;
+  private startedAt = Date.now();
+  /** Per-page user agent override without "HeadlessChrome". */
+  private ua: object | null = null;
   private initialTargets = new Set<string>();
 
   constructor(
@@ -218,6 +236,19 @@ export class App {
       page.loading = false;
       this.showToast("Page crashed. Ctrl+R reloads it.");
     });
+    cdp.on("Page.fileChooserOpened", (p, sid) => {
+      const page = sid ? this.pages.get(sid) : undefined;
+      if (!page || p.backendNodeId === undefined) return;
+      if (page !== this.focused) this.focusPage(page);
+      this.prompt = {
+        kind: "file",
+        edit: new LineEdit(this.lastUploadDir, false),
+        page,
+        backendNodeId: p.backendNodeId,
+        multiple: p.mode === "selectMultiple",
+      };
+      this.queueChrome();
+    });
     cdp.on("Browser.downloadWillBegin", (p) => this.showToast(`Downloading ${p.suggestedFilename}…`));
     cdp.on("Browser.downloadProgress", (p) => {
       if (p.state === "completed") this.showToast(`Saved to ${this.opts.downloadDir}`);
@@ -231,6 +262,36 @@ export class App {
         eventsEnabled: true,
       })
       .catch((e) => this.opts.log(`downloads: ${e}`));
+
+    // Present as regular Chrome: "HeadlessChrome" in the user agent and
+    // client hints gets pages to serve bot checks (DuckDuckGo does).
+    try {
+      const v = await cdp.send("Browser.getVersion");
+      const full = String(v.product).split("/")[1] ?? "";
+      const major = full.split(".")[0] ?? "";
+      const platform = process.platform === "darwin" ? "macOS" : "Linux";
+      const brands = (ver: string, filler: string) => [
+        { brand: "Chromium", version: ver },
+        { brand: "Not_A Brand", version: filler },
+      ];
+      this.ua = {
+        userAgent: String(v.userAgent).replace("HeadlessChrome", "Chrome"),
+        platform: process.platform === "darwin" ? "MacIntel" : `Linux ${process.arch === "arm64" ? "aarch64" : "x86_64"}`,
+        userAgentMetadata: {
+          brands: brands(major, "24"),
+          fullVersionList: brands(full, "24.0.0.0"),
+          platform,
+          platformVersion: "",
+          architecture: process.arch === "arm64" ? "arm" : "x86",
+          bitness: "64",
+          model: "",
+          mobile: false,
+          wow64: false,
+        },
+      };
+    } catch (e) {
+      this.opts.log(`version: ${e}`);
+    }
 
     // The first space and tab are created up front; the about:blank page
     // the browser started with is closed once ours exists.
@@ -247,6 +308,9 @@ export class App {
       filter: [{ type: "page", exclude: false }, { exclude: true }],
     });
     const url = initialUrl ? toUrl(initialUrl, this.opts.search) : null;
+    // Script title changes (document.title = ...) don't produce
+    // targetInfoChanged in this browser, so poll titles once a second.
+    this.titlePoll = setInterval(() => void this.pollTitles(), 1000);
     const firstReady = new Promise<void>((r) => (this.onFirstPage = r));
     await this.createPage({ kind: "tab", space, index: 0, editUrl: !url, url: url ?? undefined });
     // Input is held back until the first page exists so early keystrokes land in it.
@@ -290,12 +354,33 @@ export class App {
   private async createPage(placement: Placement): Promise<void> {
     const marker = `${MARKER}${this.nextMarker++}`;
     this.placements.set(marker, placement);
+    // The new page takes focus: hold input until it exists so keys typed
+    // right after Ctrl+T don't land in the page being left.
+    this.holdInput(marker);
     try {
       await this.cdp.send("Target.createTarget", { url: `about:blank${marker}` });
     } catch (e) {
       this.placements.delete(marker);
+      this.releaseInput(marker);
       this.showToast(`Could not open a page: ${e}`);
     }
+  }
+
+  private holding: string | null = null;
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private holdInput(marker: string): void {
+    this.holding = marker;
+    if (this.holdTimer) clearTimeout(this.holdTimer);
+    this.holdTimer = setTimeout(() => this.releaseInput(marker), 5000);
+  }
+
+  private releaseInput(marker: string): void {
+    if (this.holding !== marker) return;
+    this.holding = null;
+    if (this.holdTimer) clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+    this.flushEarlyInput();
   }
 
   private async onAttached(p: any): Promise<void> {
@@ -314,6 +399,7 @@ export class App {
       sessionId,
       url: targetInfo.url,
       title: targetInfo.title,
+      infoAt: 0,
       loading: false,
       crashed: false,
       dialog: null,
@@ -355,6 +441,9 @@ export class App {
     const setup = Promise.all([
       this.cdp.send("Page.enable", {}, sid),
       this.cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sid),
+      this.ua ? this.cdp.send("Emulation.setUserAgentOverride", this.ua, sid) : null,
+      this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: SELECT_POPUP, worldName: "termium", runImmediately: true }, sid),
+      this.cdp.send("Page.setInterceptFileChooserDialog", { enabled: true }, sid),
     ]).catch((e) => this.opts.log(`setup ${sid}: ${e}`));
 
     // Put it into the model before applying metrics so it gets the right size.
@@ -389,6 +478,7 @@ export class App {
     if (placement.editUrl && this.focused === page) this.openUrlPrompt(page, "");
     this.fullRedraw();
     this.onFirstPage?.();
+    if (marker) this.releaseInput(marker);
   }
 
   private onGone(page: Page | undefined): void {
@@ -408,16 +498,16 @@ export class App {
         if (tab.focused === page) tab.focused = leaves(root)[0]!;
         if (leaves(root).length === 1) tab.zoomed = false;
       } else {
+        // Closing the active tab moves to the one after it (or before, if last).
         const i = space.tabs.indexOf(tab);
         space.tabs.splice(i, 1);
-        space.active = Math.max(0, Math.min(space.active >= i ? space.active - 1 : space.active, space.tabs.length - 1));
-        if (i < space.tabs.length && space.active === i - 1 && i === 0) space.active = 0;
-        if (space.tabs.length === 0) {
+        if (space.active > i) space.active--;
+        space.active = Math.max(0, Math.min(space.active, space.tabs.length - 1));
+        if (space.tabs.length === 0 && this.spaces.length > 1) {
           const si = this.spaces.indexOf(space);
-          if (this.spaces.length > 1) {
-            this.spaces.splice(si, 1);
-            if (this.activeSpace >= si) this.activeSpace = Math.max(0, this.activeSpace - 1);
-          }
+          this.spaces.splice(si, 1);
+          if (this.activeSpace > si) this.activeSpace--;
+          this.activeSpace = Math.max(0, Math.min(this.activeSpace, this.spaces.length - 1));
         }
       }
     }
@@ -428,10 +518,23 @@ export class App {
       this.activeSpace = this.spaces.indexOf(space);
       void this.createPage({ kind: "tab", space, index: 0, editUrl: true });
     }
+    this.relayout();
     this.fullRedraw();
   }
 
   closingAll = false;
+
+  /** Keeps the address-line prompt consistent with the focused page. */
+  private syncPrompt(): void {
+    const page = this.focused;
+    const p = this.prompt;
+    if (p && p.kind !== "rename" && p.page !== page) this.prompt = null;
+    if (p && p.kind === "rename" && p.space !== this.space) this.prompt = null;
+    if (this.prompt?.kind === "dialog" && !this.prompt.page.dialog) this.prompt = null;
+    if (page?.dialog && !this.prompt) {
+      this.prompt = { kind: "dialog", edit: new LineEdit(page.dialog.defaultPrompt, true), page };
+    }
+  }
 
   private locate(page: Page): { space: Space; tab: Tab } | null {
     for (const space of this.spaces) {
@@ -453,9 +556,28 @@ export class App {
     this.queueChrome();
   }
 
+  private titlePoll: ReturnType<typeof setInterval> | null = null;
+
+  private async pollTitles(): Promise<void> {
+    if (this.closingAll || this.cdp.closed) return;
+    try {
+      const { targetInfos } = await this.cdp.send("Target.getTargets", { filter: [{ type: "page" }] });
+      let changed = false;
+      for (const info of targetInfos) {
+        const page = this.byTarget.get(info.targetId);
+        if (!page || (page.title === info.title && page.url === info.url)) continue;
+        page.title = info.title;
+        page.url = info.url;
+        changed = true;
+      }
+      if (changed) this.queueChrome();
+    } catch {}
+  }
+
   /** Title and URL; targetInfoChanged alone can lag behind the page. */
   private async refreshInfo(page: Page): Promise<void> {
     try {
+      page.infoAt = Date.now();
       const { targetInfo } = await this.cdp.send("Target.getTargetInfo", { targetId: page.targetId });
       page.url = targetInfo.url;
       page.title = targetInfo.title;
@@ -488,7 +610,8 @@ export class App {
         // Helium holds requests for a few seconds after launch while its
         // built-in content blocker starts; on a fresh profile the held
         // navigation can be aborted. Retry once nothing newer replaced it.
-        if (r?.errorText === "net::ERR_ABORTED" && page.navSeq === seq && attempt < 2 && this.pages.has(page.sessionId)) {
+        const startup = Date.now() - this.startedAt < 20_000;
+        if (r?.errorText === "net::ERR_ABORTED" && !r.isDownload && startup && page.navSeq === seq && attempt < 2 && this.pages.has(page.sessionId)) {
           setTimeout(() => {
             if (page.navSeq === seq) this.navigate(page, url, attempt + 1);
           }, 250);
@@ -541,7 +664,7 @@ export class App {
   }
 
   private mainCol(): number {
-    return this.sidebar && this.cols >= SIDEBAR_W + 30 ? SIDEBAR_W + 1 : 1;
+    return (this.sidebar || this.mode === "spaces") && this.cols >= SIDEBAR_W + 30 ? SIDEBAR_W + 1 : 1;
   }
 
   private paneArea(): Rect {
@@ -551,6 +674,7 @@ export class App {
 
   /** Recomputes pane geometry and fixes every page's viewport and screencast. */
   relayout(): void {
+    this.syncPrompt();
     this.geom.clear();
     this.seps = [];
     const tab = this.tab;
@@ -832,8 +956,10 @@ export class App {
       url: [urlStart, urlStart + fieldW],
     };
 
-    if (prompt && (prompt.kind === "url" || prompt.kind === "rename")) {
-      const label = prompt.kind === "rename" ? "Rename space: " : "";
+    if (prompt && (prompt.kind === "url" || prompt.kind === "rename" || prompt.kind === "file")) {
+      const label =
+        prompt.kind === "rename" ? "Rename space: " :
+        prompt.kind === "file" ? (prompt.multiple ? "Upload files (space-separated): " : "Upload file: ") : "";
       const v = prompt.edit.view(fieldW - 2 - width(label));
       const text = prompt.edit.selectAll
         ? `\x1b[7m${v.text}\x1b[27m`
@@ -858,6 +984,7 @@ export class App {
   }
 
   private promptCursor: { row: number; col: number } | null = null;
+  private lastUploadDir = `${homedir()}/`;
 
   private cursorSeq(): string {
     const c = this.promptCursor;
@@ -920,7 +1047,11 @@ export class App {
   // ---------------------------------------------------------- input
 
   handle(ev: InputEvent): void {
-    if (!this.ready) {
+    if (ev.type === "key" && ev.event !== "release" && comboOf(ev) === "ctrl+q" && this.started) {
+      this.opts.quit();
+      return;
+    }
+    if (!this.ready || this.holding) {
       this.early.push(ev);
       return;
     }
@@ -974,12 +1105,15 @@ export class App {
     }
     if (this.mode === "resize") return this.resizeKey(combo);
     if (this.mode === "spaces") return this.spacesKey(combo);
-    if (this.prompt) return this.promptKey(ev);
-
     if (combo === "ctrl+b") {
       this.mode = "prefix";
       this.queueChrome();
       return;
+    }
+    if (this.prompt) {
+      const allowed = this.prompt.kind === "dialog" ? DIALOG_GLOBALS : PROMPT_GLOBALS;
+      if (allowed.has(combo) && this.globalShortcut(combo)) return;
+      return this.promptKey(ev);
     }
     if (this.globalShortcut(combo)) return;
     const page = this.focused;
@@ -1067,9 +1201,8 @@ export class App {
         if (tab && leaves(tab.root).length > 1) this.mode = "resize";
         return;
       case "w":
-        this.mode = "spaces";
         this.spaceCursor = this.activeSpace;
-        if (!this.sidebar) this.relayoutAndRedraw();
+        this.setMode("spaces");
         return;
       case "shift+n": return this.newSpace();
       case "shift+w":
@@ -1086,7 +1219,6 @@ export class App {
         this.mode = "help";
         this.fullRedraw();
         return;
-      case "l": return;
     }
   }
 
@@ -1133,7 +1265,14 @@ export class App {
     } else {
       this.mode = "normal";
     }
-    if (this.mode === "normal" && !this.sidebar) this.relayoutAndRedraw();
+    this.setMode(this.mode, true);
+  }
+
+  /** Changes mode, re-laying out when that shows or hides the sidebar. */
+  private setMode(mode: Mode, wasSpaces = this.mode === "spaces"): void {
+    this.mode = mode;
+    const sidebarChanged = !this.sidebar && wasSpaces !== (mode === "spaces");
+    if (sidebarChanged) this.relayoutAndRedraw();
     else this.queueChrome();
   }
 
@@ -1157,6 +1296,8 @@ export class App {
         if (url && this.pages.has(prompt.page.sessionId)) this.navigate(prompt.page, url);
       } else if (prompt.kind === "rename") {
         if (text.trim()) prompt.space.name = text.trim();
+      } else if (prompt.kind === "file") {
+        this.uploadFiles(prompt, text);
       } else {
         this.answerDialog(prompt.page, true, text);
       }
@@ -1164,7 +1305,25 @@ export class App {
     this.queueChrome();
   }
 
+  private uploadFiles(prompt: Extract<Prompt, { kind: "file" }>, text: string): void {
+    const home = homedir();
+    let files = splitPaths(text).map((f) => (f === "~" || f.startsWith("~/") ? home + f.slice(1) : f));
+    if (!prompt.multiple) files = files.slice(0, 1);
+    const missing = files.find((f) => !existsSync(f) || !statSync(f).isFile());
+    if (!files.length || missing) {
+      this.showToast(missing ? `No such file: ${missing}` : "No file given");
+      this.prompt = { ...prompt, edit: new LineEdit(text, false) };
+      return;
+    }
+    this.lastUploadDir = `${dirname(files[0]!)}/`;
+    this.cdp
+      .send("DOM.setFileInputFiles", { files, backendNodeId: prompt.backendNodeId }, prompt.page.sessionId)
+      .then(() => this.showToast(`Attached ${files.length === 1 ? files[0] : `${files.length} files`}`))
+      .catch((e) => this.showToast(`Upload failed: ${e}`));
+  }
+
   private answerDialog(page: Page, accept: boolean, promptText: string): void {
+    if (page.dialog?.type === "beforeunload" && !accept) page.navSeq++;
     this.cdp
       .send("Page.handleJavaScriptDialog", { accept, promptText }, page.sessionId)
       .catch((e) => this.opts.log(`dialog: ${e}`));
@@ -1291,8 +1450,7 @@ export class App {
     const tab = this.tab;
     if (!tab || tab.focused === page) return;
     tab.focused = page;
-    if (this.prompt?.kind === "url") this.prompt = null;
-    if (page.dialog) this.prompt = { kind: "dialog", edit: new LineEdit(page.dialog.defaultPrompt, true), page };
+    this.syncPrompt();
     this.queueChrome();
   }
 
@@ -1338,10 +1496,7 @@ export class App {
         this.prompt = null;
         this.queueChrome();
       }
-      if (this.mode !== "normal") {
-        this.mode = "normal";
-        this.queueChrome();
-      }
+      if (this.mode !== "normal") this.setMode("normal");
       this.focusPage(g.item);
     }
     this.pageMouse(g.item, ev, px, py);
@@ -1354,7 +1509,7 @@ export class App {
       if (ev.button !== 0) return true;
       const hit = this.spaceHits.find((h) => h.row === row);
       if (hit) {
-        this.mode = "normal";
+        if (this.mode === "spaces") this.mode = "normal";
         this.switchSpace(hit.index);
       } else if (row === this.newSpaceRow) this.newSpace();
       return true;
@@ -1431,7 +1586,8 @@ export class App {
     const modifiers = modBits(ev.mods);
     const sid = page.sessionId;
     const send = (params: object) => this.cdp.send("Input.dispatchMouseEvent", params, sid).catch(() => {});
-    const names = ["left", "middle", "right", "none", "", "", "", "back", "forward"];
+    // Back/forward buttons navigate through chromeClick; never forward them.
+    const names = ["left", "middle", "right", "none", "", "", "", "", ""];
     const bits = [1, 4, 2, 0, 0, 0, 0, 8, 16];
 
     if (ev.action === "wheel") {

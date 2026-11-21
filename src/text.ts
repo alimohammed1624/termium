@@ -18,6 +18,38 @@ export function toUrl(input: string, search = DEFAULT_SEARCH): string | null {
 
 const segmenter = new Intl.Segmenter();
 
+/** C0 and C1 control characters: page-supplied text must never reach the terminal as controls. */
+const CONTROLS = /[\x00-\x1f\x7f-\x9f]/g;
+
+/** Splits "a b 'c d' e\\ f" into paths, honouring quotes and backslash escapes. */
+export function splitPaths(s: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  let any = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      any = true;
+    } else if (ch === "\\" && i + 1 < s.length) {
+      cur += s[++i];
+      any = true;
+    } else if (/\s/.test(ch)) {
+      if (cur || any) out.push(cur);
+      cur = "";
+      any = false;
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur || any) out.push(cur);
+  return out;
+}
+
 export function width(s: string): number {
   return Bun.stringWidth(s);
 }
@@ -25,6 +57,7 @@ export function width(s: string): number {
 /** Cuts `s` to at most `max` display columns, adding an ellipsis when it had to cut. */
 export function truncate(s: string, max: number): string {
   if (max <= 0) return "";
+  s = s.replace(CONTROLS, " ");
   if (width(s) <= max) return s;
   let outStr = "";
   let w = 0;
@@ -39,7 +72,7 @@ export function truncate(s: string, max: number): string {
 
 /** Truncates or pads `s` to exactly `n` display columns. */
 export function fit(s: string, n: number): string {
-  const t = truncate(s.replace(/[\x00-\x1f\x7f]/g, " "), n);
+  const t = truncate(s, n);
   return t + " ".repeat(Math.max(0, n - width(t)));
 }
 
@@ -56,7 +89,7 @@ export class LineEdit {
   }
 
   insert(s: string): void {
-    const clean = s.replace(/[\r\n\t]+/g, " ").replace(/[\x00-\x1f\x7f]/g, "");
+    const clean = s.replace(/[\r\n\t]+/g, " ").replace(CONTROLS, "");
     if (this.selectAll) {
       this.text = "";
       this.cursor = 0;
@@ -113,10 +146,10 @@ export class LineEdit {
       clearSel();
       return null;
     }
-    if (k === "ArrowLeft" || (ctrl && k === "b")) {
+    if (k === "ArrowLeft") {
       clearSel();
       this.cursor = ctrl || alt ? this.wordLeft() : hadSelection ? 0 : this.prevBoundary();
-    } else if (k === "ArrowRight" || (ctrl && k === "f")) {
+    } else if (k === "ArrowRight") {
       clearSel();
       this.cursor = ctrl || alt ? this.wordRight() : this.nextBoundary();
     } else if (k === "Home" || (ctrl && k === "a")) {

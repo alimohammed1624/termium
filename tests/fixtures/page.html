@@ -15,6 +15,14 @@
 <button id="al" onclick="alert('hello from page')">Alert</button>
 <button id="pr" onclick="document.getElementById('h').textContent = 'prompt: ' + prompt('Your name?', 'anon')">Prompt</button>
 <a id="pop" href="/page.html?popup=1" target="_blank">Open in new tab</a>
+<button id="cf" onclick="document.getElementById('h').textContent = 'confirm: ' + confirm('Proceed?')">Confirm</button>
+<br>
+<select id="sel" onchange="document.getElementById('selout').textContent = 'changed:' + this.value">
+  <option value="alpha">Alpha</option><option value="beta">Beta</option><option value="gamma">Gamma</option>
+</select>
+<span id="selout"></span>
+<input id="file" type="file">
+<a id="next" href="/page.html?step=2">Next page</a>
 <div id="log"></div>
 <div class="tall"></div>
 <script>
@@ -24,6 +32,6 @@
  addEventListener('keyup', e => log(`up ${e.key}`));
  addEventListener('dblclick', e => log(`dblclick`));
  addEventListener('scroll', () => { document.title = 'scrolled ' + Math.round(scrollY); });
- window.termiumState = () => ({ inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
+ window.termiumState = () => ({ sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
 </script>
 </body></html>

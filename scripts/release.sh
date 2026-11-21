@@ -182,15 +182,25 @@ main() {
         t=${entry%%:*}
         name="termium-$t"
         [ -f "$work/bin/$t/termium" ] || die "missing binary for $t"
-        mkdir -p "$work/pkg/$name"
-        cp "$work/bin/$t/termium" "$work/pkg/$name/termium"
-        chmod 755 "$work/pkg/$name/termium"
-        for f in "${TERMIUM_PAYLOAD[@]}"; do cp "$work/src/$f" "$work/pkg/$name/"; done
-        tar -C "$work/pkg" --owner=0 --group=0 --numeric-owner -czf "$dist/$name.tar.gz" "$name"
+        # This script runs without `set -e`, so every step checks itself:
+        # a missing archive must stop the release, not ship without it.
+        mkdir -p "$work/pkg/$name" || die "cannot create $work/pkg/$name"
+        cp "$work/bin/$t/termium" "$work/pkg/$name/termium" || die "cannot copy the $t binary"
+        chmod 755 "$work/pkg/$name/termium" || die "cannot chmod the $t binary"
+        for f in "${TERMIUM_PAYLOAD[@]}"; do
+            cp "$work/src/$f" "$work/pkg/$name/" || die "cannot copy $f into $name"
+        done
+        tar -C "$work/pkg" --owner=0 --group=0 --numeric-owner -czf "$dist/$name.tar.gz" "$name" ||
+            die "packaging $name.tar.gz failed"
+        [ -s "$dist/$name.tar.gz" ] || die "$name.tar.gz is missing or empty"
     done
     # install.sh looks up "<hash>  termium-<target>.tar.gz" lines here.
-    (cd "$dist" && sha256sum -- *.tar.gz >SHA256SUMS)
-    printf '%s\n' "$notes" >"$dist/RELEASE_NOTES.md"
+    (cd "$dist" && sha256sum -- *.tar.gz >SHA256SUMS) || die "writing SHA256SUMS failed"
+    local sums
+    sums=$(wc -l <"$dist/SHA256SUMS")
+    [ "$sums" -eq "${#TERMIUM_TARGETS[@]}" ] ||
+        die "SHA256SUMS has $sums entries, expected ${#TERMIUM_TARGETS[@]}"
+    printf '%s\n' "$notes" >"$dist/RELEASE_NOTES.md" || die "writing release notes failed"
 
     echo "release: packaged in $(fmt_secs $((SECONDS - t0))) -> $dist"
     (cd "$dist" && ls -l -- *.tar.gz SHA256SUMS)

@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 // termium: a Chromium (Helium) browser in your terminal.
 
-import { mkdirSync, mkdtempSync, rmSync, appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { App } from "./app";
-import { findBrowser, launchBrowser, type LaunchedBrowser } from "./browser";
+import { findBrowser, launchBrowser, reapOrphans, type LaunchedBrowser } from "./browser";
 import { CDP } from "./cdp";
 import { InputParser, type InputEvent } from "./input";
 import { DEFAULT_SEARCH } from "./text";
@@ -85,6 +85,31 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
+/** Removes browser temp dirs left by termiums that died without cleaning up. */
+function sweepBrowserTmp(): void {
+  try {
+    for (const name of readdirSync(tmpdir())) {
+      const m = name.match(/^termium-browser-(\d+)-/);
+      if (!m) continue;
+      try {
+        process.kill(Number(m[1]), 0);
+        continue; // still running
+      } catch {}
+      rmSync(join(tmpdir(), name), { recursive: true, force: true });
+    }
+  } catch {}
+}
+
+/** XDG download directory (xdg-user-dir), else ~/Downloads. */
+function downloadDir(): string {
+  try {
+    const r = Bun.spawnSync(["xdg-user-dir", "DOWNLOAD"], { stdout: "pipe", stderr: "ignore" });
+    const dir = r.stdout.toString().trim();
+    if (r.exitCode === 0 && dir && dir !== homedir()) return dir;
+  } catch {}
+  return join(homedir(), "Downloads");
+}
+
 function fail(msg: string): never {
   console.error(`termium: ${msg}`);
   process.exit(2);
@@ -93,6 +118,16 @@ function fail(msg: string): never {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail("needs an interactive terminal");
+
+  const dataDir = join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "termium");
+  const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "termium");
+  mkdirSync(stateDir, { recursive: true });
+  const logPath = join(stateDir, "termium.log");
+  const log = (msg: string) => {
+    try {
+      appendFileSync(logPath, `${new Date().toISOString()} ${msg}\n`);
+    } catch {}
+  };
 
   // Raw mode first: switching modes discards anything typed before it.
   const caps = {
@@ -136,27 +171,28 @@ async function main(): Promise<void> {
 
   process.stdin.setRawMode(true);
   const decoder = new TextDecoder();
-  process.stdin.on("data", (chunk: Buffer) => parser.feed(decoder.decode(chunk, { stream: true })));
+  process.stdin.on("data", (chunk: Buffer) => {
+    try {
+      parser.feed(decoder.decode(chunk, { stream: true }));
+    } catch (e) {
+      // Garbage input must never take the browser down with it.
+      log(`input: ${e instanceof Error ? e.stack : e}`);
+    }
+  });
   process.stdin.resume();
   enterTerminal();
   queryCapabilities();
-
-  const dataDir = join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "termium");
-  const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "termium");
-  mkdirSync(stateDir, { recursive: true });
-  const logPath = join(stateDir, "termium.log");
-  const log = (msg: string) => {
-    try {
-      appendFileSync(logPath, `${new Date().toISOString()} ${msg}\n`);
-    } catch {}
-  };
 
   const profile = args.incognito
     ? mkdtempSync(join(tmpdir(), "termium-"))
     : (args.profile ?? join(dataDir, "profile"));
   mkdirSync(profile, { recursive: true });
 
+  // The browser's temp files (it makes a few per run) go here and are removed on exit.
+  sweepBrowserTmp();
+  const browserTmp = mkdtempSync(join(tmpdir(), `termium-browser-${process.pid}-`));
   let browser: LaunchedBrowser | null = null;
+  let launching: Promise<{ bin: string; b: LaunchedBrowser }> | null = null;
   let cdp: CDP | null = null;
   let shuttingDown = false;
   const shutdown = async (code: number, err?: unknown) => {
@@ -168,6 +204,11 @@ async function main(): Promise<void> {
     try {
       process.stdin.setRawMode(false);
     } catch {}
+    if (!browser && launching) {
+      // Still starting (e.g. we're refusing the terminal): wait for it so it can be stopped.
+      const late = await Promise.race([launching.catch(() => null), Bun.sleep(5000).then(() => null)]);
+      if (late) browser = late.b;
+    }
     if (cdp) {
       await Promise.race([cdp.send("Browser.close").catch(() => {}), Bun.sleep(1500)]);
       cdp.close();
@@ -178,6 +219,7 @@ async function main(): Promise<void> {
       if (browser.proc.exitCode === null) browser.proc.kill(9);
     }
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
+    rmSync(browserTmp, { recursive: true, force: true });
     if (err) {
       log(`fatal: ${err instanceof Error ? err.stack : String(err)}`);
       console.error(`termium: ${err instanceof Error ? err.message : String(err)}`);
@@ -191,9 +233,11 @@ async function main(): Promise<void> {
   process.on("unhandledRejection", (e) => log(`unhandled rejection: ${e instanceof Error ? e.stack : e}`));
 
   // Launch the browser while the terminal answers our capability queries.
-  const launching = (async () => {
+  launching = (async () => {
     const bin = findBrowser(args.browser);
-    const b = await launchBrowser(bin, profile, join(stateDir, "browser.log"));
+    const reaped = await reapOrphans(profile);
+    if (reaped) log(`stopped ${reaped} leftover browser process(es) on ${profile}`);
+    const b = await launchBrowser(bin, profile, join(stateDir, "browser.log"), browserTmp);
     return { bin, b };
   })();
   launching.catch(() => {}); // handled below; avoid an unhandled rejection meanwhile
@@ -201,7 +245,6 @@ async function main(): Promise<void> {
   onCapsDone = null;
 
   if (!caps.graphics) {
-    launching.then(({ b }) => b.proc.kill(9)).catch(() => {});
     await shutdown(
       1,
       new Error("this terminal does not support the kitty graphics protocol. Use Ghostty, kitty or WezTerm."),
@@ -243,7 +286,7 @@ async function main(): Promise<void> {
   app = new App(cdp, {
     scale: args.scale,
     search: args.search,
-    downloadDir: join(homedir(), "Downloads"),
+    downloadDir: downloadDir(),
     quit: () => void shutdown(0),
     log,
   });
