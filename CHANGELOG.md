@@ -6,7 +6,7 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - TBD
+## [0.1.0] - 2026-11-22
 
 Initial release.
 
