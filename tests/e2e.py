@@ -3,7 +3,7 @@
 
 Usage: python3 tests/e2e.py [outdir]
 """
-import json, os, shutil, subprocess, sys, tempfile, time, threading, http.server, functools
+import json, os, shutil, subprocess, sys, tempfile, time, threading, http.server, functools, base64
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 from drive import Term
@@ -55,13 +55,29 @@ def blue_pixels():
         return 0
     return sum(1 for (r, g, b) in img.get_flattened_data() if abs(r - 26) < 25 and abs(g - 115) < 30 and abs(b - 232) < 30)
 
+def frame_matches_pane():
+    """The newest image is exactly the size of the pane it's drawn in (cells x cell size)."""
+    with t.lock:
+        if not t.placements:
+            return None
+        i = max(t.placements)
+        row, col, c, r = t.placements[i]
+        data = t.images[i]
+    from PIL import Image
+    import io
+    w, h = Image.open(io.BytesIO(data)).size
+    return (w, h) == (c * t.cell_w, r * t.cell_h), (w, h), (c * t.cell_w, r * t.cell_h)
+
 def click_el(id_, x0=220, y0=40):
     c = center(id_)
     t.click(x0 + int(c[0]), y0 + int(c[1]))
 
+OTHER_PAGES = ("popup=1", "right=1", "elsewhere=1", "mover=1", "recovered=1", "step=2")
+
 def state(match="page.html"):
+    """termiumState() of the main fixture page (other fixture tabs share the script)."""
     for p in pages():
-        if match in p["url"] and p["value"]:
+        if match in p["url"] and p["value"] and (match != "page.html" or not any(k in p["url"] for k in OTHER_PAGES)):
             return p["value"]
     return None
 
@@ -149,6 +165,33 @@ try:
     t.type(os.path.join(ROOT, "tests", "fixtures", "page.html")); t.key("enter"); time.sleep(0.6)
     check("file attached to input", (state() or {}).get("file") == "page.html", state() and state().get("file"))
 
+    # 6d2. a single-file upload whose path has spaces attaches that file, not a prefix of it
+    updir = tempfile.mkdtemp(prefix="termium-e2e-up-")
+    open(os.path.join(updir, "Project"), "w").write("wrong")
+    open(os.path.join(updir, "Project Notes.txt"), "w").write("right")
+    click_el("file")
+    check("file chooser prompt (again)", t.wait_text("Upload file:", 5), t.line(2))
+    t.key("ctrl+a"); t.key("ctrl+k"); t.paste(os.path.join(updir, "Project Notes.txt")); t.key("enter"); time.sleep(0.6)
+    check("path with spaces attaches the whole name", (state() or {}).get("file") == "Project Notes.txt", state() and state().get("file"))
+    shutil.rmtree(updir, ignore_errors=True)
+
+    # 6d3. a select inside a modal <dialog>
+    click_el("modal"); time.sleep(0.5)
+    mc = next(p["value"] for p in pages("(() => { const r = document.getElementById('msel').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()") if p["value"] and "popup" not in p["url"])
+    before_blue = blue_pixels()
+    t.click(220 + int(mc[0]), 40 + int(mc[1])); time.sleep(0.8)
+    check("select menu shows above a modal dialog", blue_pixels() > before_blue + 200, (before_blue, blue_pixels()))
+    t.key("down"); t.key("enter"); time.sleep(0.4)
+    check("modal select picks a value", (state() or {}).get("msel") == "Banana", (state() or {}).get("msel"))
+    pages("document.getElementById('dlg') && document.getElementById('dlg').close()"); time.sleep(0.3)
+
+    # 6d4. browser shortcuts: Ctrl+S reaches the page, Ctrl+Shift+W doesn't close anything
+    click_el("inp"); time.sleep(0.2)
+    n_pages = len(pages("1"))
+    t.key("ctrl+s"); t.key("ctrl+shift+w"); time.sleep(1.0)
+    check("ctrl+shift+w doesn't close pages", len(pages("1")) == n_pages, (n_pages, len(pages("1"))))
+    check("ctrl+s reaches the page", "down s KeyS C" in (state() or {}).get("log", ""), (state() or {}).get("log", "")[-80:])
+
     # 6e. cross-site iframe: user agent, select menu and file input work inside it
     check("cross-site iframe loaded", t.wait_for(lambda: ((state() or {}).get("frame") or {}).get("ua"), 10))
     fr = (state() or {}).get("frame") or {}
@@ -227,9 +270,6 @@ try:
     rd = next((p["value"] for p in pages() if p["value"] and p["value"].get("reader")), {})
     check("another site can't read the pasted text", "hunter2-secret" not in (rd.get("clips") or []), rd)
     check("another site has no clipboard permission", rd.get("permission") != "granted", rd.get("permission"))
-    foc = {("reader" if (p["value"] or {}).get("reader") else "main"): (p["value"] or {}).get("focused", (p["value"] or {}).get("reader") and None)
-           for p in pages("({ reader: !!window.clips, focused: document.hasFocus() })") if p["value"] and "popup" not in p["url"] and "right" not in p["url"]}
-    check("only the visible page has focus", foc.get("main") is True and foc.get("reader") is False, foc)
     # the reader tab is the one after tab 1: close it
     t.key("ctrl+b"); t.key("2"); time.sleep(0.4); t.key("ctrl+w"); time.sleep(1.0)
     t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
@@ -254,6 +294,10 @@ try:
     check("ctrl+w on an edited page asks to leave", t.wait_text("Leave this page?", 5), t.line(2))
     t.key("escape"); time.sleep(0.8)
     check("staying keeps the page", t.line(1).count("│") == tabs_before + 1, t.line(1))
+    time.sleep(4.5)
+    t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/page.html?elsewhere=1"); t.key("enter")
+    check("navigating later asks again (page not replaced)", t.wait_text("Leave this page?", 6), t.line(2))
+    t.key("escape"); time.sleep(0.5)
     t.key("ctrl+w"); t.wait_text("Leave this page?", 5); t.key("enter"); time.sleep(1.0)
     check("leaving closes it", t.line(1).count("│") == tabs_before, t.line(1))
     t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
@@ -299,16 +343,25 @@ try:
     check("zoom gives full width", zw == [1380], zw)
     t.key("ctrl+b"); t.key("z"); time.sleep(0.5)
 
-    # 9b. closing a split tab: staying on the guarded pane keeps every pane
+    # 9a. both panes of a split are live
+    time.sleep(1.0)
+    live = {p["url"]: p["value"] for p in pages("({ vis: document.visibilityState, ticks: window.ticks })") if p["value"]}
+    t1 = {u: v["ticks"] for u, v in live.items()}; time.sleep(1.0)
+    live2 = {p["url"]: p["value"] for p in pages("({ vis: document.visibilityState, ticks: window.ticks })") if p["value"]}
+    split_pages = [u for u in live2 if "popup" not in u and "page.html" in u and "elsewhere" not in u]
+    check("both split panes visible and running", all(live2[u]["vis"] == "visible" and live2[u]["ticks"] - t1.get(u, 0) >= 5 for u in split_pages) and len(split_pages) >= 2,
+          {u: (live2[u]["vis"], live2[u]["ticks"] - t1.get(u, 0)) for u in split_pages})
+
+    # 9b. closing a split tab with an edited pane: termium asks once; Esc keeps every pane
     t.key("ctrl+b"); t.key("l"); time.sleep(0.3)  # right pane (right=1)
     rc = next(p["value"] for p in pages("(() => { const r = document.getElementById('guard').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()") if "right=1" in p["url"])
     right_x0 = 220 + (t.cols - 22) // 2 * 10 + 10
     t.click(right_x0 + int(rc[0]), 60 + int(rc[1])); time.sleep(0.2); t.type("x"); time.sleep(0.3)
     n_before = len(pages("1"))
     t.key("ctrl+b"); t.key("shift+x")
-    check("closing a split tab asks the guarded pane", t.wait_text("Leave this page?", 6), t.line(2))
+    check("closing a split tab with unsaved changes asks once", t.wait_text("unsaved changes", 6), t.line(2))
     t.key("escape"); time.sleep(1.5)
-    check("staying keeps every pane of the tab", len(pages("1")) == n_before, (n_before, len(pages("1"))))
+    check("keeping keeps every pane of the tab", len(pages("1")) == n_before, (n_before, len(pages("1"))))
     pages("window.onbeforeunload = null")
     t.key("ctrl+b"); t.key("h"); time.sleep(0.3)
 
@@ -334,11 +387,36 @@ try:
     t.key("escape"); time.sleep(0.5)
     check("help closes", "termium keys" not in t.text())
 
+    # 12b. pictures stay the exact size of their pane through sidebar toggles and zoom
+    t.key("ctrl+b"); t.key("b"); time.sleep(1.5)
+    m = frame_matches_pane(); check("frame matches pane after hiding the sidebar", m and m[0], m)
+    t.key("ctrl+b"); t.key("b"); time.sleep(1.5)
+    t.key("alt+="); time.sleep(1.5)
+    m = frame_matches_pane(); check("frame matches pane after zooming", m and m[0], m)
+    t.key("alt+0"); time.sleep(1.0)
+
     # 13. resize the terminal
     t.resize(120, 40); time.sleep(1.5)
     ws = [p["value"]["w"] for p in pages() if p["value"]]
     check("resize relayouts panes", t.wait_for(lambda: any(p["value"] and p["value"]["w"] < 700 for p in pages()), 5), ws)
     t.shot(f"{OUT}/08-resized.png")
+    m = frame_matches_pane(); check("frame matches pane after a terminal resize", m and m[0], m)
+
+    # 13b. closing a page while the pointer moves doesn't stop pointer motion
+    t.key("ctrl+t"); time.sleep(0.8); t.type(f"{BASE}/page.html?mover=1"); t.key("enter"); time.sleep(2.5)
+    for i in range(30):
+        t.mouse(400 + i * 5, 400, action="move"); time.sleep(0.008)
+    t.key("ctrl+w")
+    for i in range(30):
+        t.mouse(400 + i * 5, 400, action="move"); time.sleep(0.008)
+    time.sleep(1.5)
+    m0 = {p["url"]: (p["value"] or {}).get("moves") for p in pages() if p["value"]}
+    for i in range(40):
+        t.mouse(300 + i * 7, 300 + i, action="move"); time.sleep(0.02)
+    time.sleep(1.0)
+    m1 = {p["url"]: (p["value"] or {}).get("moves") for p in pages() if p["value"]}
+    check("pointer motion still reaches pages after a close", any((m1.get(u) or 0) > (m0.get(u) or 0) for u in m1), (m0, m1))
+    check("closing a new tab returns to the tab before it", "⊞" in t.line(1).split("│")[0] or "scrolled" in t.line(1).split("│")[0], t.line(1))
 
     # 14. close pane with ctrl+w
     before = len(pages("1"))

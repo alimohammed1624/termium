@@ -44,6 +44,32 @@ jobs:
       - run: bun run typecheck
       - run: bun test --pass-with-no-tests
 
+  # The real-stack checks: termium in a Ghostty-like pseudo-terminal driving
+  # a real headless browser. Runners have no Helium, so they use the
+  # preinstalled Google Chrome (termium works with any Chromium).
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Python deps for the test driver
+        run: python3 -m pip install --user pyte pillow
+      - name: Let Chrome use its sandbox on Ubuntu 24.04
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: tests/e2e.py
+        run: TERMIUM_BROWSER="$(command -v google-chrome)" python3 tests/e2e.py "$RUNNER_TEMP/e2e"
+      - name: tests/lifecycle.py
+        run: TERMIUM_BROWSER="$(command -v google-chrome)" python3 tests/lifecycle.py
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-screenshots
+          path: ${{ runner.temp }}/e2e
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15

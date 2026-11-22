@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 // termium: a Chromium (Helium) browser in your terminal.
 
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { App } from "./app";
-import { clearOwner, findBrowser, launchBrowser, reapOrphans, writeOwner, type LaunchedBrowser } from "./browser";
+import { clearOwner, findBrowser, launchBrowser, reapOrphans, type LaunchedBrowser } from "./browser";
 import { CDP } from "./cdp";
 import { InputParser, type InputEvent } from "./input";
 import { DEFAULT_SEARCH } from "./text";
@@ -46,7 +46,7 @@ function parseArgs(argv: string[]): Args {
     scale: null,
     search: process.env.TERMIUM_SEARCH || DEFAULT_SEARCH,
   };
-  if (!args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
+  let searchFromFlag = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const value = () => {
@@ -69,6 +69,7 @@ function parseArgs(argv: string[]): Args {
       case "--search": {
         args.search = value();
         if (!args.search.includes("%s")) fail("--search needs a %s placeholder");
+        searchFromFlag = true;
         break;
       }
       case "--scale": {
@@ -83,6 +84,7 @@ function parseArgs(argv: string[]): Args {
         args.url = a;
     }
   }
+  if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
   return args;
 }
 
@@ -139,6 +141,13 @@ function downloadDir(): string {
   return join(homedir(), "Downloads");
 }
 
+/** Keeps a log under 5 MB: the previous one is kept as <name>.1. */
+function rotate(path: string): void {
+  try {
+    if (statSync(path).size > 5 * 1024 * 1024) renameSync(path, `${path}.1`);
+  } catch {}
+}
+
 function isRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -161,6 +170,7 @@ async function main(): Promise<void> {
   const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "termium");
   mkdirSync(stateDir, { recursive: true });
   const logPath = join(stateDir, "termium.log");
+  for (const name of ["termium.log", "browser.log"]) rotate(join(stateDir, name));
   const log = (msg: string) => {
     try {
       appendFileSync(logPath, `${new Date().toISOString()} ${msg}\n`);
@@ -269,8 +279,10 @@ async function main(): Promise<void> {
           process.kill(pid, "SIGKILL");
         } catch {}
       }
-      clearOwner(profile);
     }
+    // Only now that the browser is gone: a kill before this point leaves
+    // the record for the next start to act on.
+    clearOwner(profile);
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
     rmSync(browserTmp, { recursive: true, force: true });
     if (err) {
@@ -312,7 +324,6 @@ async function main(): Promise<void> {
     const launched = await launching;
     bin = launched.bin;
     browser = launched.b;
-    writeOwner(profile, [...new Set([browser.browserPid, browser.proc.pid])]);
     cdp = browser.cdp;
   } catch (e) {
     await shutdown(1, e);

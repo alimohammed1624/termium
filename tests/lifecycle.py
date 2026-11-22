@@ -8,7 +8,7 @@ graphics, a long TMPDIR, garbage input, and Ctrl+Q from the address bar.
 
 Usage: python3 tests/lifecycle.py
 """
-import glob, os, shutil, signal, subprocess, sys, tempfile, time
+import glob, os, shutil, signal, subprocess, sys, tempfile, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -84,6 +84,29 @@ try:
         loser = y if alive[0] is x else x
         check("simultaneous start: the other says why", "in use" in output(loser), output(loser)[-200:])
         alive[0].close()
+
+    # killed during startup, after the browser took the profile but before the terminal answered
+    class SlowTerminal(Term):
+        def _answer_queries(self, data):
+            threading.Timer(3.0, Term._answer_queries, (self, data)).start()
+    prof5 = os.path.join(tmp, "p5")
+    k = SlowTerminal(["bun", main, "--profile", prof5], cwd=ROOT)
+    t0 = time.time()
+    while time.time() - t0 < 10 and not os.path.lexists(os.path.join(prof5, "SingletonLock")):
+        time.sleep(0.05)
+    os.kill(k.pid, signal.SIGKILL); os.waitpid(k.pid, 0); k.alive = False
+    time.sleep(1)
+    k2 = Term(["bun", main, "--profile", prof5], cwd=ROOT)
+    check("killed mid-startup: next start recovers the profile", at_address_bar(k2))
+    k2.close()
+
+    # HiDPI cells: the picture has the pane's full device resolution
+    hd = Term(["bun", main, "--incognito", "data:text/html,<h1>sharp</h1>"], cwd=ROOT, cols=100, rows=30, cell_w=20, cell_h=40)
+    hd.wait_frames(1, 25); time.sleep(3)
+    img = hd.latest_image()
+    want = ((100 - 22) * 20, (30 - 2) * 40)
+    check("HiDPI frames at full device resolution", img is not None and img.size == want, (img and img.size, want))
+    hd.close()
 
     # garbage input doesn't crash it
     c.write("\x1b[1114112u\x1b[99999999;5u\x1b[;;u\x1b[;;;;;;;u\x1b[<;;M\x1b_Gq=1\x1b\\")

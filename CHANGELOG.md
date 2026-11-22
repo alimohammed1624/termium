@@ -36,3 +36,5 @@ Initial release.
   even from two termiums at once; paste fires the page's paste event
   without exposing the clipboard to other sites.
 - Crashed or hung pages are replaced on the next reload or navigation.
+- Sharp rendering on HiDPI terminals (full device resolution).
+- Browser shortcuts that would act on the hidden browser are not passed on.

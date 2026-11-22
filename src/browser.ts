@@ -8,6 +8,7 @@ import {
   constants,
   openSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   rmSync,
   statSync,
@@ -70,7 +71,7 @@ export function profileOwner(profileDir: string): number | null {
   const pid = Number(m[2]);
   // A lock left by a crash can name a pid that now belongs to something
   // else: only a live browser on this very profile counts.
-  return alive(pid) && commandOf(pid).includes(`--user-data-dir=${profileDir}`) ? pid : null;
+  return alive(pid) && browserOnProfile(pid, profileDir) ? pid : null;
 }
 
 // ------------------------------------------------------------- ownership
@@ -87,7 +88,8 @@ interface Owner {
   browsers: number[];
 }
 
-const OWNER_FILE = "termium.owner";
+/** Each termium writes its own record: <profile>/termium.owner.<pid>. */
+const OWNER_PREFIX = "termium.owner.";
 
 /** When a process started (ps lstart), to tell a live pid from a reused one. */
 function startTime(pid: number): string {
@@ -108,35 +110,53 @@ function commandOf(pid: number): string {
   }
 }
 
+/** Whether `pid` is a browser running on exactly this profile directory. */
+function browserOnProfile(pid: number, profileDir: string): boolean {
+  // Chromium's rewritten process title joins its arguments with spaces.
+  return ` ${commandOf(pid)} `.includes(` --user-data-dir=${profileDir} `);
+}
+
+/**
+ * Records that this termium owns `browserPids` on the profile. Written as
+ * soon as the browser is spawned, so a termium killed at any later moment
+ * leaves a record its successor can act on.
+ */
 export function writeOwner(profileDir: string, browserPids: number[]): void {
   const owner: Owner = { termium: process.pid, termiumStart: startTime(process.pid), browsers: browserPids };
   try {
-    writeFileSync(join(profileDir, OWNER_FILE), JSON.stringify(owner));
+    writeFileSync(join(profileDir, OWNER_PREFIX + process.pid), JSON.stringify(owner));
   } catch {}
 }
 
 export function clearOwner(profileDir: string): void {
-  try {
-    const owner = JSON.parse(readFileSync(join(profileDir, OWNER_FILE), "utf8")) as Owner;
-    if (owner.termium === process.pid) rmSync(join(profileDir, OWNER_FILE), { force: true });
-  } catch {}
+  rmSync(join(profileDir, OWNER_PREFIX + process.pid), { force: true });
 }
 
 /**
- * Stops a browser left on this profile by a termium that is no longer
+ * Stops browsers left on this profile by termiums that are no longer
  * running. Returns how many processes it stopped. Browsers termium didn't
  * record, and browsers whose termium is still alive, are never touched.
  */
 export async function reapOrphans(profileDir: string): Promise<number> {
-  let owner: Owner;
+  let names: string[] = [];
   try {
-    owner = JSON.parse(readFileSync(join(profileDir, OWNER_FILE), "utf8")) as Owner;
+    names = readdirSync(profileDir).filter((n) => n.startsWith(OWNER_PREFIX));
   } catch {
     return 0;
   }
-  if (alive(owner.termium) && startTime(owner.termium) === owner.termiumStart) return 0;
-  const flag = `--user-data-dir=${profileDir}`;
-  const victims = (owner.browsers ?? []).filter((pid) => alive(pid) && commandOf(pid).includes(flag));
+  const victims: number[] = [];
+  for (const name of names) {
+    const path = join(profileDir, name);
+    let owner: Owner;
+    try {
+      owner = JSON.parse(readFileSync(path, "utf8")) as Owner;
+    } catch {
+      continue;
+    }
+    if (alive(owner.termium) && startTime(owner.termium) === owner.termiumStart) continue; // still running
+    for (const pid of owner.browsers ?? []) if (alive(pid) && browserOnProfile(pid, profileDir)) victims.push(pid);
+    rmSync(path, { force: true });
+  }
   for (const pid of victims) {
     try {
       process.kill(pid, "SIGTERM");
@@ -149,7 +169,6 @@ export async function reapOrphans(profileDir: string): Promise<number> {
       process.kill(pid, "SIGKILL");
     } catch {}
   }
-  rmSync(join(profileDir, OWNER_FILE), { force: true });
   return victims.length;
 }
 
@@ -224,6 +243,7 @@ export async function launchBrowser(
   });
   closeSync(logFd);
   const [, , , toBrowser, fromBrowser] = proc.stdio as unknown as number[];
+  writeOwner(profileDir, [proc.pid]);
 
   // Ready once the browser answers on our pipe. Asking it for its own pid
   // (rather than reading the profile lock) means a second termium racing
@@ -231,12 +251,14 @@ export async function launchBrowser(
   const cdp = CDP.fromPipe(toBrowser!, fromBrowser!);
   const failed = (why: string) => {
     const tail = readTail(logPath, logStart);
-    const hint = /ProcessSingleton|profile.*in use|SingletonLock/i.test(tail)
-      ? " The profile is in use; close the other termium, or pass --profile <dir> or --incognito."
-      : /Socket path too long/.test(tail)
-        ? " Its temp directory path is too long; set a shorter TMPDIR."
-        : "";
-    return new Error(`${why}.${hint}\n${tail}`);
+    const hint = /Permission denied|Read-only file system|EACCES|EROFS/i.test(tail)
+      ? ` It can't write to the profile directory ${profileDir}.`
+      : /ProcessSingleton|profile appears to be in use|SingletonLock: File exists/i.test(tail)
+        ? " The profile is in use; close the other termium, or pass --profile <dir> or --incognito."
+        : /Socket path too long/.test(tail)
+          ? " Its temp directory path is too long; set a shorter TMPDIR."
+          : "";
+    return new Error(`${why}.${hint}${tail ? `\n${tail}` : ""}`);
   };
   const exited = proc.exited.then((code) => {
     throw failed(`Browser exited with code ${code} before it was ready`);
@@ -245,10 +267,17 @@ export async function launchBrowser(
     throw failed(`Browser did not start within ${timeoutMs / 1000}s (see ${logPath})`);
   });
   try {
-    const info = await Promise.race([cdp.send("SystemInfo.getProcessInfo"), exited, timeout]);
+    // If the pipe closes, it's because the browser exited: report that.
+    const asked = cdp.send("SystemInfo.getProcessInfo").catch(async (e) => {
+      await Promise.race([proc.exited, Bun.sleep(2000)]);
+      if (proc.exitCode !== null) await exited;
+      throw e;
+    });
+    const info = await Promise.race([asked, exited, timeout]);
     const browserPid = (info as any)?.processInfo?.find((p: any) => p.type === "browser")?.id ?? proc.pid;
     exited.catch(() => {});
     timeout.catch(() => {});
+    writeOwner(profileDir, [...new Set([browserPid, proc.pid])]);
     return { proc, cdp, browserPid };
   } catch (e) {
     proc.kill(9);

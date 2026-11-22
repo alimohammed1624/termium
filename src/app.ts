@@ -41,8 +41,7 @@ export interface Page {
   closing: boolean;
   /** A file input waiting for a path (shown when the page is focused). */
   fileChooser: { sessionId: string; backendNodeId: number; multiple: boolean } | null;
-  /** Whether the page currently believes it has focus. */
-  focusEmu: boolean;
+
   /** Viewport we last gave the page, in CSS px. */
   css: { w: number; h: number; dsf: number } | null;
   casting: { w: number; h: number } | null;
@@ -70,6 +69,8 @@ interface Space {
   name: string;
   tabs: Tab[];
   active: number;
+  /** Tabs most recently shown first: closing the current tab returns to the previous one. */
+  recent: Tab[];
 }
 
 type Placement =
@@ -81,7 +82,8 @@ type Prompt =
   | { kind: "url"; edit: LineEdit; page: Page }
   | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
-  | { kind: "dialog"; edit: LineEdit; page: Page };
+  | { kind: "dialog"; edit: LineEdit; page: Page }
+  | { kind: "confirm"; edit: LineEdit; message: string; onYes: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help";
 
@@ -125,6 +127,28 @@ const PROMPT_GLOBALS = new Set([
   "ctrl+t", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
   "alt+=", "alt++", "alt+-", "alt+0",
 ]);
+/**
+ * Browser shortcuts a page never sees in Chrome (window/tab management).
+ * Forwarded, the headless browser would act on them (Ctrl+Shift+W closes
+ * every page), so they're dropped.
+ */
+const BROWSER_RESERVED = new Set([
+  "ctrl+n", "ctrl+shift+n", "ctrl+shift+t", "ctrl+shift+w", "ctrl+tab", "ctrl+shift+tab", "alt+f4", "ctrl+shift+q",
+]);
+/**
+ * Browser shortcuts pages may use themselves (Ctrl+S in an editor, Ctrl+K
+ * palettes). They're delivered to the page as DOM events only, so the
+ * page sees them but the browser's own action (save dialog, history,
+ * devtools, zoom…) can't run behind termium's back.
+ */
+const BROWSER_SHORTCUTS = new Set([
+  "ctrl+s", "ctrl+p", "ctrl+o", "ctrl+d", "ctrl+f", "ctrl+g", "ctrl+shift+g", "ctrl+h", "ctrl+j", "ctrl+u",
+  "ctrl+k", "ctrl+e", "ctrl+=", "ctrl+-", "ctrl+0", "ctrl+shift+b", "ctrl+shift+o", "ctrl+shift+delete",
+  "ctrl+shift+i", "ctrl+shift+j", "ctrl+shift+c", "ctrl+shift+m", "ctrl+pageup", "ctrl+pagedown",
+  "ctrl+shift+pageup", "ctrl+shift+pagedown", "f3", "f7", "f12", "alt+home", "alt+f", "alt+e", "alt+shift+i",
+  "alt+shift+p", "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9",
+]);
+
 /** While a page is blocked on a JavaScript dialog, only these make sense. */
 const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 
@@ -205,8 +229,7 @@ export class App {
   private mouseButtons = 0;
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
   private drag: { sep: SepGeom<Page>; moved: boolean } | null = null;
-  private moveInFlight = false;
-  private pendingMove: (() => Promise<unknown>) | null = null;
+  private hoverPage: Page | null = null;
   private chromeQueued = false;
   private started = false;
   private startedAt = Date.now();
@@ -225,6 +248,8 @@ export class App {
     const cdp = this.cdp;
     cdp.on("Target.attachedToTarget", (p, parent) => this.onAttached(p, parent).catch((e) => this.opts.log(String(e))));
     cdp.on("Target.detachedFromTarget", (p) => {
+      // Commands still waiting on that session will never be answered.
+      this.cdp.failSession(p.sessionId);
       this.frameOwner.delete(p.sessionId);
       this.onGone(this.pages.get(p.sessionId));
     });
@@ -285,6 +310,8 @@ export class App {
 
     // Downloads land under generated names in a staging dir and are moved
     // into place with a name that never replaces an existing file.
+    // Downloads interrupted by an earlier exit are partial: drop them.
+    rmSync(this.opts.downloadStaging, { recursive: true, force: true });
     mkdirSync(this.opts.downloadStaging, { recursive: true });
     await cdp
       .send("Browser.setDownloadBehavior", {
@@ -370,7 +397,7 @@ export class App {
 
   private newSpaceModel(): Space {
     const id = this.nextSpaceId++;
-    return { id, name: `space ${id}`, tabs: [], active: 0 };
+    return { id, name: `space ${id}`, tabs: [], active: 0, recent: [] };
   }
 
   private get space(): Space | undefined {
@@ -395,7 +422,9 @@ export class App {
     // right after Ctrl+T don't land in the page being left.
     this.holdInput(marker);
     try {
-      await this.cdp.send("Target.createTarget", { url: `about:blank${marker}` });
+      // Its own window: headless tabs sharing a window hide each other, and
+      // panes of a split must all stay live.
+      await this.cdp.send("Target.createTarget", { url: `about:blank${marker}`, newWindow: true });
     } catch (e) {
       this.placements.delete(marker);
       this.releaseInput(marker);
@@ -475,7 +504,6 @@ export class App {
       dialog: null,
       closing: false,
       fileChooser: null,
-      focusEmu: false,
       css: null,
       casting: null,
       lastFrame: null,
@@ -514,7 +542,12 @@ export class App {
     const sid = sessionId;
     // Don't await these before resuming: a page opened by another page
     // (target=_blank, window.open) only answers once it runs.
-    const setup = this.documentSetup(sid);
+    // Every page counts as focused (as the window you're looking at would);
+    // input only ever goes to the one you've focused in termium.
+    const setup = Promise.all([
+      this.documentSetup(sid),
+      this.cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sid),
+    ]).catch((e) => this.opts.log(`setup ${sid}: ${e}`));
 
     // Put it into the model before applying metrics so it gets the right size.
     const replacing = placement.kind === "replace" ? this.locate(placement.old) : null;
@@ -569,8 +602,7 @@ export class App {
 
   private onGone(page: Page | undefined): void {
     if (!page) return;
-    this.closeWaiters.get(page)?.(true);
-    this.closeWaiters.delete(page);
+    if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
     if (page.imageId !== null) out(`\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\`);
@@ -586,10 +618,15 @@ export class App {
         if (tab.focused === page) tab.focused = leaves(root)[0]!;
         if (leaves(root).length === 1) tab.zoomed = false;
       } else {
-        // Closing the active tab moves to the one after it (or before, if last).
+        // Closing the active tab goes back to the tab shown before it (as
+        // Chrome does for a tab you just opened), else to its neighbour.
         const i = space.tabs.indexOf(tab);
+        const wasActive = space.active === i;
         space.tabs.splice(i, 1);
-        if (space.active > i) space.active--;
+        space.recent = space.recent.filter((t) => t !== tab && space.tabs.includes(t));
+        const back = wasActive ? space.recent[0] : undefined;
+        if (back) space.active = space.tabs.indexOf(back);
+        else if (space.active > i) space.active--;
         space.active = Math.max(0, Math.min(space.active, space.tabs.length - 1));
         if (space.tabs.length === 0 && this.spaces.length > 1) {
           const si = this.spaces.indexOf(space);
@@ -612,11 +649,33 @@ export class App {
 
   closingAll = false;
 
+  /** Remembers the shown tab, and makes the focused page the browser's active one. */
+  private noteShown(): void {
+    const space = this.space;
+    const tab = this.tab;
+    if (space && tab && space.recent[0] !== tab) space.recent = [tab, ...space.recent.filter((t) => t !== tab)].slice(0, 32);
+    this.activateFocused();
+  }
+
+  private activeTarget: string | null = null;
+
+  /**
+   * Each page has its own browser window, so activating the focused one
+   * hides nothing; it's what makes keyboard input, insertText and the
+   * clipboard act on that page.
+   */
+  private activateFocused(): void {
+    const page = this.focused;
+    if (!page || this.activeTarget === page.targetId) return;
+    this.activeTarget = page.targetId;
+    this.cdp.send("Target.activateTarget", { targetId: page.targetId }).catch(() => {});
+  }
+
   /** Keeps the address-line prompt consistent with the focused page. */
   private syncPrompt(): void {
     const page = this.focused;
     const p = this.prompt;
-    if (p && p.kind !== "rename" && p.page !== page) this.prompt = null;
+    if (p && p.kind !== "rename" && p.kind !== "confirm" && p.page !== page) this.prompt = null;
     if (p && p.kind === "rename" && p.space !== this.space) this.prompt = null;
     if (this.prompt?.kind === "dialog" && !this.prompt.page.dialog) this.prompt = null;
     if (page?.dialog && !this.prompt) {
@@ -765,9 +824,9 @@ export class App {
     }
   }
 
-  /** Crashed, or stuck in a navigation that never answered (e.g. a blocked chrome:// page). */
+  /** Crashed. (A hung renderer is found by `responsive`; a slow server is neither.) */
   private wedged(page: Page): boolean {
-    return page.crashed || (page.navStarted > 0 && Date.now() - page.navStarted > 4000);
+    return page.crashed;
   }
 
   /** Whether the page's renderer answers at all (a hung one never does). */
@@ -813,45 +872,80 @@ export class App {
   }
 
   private closeTab(tab: Tab): void {
-    void this.closeGroup(leaves(tab.root));
+    const pages = leaves(tab.root);
+    // A single page asks for itself (its own "Leave this page?").
+    if (pages.length === 1) this.closePage(pages[0]!);
+    else void this.closeGroup(pages, "tab");
   }
-
-  private closeWaiters = new Map<Page, (closed: boolean) => void>();
 
   /**
-   * Closes several pages like a browser closing a window: pages with a
-   * beforeunload handler go first, one at a time, and if you choose to stay
-   * on one, nothing else closes.
+   * Closes several pages (a tab's panes, a space) all-or-nothing: if any of
+   * them would ask "Leave this page?", termium asks once for the group, and
+   * either closes every page or keeps every page.
    */
-  private async closeGroup(pages: Page[]): Promise<void> {
+  private async closeGroup(pages: Page[], what: string): Promise<void> {
     const guarded: Page[] = [];
-    const free: Page[] = [];
-    for (const page of pages) ((await this.hasUnloadHandler(page)) ? guarded : free).push(page);
-    for (const page of guarded) {
-      const closed = await new Promise<boolean>((resolve) => {
-        this.closeWaiters.set(page, resolve);
-        this.closePage(page);
-      });
-      if (!closed) return;
-    }
-    for (const page of free) this.closePage(page);
+    for (const page of pages) if (await this.wouldAsk(page)) guarded.push(page);
+    const closeAll = () => {
+      for (const page of pages) {
+        page.closing = true;
+        this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
+      }
+    };
+    if (guarded.length === 0) return closeAll();
+    this.prompt = {
+      kind: "confirm",
+      message: `${guarded.length === 1 ? "A page" : `${guarded.length} pages`} in this ${what} may have unsaved changes. Close anyway?`,
+      onYes: closeAll,
+      edit: new LineEdit("", false),
+    };
+    this.queueChrome();
   }
 
-  private async hasUnloadHandler(page: Page): Promise<boolean> {
-    const sid = page.sessionId;
-    const check = async () => {
-      const { result } = await this.cdp.send("Runtime.evaluate", { expression: "window", objectGroup: "termium-unload" }, sid);
-      const { listeners } = await this.cdp.send("DOMDebugger.getEventListeners", { objectId: result.objectId }, sid);
-      const prop = await this.cdp.send(
+  /**
+   * Whether closing the page would make it ask first: a beforeunload
+   * handler in it or any of its frames, on a page the user has interacted
+   * with (pages without user activation don't get to ask).
+   */
+  private async wouldAsk(page: Page): Promise<boolean> {
+    const sessions = [page.sessionId, ...[...this.frameOwner].filter(([, p]) => p === page).map(([sid]) => sid)];
+    const probe = async (sid: string) => {
+      const group = "termium-unload";
+      // Every window in this session: the top one and same-process frames.
+      const { result } = await this.cdp.send(
         "Runtime.evaluate",
-        { expression: "typeof window.onbeforeunload === 'function'", returnByValue: true },
+        {
+          expression: `(() => { const out = [];
+            const walk = (w) => { out.push(w); for (let i = 0; i < w.frames.length; i++) { try { void w.frames[i].document; walk(w.frames[i]); } catch {} } };
+            walk(window);
+            return out; })()`,
+          objectGroup: group,
+        },
         sid,
       );
-      this.cdp.send("Runtime.releaseObjectGroup", { objectGroup: "termium-unload" }, sid).catch(() => {});
-      return listeners.some((l: any) => l.type === "beforeunload") || prop?.result?.value === true;
+      const activated = await this.cdp.send(
+        "Runtime.evaluate",
+        { expression: "navigator.userActivation ? navigator.userActivation.hasBeenActive : true", returnByValue: true },
+        sid,
+      );
+      let guarded = false;
+      const { result: props } = await this.cdp.send("Runtime.getProperties", { objectId: result.objectId, ownProperties: true }, sid);
+      for (const prop of props) {
+        const id = prop.value?.objectId;
+        if (!id || !/^\d+$/.test(prop.name)) continue;
+        const { listeners } = await this.cdp.send("DOMDebugger.getEventListeners", { objectId: id }, sid);
+        const handler = await this.cdp.send(
+          "Runtime.callFunctionOn",
+          { objectId: id, functionDeclaration: "function () { return typeof this.onbeforeunload === 'function'; }", returnByValue: true },
+          sid,
+        );
+        if (listeners.some((l: any) => l.type === "beforeunload") || handler?.result?.value === true) guarded = true;
+      }
+      this.cdp.send("Runtime.releaseObjectGroup", { objectGroup: group }, sid).catch(() => {});
+      return guarded && activated?.result?.value !== false;
     };
-    // A page stuck in a dialog won't answer; don't let it hold up the close.
-    return Promise.race([check().catch(() => false), Bun.sleep(1500).then(() => false)]);
+    const one = (sid: string) => Promise.race([probe(sid).catch(() => false), Bun.sleep(1500).then(() => false)]);
+    return (await Promise.all(sessions.map(one))).some(Boolean);
   }
 
   // ---------------------------------------------------------- geometry
@@ -885,7 +979,7 @@ export class App {
   /** Recomputes pane geometry and fixes every page's viewport and screencast. */
   relayout(): void {
     this.syncPrompt();
-    this.syncFocus();
+    this.noteShown();
     this.geom.clear();
     this.seps = [];
     const tab = this.tab;
@@ -927,11 +1021,7 @@ export class App {
           screenHeight: Math.max(h + 120, 1080),
         }, sid)
         .catch((e) => this.opts.log(`metrics: ${e}`));
-      // Keep window.outerWidth/outerHeight consistent with the viewport.
-      this.cdp
-        .send("Browser.getWindowForTarget", { targetId: page.targetId })
-        .then(({ windowId }) => this.cdp.send("Browser.setWindowBounds", { windowId, bounds: { width: w, height: h + 87 } }))
-        .catch(() => {});
+
     }
     if (!page.casting || page.casting.w !== devW || page.casting.h !== devH) {
       const restart = !!page.casting;
@@ -975,12 +1065,47 @@ export class App {
   private onFrame(p: any, sid: string | undefined): void {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page) return;
+    if (page.css && page.css.dsf > 1.01) {
+      // Screencast frames come at CSS-pixel size whatever the scale factor,
+      // which is blurry on HiDPI. There a frame only says "something
+      // changed": take a full-resolution screenshot instead.
+      this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
+      page.frameSeq++;
+      this.captureSharp(page);
+      return;
+    }
     page.lastFrame = p.data;
     page.frameSeq++;
     // Ack once the terminal has taken the frame, so the browser only
     // produces frames as fast as the terminal can show them.
     const ack = () => this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
     if (!this.paint(page, ack)) ack();
+  }
+
+  private capturing = new Set<Page>();
+  private captureAgain = new Set<Page>();
+
+  /** One full-resolution capture at a time per page; changes during it trigger one more. */
+  private captureSharp(page: Page): void {
+    if (this.capturing.has(page)) {
+      this.captureAgain.add(page);
+      return;
+    }
+    this.capturing.add(page);
+    this.cdp
+      .send("Page.captureScreenshot", { format: "png", optimizeForSpeed: true }, page.sessionId)
+      .then(
+        ({ data }) =>
+          new Promise<void>((resolve) => {
+            page.lastFrame = data;
+            if (!this.paint(page, resolve)) resolve();
+          }),
+      )
+      .catch(() => {})
+      .finally(() => {
+        this.capturing.delete(page);
+        if (this.captureAgain.delete(page) && this.pages.has(page.sessionId)) this.captureSharp(page);
+      });
   }
 
   /** Draws the page's latest frame into its pane; false if there was nothing to draw. */
@@ -1148,6 +1273,12 @@ export class App {
     const modeW = width(mode);
 
     const prompt = this.prompt;
+    if (prompt && prompt.kind === "confirm") {
+      const text = fit(` ⚠ ${prompt.message}  [Enter] Close  [Esc] Keep`, w - modeW);
+      this.promptCursor = null;
+      this.navHits = null;
+      return s + bg(C.yellow) + fg(C.crust) + BOLD + text + RESET + bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
+    }
     if (prompt && prompt.kind === "dialog") {
       const d = prompt.page.dialog;
       const label =
@@ -1309,7 +1440,7 @@ export class App {
         return this.onMouse(ev);
       case "paste": {
         const p = this.prompt;
-        if (p && (p.kind !== "dialog" || p.page.dialog?.type === "prompt")) {
+        if (p && p.kind !== "confirm" && (p.kind !== "dialog" || p.page.dialog?.type === "prompt")) {
           p.edit.insert(ev.text);
           this.queueChrome();
         } else if (this.focused) {
@@ -1330,6 +1461,9 @@ export class App {
       const target = this.pageKeysDown.get(k);
       this.pageKeysDown.delete(k);
       if (target && this.pages.has(target.sessionId)) this.sendKey(target, ev);
+      const synthetic = this.syntheticDown.get(k);
+      this.syntheticDown.delete(k);
+      if (synthetic && this.pages.has(synthetic.sessionId)) this.domKey(synthetic, ev, "keyup");
       return;
     }
     if (isModifier(ev)) {
@@ -1364,6 +1498,12 @@ export class App {
     if (this.globalShortcut(combo)) return;
     const page = this.focused;
     if (!page) return;
+    if (BROWSER_RESERVED.has(combo)) return;
+    if (BROWSER_SHORTCUTS.has(combo)) {
+      this.domKey(page, ev, "keydown");
+      this.syntheticDown.set(ev.code || ev.key, page);
+      return;
+    }
     if (combo === "ctrl+c" || combo === "ctrl+x") {
       // Read the selection once earlier keys have landed (key events travel
       // through the browser process, evaluation goes straight to the page),
@@ -1371,7 +1511,7 @@ export class App {
       const hold = `copy-${++this.pasteSeq}`;
       this.holdInput(hold);
       void (async () => {
-        await this.inputTail;
+        await this.settledInput();
         await this.copySelection(page);
         this.sendKey(page, ev);
         this.releaseInput(hold);
@@ -1468,7 +1608,7 @@ export class App {
         if (space) this.prompt = { kind: "rename", edit: new LineEdit(space.name, true), space };
         return;
       case "shift+d":
-        if (space) void this.closeGroup(space.tabs.flatMap((t) => leaves(t.root)));
+        if (space) void this.closeGroup(space.tabs.flatMap((t) => leaves(t.root)), "space");
         return;
       case "b":
         this.sidebar = !this.sidebar;
@@ -1537,6 +1677,16 @@ export class App {
 
   private promptKey(ev: KeyEvent): void {
     const prompt = this.prompt!;
+    if (prompt.kind === "confirm") {
+      if (ev.key === "Enter") {
+        this.prompt = null;
+        prompt.onYes();
+      } else if (ev.key === "Escape") {
+        this.prompt = null;
+      }
+      this.queueChrome();
+      return;
+    }
     if (prompt.kind === "dialog" && prompt.page.dialog?.type !== "prompt") {
       if (ev.key === "Enter" || ev.key === "Escape") {
         this.answerDialog(prompt.page, ev.key === "Enter", "");
@@ -1569,8 +1719,14 @@ export class App {
 
   private uploadFiles(prompt: Extract<Prompt, { kind: "file" }>, text: string): void {
     const home = homedir();
-    let files = splitPaths(text).map((f) => (f === "~" || f.startsWith("~/") ? home + f.slice(1) : f));
-    if (!prompt.multiple) files = files.slice(0, 1);
+    const expand = (f: string) => (f === "~" || f.startsWith("~/") ? home + f.slice(1) : f);
+    // A path that names a file as typed is that file, spaces and all; only
+    // otherwise is the text split (quotes and backslashes keep spaces).
+    const whole = expand(splitPaths(text).length === 1 ? splitPaths(text)[0]! : text.trim());
+    let files: string[];
+    if (existsSync(whole) && statSync(whole).isFile()) files = [whole];
+    else if (!prompt.multiple) files = [whole];
+    else files = splitPaths(text).map(expand);
     const missing = files.find((f) => !existsSync(f) || !statSync(f).isFile());
     if (!files.length || missing) {
       this.showToast(missing ? `No such file: ${missing}` : "No file given");
@@ -1588,9 +1744,8 @@ export class App {
     if (page.dialog?.type === "beforeunload" && !accept) {
       page.navSeq++; // a cancelled navigation is not something to retry
       page.closing = false; // and a cancelled close stays open
-      this.closeWaiters.get(page)?.(false);
-      this.closeWaiters.delete(page);
     }
+    page.navStarted = 0;
     this.cdp
       .send("Page.handleJavaScriptDialog", { accept, promptText }, page.dialog?.sessionId ?? page.sessionId)
       .catch((e) => this.opts.log(`dialog: ${e}`));
@@ -1603,6 +1758,30 @@ export class App {
     const current = text ?? (page.url === "about:blank" || page.url.includes(MARKER) ? "" : page.url);
     this.prompt = { kind: "url", edit: new LineEdit(current, true), page };
     this.queueChrome();
+  }
+
+  private syntheticDown = new Map<string, Page>();
+
+  /** Delivers a key to the focused element as a DOM event only (see BROWSER_SHORTCUTS). */
+  private domKey(page: Page, ev: KeyEvent, type: "keydown" | "keyup"): void {
+    const init = {
+      key: ev.key, code: ev.code, keyCode: ev.vk, which: ev.vk, location: ev.location, repeat: ev.event === "repeat",
+      ctrlKey: ev.mods.ctrl, shiftKey: ev.mods.shift, altKey: ev.mods.alt, metaKey: ev.mods.meta,
+      bubbles: true, cancelable: true, composed: true,
+    };
+    const expression = `(() => {
+      let d = document, a = d.activeElement;
+      for (;;) {
+        if (a && a.shadowRoot && a.shadowRoot.activeElement) { a = a.shadowRoot.activeElement; continue; }
+        if (a && (a.tagName === "IFRAME" || a.tagName === "FRAME")) {
+          let inner = null; try { inner = a.contentDocument; } catch {}
+          if (inner) { d = inner; a = d.activeElement; continue; }
+        }
+        break;
+      }
+      (a || d.body || d.documentElement).dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, ${JSON.stringify(init)}));
+    })()`;
+    this.inputTail = this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {});
   }
 
   private sendKey(page: Page, ev: KeyEvent): void {
@@ -1653,13 +1832,16 @@ export class App {
         ),
       );
     try {
-      await this.inputTail;
+      await this.settledInput();
       // Clipboard access is granted to the page receiving the paste, for the
       // paste only, and the clipboard is emptied afterwards: no other site
       // can read what was pasted.
       origin = (await evaluate("location.origin"))?.result?.value ?? "";
       if (!/^https?:\/\//.test(origin)) throw new Error("no origin to grant");
       await setClipboardAccess("granted");
+      // The browser clipboard is emptied afterwards rather than restored:
+      // restoring would mean reading it while this site has access, and it
+      // may hold something copied on another site.
       const r = await evaluate(`navigator.clipboard.writeText(${JSON.stringify(text)}).then(() => true, () => false)`);
       if (r?.result?.value !== true) throw new Error("clipboard write refused");
       const key = { key: "v", code: "KeyV", windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 };
@@ -1678,6 +1860,11 @@ export class App {
   private pasteSeq = 0;
   /** The most recent input dispatch; resolves once the page has handled it. */
   private inputTail: Promise<unknown> = Promise.resolve();
+
+  /** Earlier input has landed, or a second has passed (a hung page never answers). */
+  private settledInput(): Promise<unknown> {
+    return Promise.race([this.inputTail, Bun.sleep(1000)]);
+  }
 
   private async copySelection(page: Page): Promise<void> {
     // Follows focus into same-origin iframes; a focused cross-site iframe is
@@ -1782,19 +1969,8 @@ export class App {
     if (!tab || tab.focused === page || !leaves(tab.root).includes(page)) return;
     tab.focused = page;
     this.syncPrompt();
-    this.syncFocus();
+    this.activateFocused();
     this.queueChrome();
-  }
-
-  /**
-   * Only the page you're looking at has focus (document.hasFocus, focus and
-   * blur events, a blinking caret): it's made the browser's active target.
-   */
-  private syncFocus(): void {
-    const focused = this.focused;
-    if (!focused || focused.focusEmu) return;
-    for (const page of this.pages.values()) page.focusEmu = page === focused;
-    this.cdp.send("Target.activateTarget", { targetId: focused.targetId }).catch(() => {});
   }
 
   // ---------------------------------------------------------- mouse
@@ -1821,6 +1997,11 @@ export class App {
         this.relayoutAndRedraw();
       }
       return;
+    }
+
+    if (ev.action === "move" && this.hoverPage && !this.mouseCapture &&
+        ![...this.geom.values()].some((p) => p.item === this.hoverPage && inRect(p.content, col, row))) {
+      this.leaveHover();
     }
 
     // Pointer captured by a page while a button is held.
@@ -1943,7 +2124,11 @@ export class App {
     }
     if (ev.action === "move") {
       const button = this.mouseButtons & 1 ? "left" : this.mouseButtons & 2 ? "right" : this.mouseButtons & 4 ? "middle" : "none";
-      this.queueMove(() => send({ type: "mouseMoved", x, y, button, buttons: this.mouseButtons, modifiers }));
+      this.queueMove(page, () => send({ type: "mouseMoved", x, y, button, buttons: this.mouseButtons, modifiers }));
+      // Moving from one page onto another (or onto termium's own UI, below)
+      // ends hover on the first, as a mouse leaving a window does.
+      if (this.hoverPage && this.hoverPage !== page) this.leaveHover();
+      this.hoverPage = page;
       return;
     }
     const name = names[ev.button] ?? "none";
@@ -1965,20 +2150,36 @@ export class App {
     }
   }
 
-  /** Coalesces pointer motion: at most one move in flight, latest wins. */
-  private queueMove(fn: () => Promise<unknown>): void {
-    if (this.moveInFlight) {
-      this.pendingMove = fn;
+  private leaveHover(): void {
+    const page = this.hoverPage;
+    this.hoverPage = null;
+    if (!page || !this.pages.has(page.sessionId)) return;
+    this.cdp
+      .send("Input.dispatchMouseEvent", { type: "mouseMoved", x: -1, y: -1, button: "none", buttons: 0 }, page.sessionId)
+      .catch(() => {});
+  }
+
+  /**
+   * Coalesces pointer motion per page: at most one move in flight, latest
+   * wins. A move that never answers (page closed or hung) stops blocking
+   * after a second.
+   */
+  private queueMove(page: Page, fn: () => Promise<unknown>): void {
+    if (this.movesInFlight.has(page)) {
+      this.pendingMoves.set(page, fn);
       return;
     }
-    this.moveInFlight = true;
-    fn().finally(() => {
-      this.moveInFlight = false;
-      const next = this.pendingMove;
-      this.pendingMove = null;
-      if (next) this.queueMove(next);
+    this.movesInFlight.add(page);
+    Promise.race([fn(), Bun.sleep(1000)]).finally(() => {
+      this.movesInFlight.delete(page);
+      const next = this.pendingMoves.get(page);
+      this.pendingMoves.delete(page);
+      if (next && this.pages.has(page.sessionId)) this.queueMove(page, next);
     });
   }
+
+  private movesInFlight = new Set<Page>();
+  private pendingMoves = new Map<Page, () => Promise<unknown>>();
 }
 
 // ---------------------------------------------------------------- helpers

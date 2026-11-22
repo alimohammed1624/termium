@@ -10,6 +10,7 @@ interface Pending {
   resolve: (value: any) => void;
   reject: (err: Error) => void;
   method: string;
+  sessionId?: string;
 }
 
 export class CDP {
@@ -131,11 +132,20 @@ export class CDP {
     const msg: Record<string, unknown> = { id, method, params };
     if (sessionId) msg.sessionId = sessionId;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      this.pending.set(id, { resolve, reject, method, sessionId });
       const text = JSON.stringify(msg);
       this.trace?.("->", text);
       this.write(text);
     });
+  }
+
+  /** Fails every command still waiting on a session that has gone away. */
+  failSession(sessionId: string): void {
+    for (const [id, p] of this.pending) {
+      if (p.sessionId !== sessionId) continue;
+      this.pending.delete(id);
+      p.reject(new Error(`${p.method}: session closed`));
+    }
   }
 
   on(method: string, handler: Handler): void {

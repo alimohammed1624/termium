@@ -96,6 +96,16 @@ describe("robustness", () => {
     p.feed("\x1b_x");
     expect(events.map((e) => [e.key, e.mods.alt])).toEqual([["_", true], ["x", false]]);
   });
+  test("legacy Alt+[ doesn't swallow the next key", async () => {
+    const events: any[] = [];
+    const p = new InputParser((e) => events.push(e));
+    p.kittyActive = false;
+    p.expectApc = false;
+    p.feed("\x1b[");
+    await Bun.sleep(80);
+    p.feed("a");
+    expect(events.map((e) => [e.key, e.mods.alt])).toEqual([["[", true], ["a", false]]);
+  });
   test("legacy Alt+] and Alt+P are keys, not string sequences", () => {
     const evs = parse("\x1b]\x1bPx", false) as any[];
     expect(evs.map((e) => [e.key, e.mods.alt])).toEqual([["]", true], ["P", true], ["x", false]]);

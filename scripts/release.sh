@@ -102,6 +102,8 @@ main() {
         check 0 "CHANGELOG.md has no '## [$version]' section"
         notes=$(changelog_section Unreleased)
     fi
+    check "$(grep -Eq "^## \[$version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md && echo 1 || echo 0)" \
+        "CHANGELOG.md's '## [$version]' heading needs the release date (## [$version] - YYYY-MM-DD)"
 
     if [ "$dry" = 0 ]; then
         command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required to publish"

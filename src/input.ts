@@ -221,8 +221,35 @@ export class InputParser {
       clearTimeout(this.escTimer);
       this.escTimer = null;
     }
+    if (this.stallTimer) {
+      clearTimeout(this.stallTimer);
+      this.stallTimer = null;
+    }
     this.buf += chunk;
     this.drain();
+    this.watchStall();
+  }
+
+  private stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Legacy terminals send Alt+[ as "ESC [" and Alt+O as "ESC O", which also
+   * start escape sequences. Terminals write a real sequence in one go, so
+   * an "ESC [" or "ESC O" left incomplete for a moment was a keypress: emit
+   * it rather than let it swallow the next key.
+   */
+  private watchStall(): void {
+    const stalled = this.buf;
+    if (this.kittyActive || this.pasting || stalled.length < 2 || stalled[0] !== "\x1b") return;
+    if (stalled[1] !== "[" && stalled[1] !== "O") return;
+    this.stallTimer = setTimeout(() => {
+      this.stallTimer = null;
+      if (this.buf !== stalled) return;
+      this.buf = stalled.slice(2);
+      this.legacyChar(stalled[1]!, true);
+      this.drain();
+      this.watchStall();
+    }, 40);
   }
 
   private drain(): void {

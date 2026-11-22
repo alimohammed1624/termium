@@ -199,6 +199,10 @@ main() {
         *) dir="$(pwd)/$dir" ;;
     esac
     mkdir -p "$dir" || err "could not create $dir"
+    # mv onto a directory would move the binary *into* it and "succeed".
+    if [ -d "$dir/termium" ] && [ ! -L "$dir/termium" ]; then
+        err "$dir/termium is a directory; move it away and run this again"
+    fi
     staged="$dir/.termium.install.$$"
     if ! cp "$bin" "$staged" || ! chmod 755 "$staged" || ! mv -f "$staged" "$dir/termium"; then
         rm -f "$staged"

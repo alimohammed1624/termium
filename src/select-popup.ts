@@ -85,7 +85,18 @@ export const SELECT_POPUP = String.raw`(() => {
     if (below >= Math.min(maxH, opts.length * itemH + 8) || below >= above) menu.style.top = r.bottom + "px";
     else menu.style.bottom = (vh - r.top) + "px";
     root.append(menu);
+    // As a popover the menu is in the top layer, above modal <dialog>s and
+    // fullscreen elements; the host itself is a transparent, click-through
+    // layer over the viewport.
+    css(host, {
+      position: "fixed", inset: "0", margin: "0", padding: "0", border: "0", background: "transparent",
+      width: "100vw", height: "100vh", "max-width": "none", "max-height": "none", overflow: "visible",
+      "pointer-events": "none",
+    });
+    css(menu, { "pointer-events": "auto" });
+    host.setAttribute("popover", "manual");
     document.documentElement.appendChild(host);
+    try { host.showPopover(); } catch {}
     setActive(Math.max(0, sel.selectedIndex));
     const step = (dir) => {
       for (let i = active + dir; i >= 0 && i < opts.length; i += dir) if (enabled(i)) return setActive(i);

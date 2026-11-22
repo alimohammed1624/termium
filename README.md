@@ -100,8 +100,15 @@ divider between panes.
 - Downloads go to `$TERMIUM_DOWNLOAD_DIR`, else your XDG download directory
   (`xdg-user-dir DOWNLOAD`), else `~/Downloads`, and never replace an
   existing file (`name (1).ext`).
-- Closing a pane or tab lets the page ask "Leave this page?" first, as a
-  browser would; choosing to stay keeps the whole tab (or space) open.
+- Closing a pane lets the page ask "Leave this page?" first, as a browser
+  would. Closing a tab of several panes, or a space, asks once if any page
+  in it may have unsaved changes, and closes all or nothing.
+- Browser shortcuts that would act on the hidden browser (Ctrl+Shift+W,
+  Ctrl+N, …) are not passed on; ones pages use themselves (Ctrl+S, Ctrl+K,
+  Ctrl+F, …) reach the page.
+- Known limits of headless Chromium: background tabs still count as
+  visible, WebGL runs on the SwiftShader software renderer, and zoom
+  applies to all pages rather than per site.
 - Pasting gives clipboard access to the page you paste into, for that
   paste only, and empties the browser's clipboard afterwards, so no other
   site can read it.
@@ -251,6 +258,9 @@ page state through DevTools. Needs Helium and Python 3 with `pyte` and
 python3 tests/e2e.py /tmp/termium-e2e    # screenshots land there
 python3 tests/lifecycle.py               # second instances, kill -9 recovery, bad terminals
 ```
+
+CI runs both against Google Chrome (runners have no Helium), alongside the
+type check, unit tests and builds.
 
 `scripts/screenshots.sh` regenerates `docs/screenshots/` from a real Ghostty
 window (KDE's Spectacle captures it; keep that window focused).

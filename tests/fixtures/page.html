@@ -29,11 +29,16 @@
 <br>
 <iframe id="xf" width="420" height="90" style="border:1px solid #999"></iframe>
 <span id="shadowhost"></span>
+<button id="modal" onclick="document.getElementById('dlg').showModal()">Modal</button>
+<dialog id="dlg"><select id="msel"><option>Apple</option><option>Banana</option><option>Cherry</option></select>
+<button onclick="document.getElementById('dlg').close()">Close</button></dialog>
 <button id="filelater" onclick="setTimeout(() => document.getElementById('file').click(), 1500)">File later</button>
 <div id="log"></div>
 <div class="tall"></div>
 <script>
- var clicks = 0, pastes = 0;
+ var clicks = 0, pastes = 0, moves = 0, ticks = 0;
+ addEventListener('mousemove', () => moves++);
+ setInterval(() => ticks++, 100);
  addEventListener('paste', () => pastes++, true);
  window.frameState = null;
  addEventListener('message', (e) => { window.frameState = e.data; });
@@ -48,6 +53,6 @@
  addEventListener('keyup', e => log(`up ${e.key}`));
  addEventListener('dblclick', e => log(`dblclick`));
  addEventListener('scroll', () => { document.title = 'scrolled ' + Math.round(scrollY); });
- window.termiumState = () => ({ ssel: document.getElementById('shadowhost').shadowRoot.getElementById('ssel').value, focused: document.hasFocus(), pastes, frame: window.frameState, sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
+ window.termiumState = () => ({ moves, ticks, vis: document.visibilityState, msel: document.getElementById('msel').value, ssel: document.getElementById('shadowhost').shadowRoot.getElementById('ssel').value, focused: document.hasFocus(), pastes, frame: window.frameState, sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
 </script>
 </body></html>
