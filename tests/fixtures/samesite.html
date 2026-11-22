@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><title>same-site frame host</title></head>
+<body>
+<p>The frame below is the same site (127.0.0.1) on another port: a different origin in the same process.</p>
+<iframe id="ss" width="420" height="90"></iframe>
+<script>
+ const port = new URLSearchParams(location.search).get('port');
+ document.getElementById('ss').src = 'http://127.0.0.1:' + port + '/frame.html';
+ window.frameState = null;
+ addEventListener('message', (e) => { window.frameState = e.data; });
+ window.termiumState = () => { const r = document.getElementById('ss').getBoundingClientRect(); return { frame: window.frameState, at: [r.x, r.y] }; };
+</script>
+</body></html>

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Optional local CI for termium: the checks of .github/workflows/ci.yml, run
+# Optional local CI for termium: the checks of .github/workflows/ci.yml (all but
+# its e2e job, which needs a browser and takes minutes; see tests/), run
 # on this machine (and optionally on a Mac over ssh) as a pre-flight before
 # pushing. GitHub Actions is the primary CI (every push to main and every
 # pull request); nothing requires this script to have run.

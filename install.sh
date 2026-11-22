@@ -204,20 +204,25 @@ main() {
         err "$dir/termium is a directory; move it away and run this again"
     fi
     staged="$dir/.termium.install.$$"
-    if ! cp "$bin" "$staged" || ! chmod 755 "$staged" || ! mv -f "$staged" "$dir/termium"; then
+    if ! cp "$bin" "$staged" || ! chmod 755 "$staged"; then
         rm -f "$staged"
         err "could not install termium into $dir (is it writable?)"
     fi
-
-    installed=$("$dir/termium" --version 2>/dev/null) || installed=""
-    if [ -n "$installed" ]; then
-        say "Installed $installed to $dir/termium"
-    else
-        warn "installed $dir/termium, but '$dir/termium --version' failed"
+    # Check the new binary runs here before it replaces anything: a wrong
+    # architecture or missing libraries must not cost a working install.
+    installed=$("$staged" --version 2>/dev/null) || installed=""
+    if [ -z "$installed" ]; then
+        rm -f "$staged"
         case "$target" in
-            *-musl) warn "musl builds need libstdc++ and libgcc (Alpine: apk add libstdc++ libgcc)" ;;
+            *-musl) err "the $target build doesn't run here; musl builds need libstdc++ and libgcc (Alpine: apk add libstdc++ libgcc). Nothing was changed." ;;
+            *) err "the $target build doesn't run on this machine ('termium --version' failed). Nothing was changed." ;;
         esac
     fi
+    if ! mv -f "$staged" "$dir/termium"; then
+        rm -f "$staged"
+        err "could not install termium into $dir (is it writable?)"
+    fi
+    say "Installed $installed to $dir/termium"
 
     case ":${PATH:-}:" in
         *":$dir:"*) ;;

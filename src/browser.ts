@@ -104,30 +104,60 @@ export function lockProfile(profileDir: string): void {
   const tmp = join(profileDir, `termium.lock.${process.pid}`);
   writeFileSync(tmp, JSON.stringify({ pid: process.pid, start: startTime(process.pid) }));
   try {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 20; attempt++) {
       try {
         linkSync(tmp, path);
         return;
       } catch (e: any) {
         if (e?.code !== "EEXIST") throw new Error(`can't lock the profile ${profileDir}: ${e?.message ?? e}`);
       }
-      let holder: { pid: number; start: string } | null = null;
-      try {
-        holder = JSON.parse(readFileSync(path, "utf8"));
-      } catch {}
-      if (holder && alive(holder.pid) && startTime(holder.pid) === holder.start) {
+      const seen = readLock(path);
+      if (seen.holder && alive(seen.holder.pid) && startTime(seen.holder.pid) === seen.holder.start) {
         throw new Error(
-          `the profile ${profileDir} is in use by another termium (pid ${holder.pid}). ` +
+          `the profile ${profileDir} is in use by another termium (pid ${seen.holder.pid}). ` +
             "Close it, or pass --profile <dir> or --incognito.",
         );
       }
-      // Left by a termium that died (or unreadable, e.g. from an older
-      // termium interrupted mid-write): take it over.
-      rmSync(path, { force: true });
+      // Stale (its termium died, or it's unreadable). Only one termium may
+      // clear it, and only if it's still the very lock that was judged
+      // stale; otherwise two starters could each delete the other's fresh lock.
+      if (takeReclaim(profileDir)) {
+        try {
+          if (readLock(path).raw === seen.raw) rmSync(path, { force: true });
+        } finally {
+          rmSync(join(profileDir, "termium.lock.reclaim"), { force: true });
+        }
+      } else {
+        Bun.sleepSync(25);
+      }
     }
     throw new Error(`can't lock the profile ${profileDir}`);
   } finally {
     rmSync(tmp, { force: true });
+  }
+}
+
+function readLock(path: string): { raw: string | null; holder: { pid: number; start: string } | null } {
+  let raw: string | null = null;
+  try {
+    raw = readFileSync(path, "utf8");
+    return { raw, holder: JSON.parse(raw) };
+  } catch {
+    return { raw, holder: null };
+  }
+}
+
+/** The right to clear a stale lock; itself taken over if its holder died holding it (older than 5 s). */
+function takeReclaim(profileDir: string): boolean {
+  const path = join(profileDir, "termium.lock.reclaim");
+  try {
+    closeSync(openSync(path, "wx"));
+    return true;
+  } catch {
+    try {
+      if (Date.now() - statSync(path).mtimeMs > 5000) rmSync(path, { force: true });
+    } catch {}
+    return false;
   }
 }
 

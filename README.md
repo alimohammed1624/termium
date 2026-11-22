@@ -81,8 +81,9 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `q` / `?` | quit / show keys |
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
-`Ctrl+B` prefix still work; its own editing keys are Ctrl+A/E (start/end),
-Ctrl+U/K (delete to start/end), Ctrl+W (delete word) and Alt/Ctrl+←/→.
+`Ctrl+B` prefix still work, and Ctrl+W closes the tab as in Chrome; its own
+editing keys are Ctrl+A/E (start/end), Ctrl+U/K (delete to start/end),
+Ctrl+Backspace (delete word) and Alt/Ctrl+←/→.
 
 The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
@@ -121,8 +122,13 @@ divider between panes.
   that is only busy is left alone.
 - A dialog from a page you're not looking at waits (its tab shows `!`)
   instead of taking focus.
-- Ctrl+Q asks first if a page may have unsaved changes; press it again to
-  quit anyway.
+- Ctrl+Q asks first if a page may have unsaved changes or a download is
+  running; press it again to quit anyway. (It goes by whether a page has
+  an unsaved-changes handler, so some sites ask even with nothing unsaved.)
+- Nothing is copied out of password fields.
+- Not supported yet: HTTP authentication prompts, date and colour pickers,
+  and copying from a page's own "copy" buttons to your clipboard (select
+  the text and press Ctrl+C instead).
 - The page is a bitmap, so termium needs a graphics-capable terminal. It
   checks on startup and says so if yours is not.
 

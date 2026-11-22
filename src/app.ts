@@ -46,6 +46,8 @@ export interface Page {
   css: { w: number; h: number; dsf: number } | null;
   /** Screencast size the page should have, in device px (null: hidden). */
   casting: { w: number; h: number } | null;
+  /** The last (low-resolution) screencast frame, at HiDPI where frames only signal changes. */
+  lastCast?: string;
   /** What the browser has actually been given and confirmed. */
   appliedCss: { w: number; h: number; dsf: number } | null;
   appliedCast: { w: number; h: number } | null;
@@ -132,7 +134,7 @@ const at = (row: number, col: number) => `\x1b[${row};${col}H`;
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
 const PROMPT_GLOBALS = new Set([
-  "ctrl+t", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
+  "ctrl+t", "ctrl+w", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
   "alt+=", "alt++", "alt+-", "alt+0",
 ]);
 /**
@@ -545,7 +547,10 @@ export class App {
       const space = loc?.space ?? this.space ?? this.spaces[0]!;
       const index = loc ? space.tabs.indexOf(loc.tab) + 1 : space.tabs.length;
       // A middle-clicked link opens in the background, as in Chrome.
-      const background = Date.now() - this.lastMiddlePress < 1500;
+      const middle = Date.now() - this.lastMiddlePress < 1500;
+      if (middle) this.lastMiddlePress = 0; // one middle click, one background tab
+      // A popup from a page you aren't looking at doesn't take focus either.
+      const background = middle || (!!opener && opener !== this.focused);
       placement = { kind: "tab", space, index, editUrl: false, background };
     }
 
@@ -886,8 +891,8 @@ export class App {
       // seconds apart count as hung.
       if (await this.responsive(page, 3000)) return;
       await Bun.sleep(2000);
-      if (!stuck() || (await this.responsive(page, 3000))) return;
-      if (stuck() && this.pages.has(page.sessionId)) {
+      if (!stuck() || page.dialog || (await this.responsive(page, 3000))) return;
+      if (stuck() && !page.dialog && this.pages.has(page.sessionId)) {
         this.showToast("The page stopped responding; opened it again");
         this.recover(page, url);
       }
@@ -931,11 +936,16 @@ export class App {
     if (p?.kind === "confirm" && p.tag === "quit") return this.opts.quit();
     const pages = [...this.pages.values()];
     const asking = (await Promise.all(pages.map((page) => this.wouldAsk(page)))).filter(Boolean).length;
-    if (asking === 0) return this.opts.quit();
+    const downloading = this.downloads.size;
+    if (asking === 0 && downloading === 0) return this.opts.quit();
+    const reasons = [
+      asking ? `${asking === 1 ? "a page" : `${asking} pages`} may have unsaved changes` : "",
+      downloading ? `${downloading === 1 ? "a download is" : `${downloading} downloads are`} in progress` : "",
+    ].filter(Boolean).join(" and ");
     this.prompt = {
       kind: "confirm",
       tag: "quit",
-      message: `${asking === 1 ? "A page" : `${asking} pages`} may have unsaved changes. Quit anyway?`,
+      message: `${reasons[0]!.toUpperCase()}${reasons.slice(1)}. Quit anyway?`,
       onYes: () => this.opts.quit(),
       edit: new LineEdit("", false),
     };
@@ -976,38 +986,45 @@ export class App {
     const sessions = [page.sessionId, ...[...this.frameOwner].filter(([, p]) => p === page).map(([sid]) => sid)];
     const probe = async (sid: string) => {
       const group = "termium-unload";
-      // Every window in this session: the top one and same-process frames.
-      const { result } = await this.cdp.send(
-        "Runtime.evaluate",
-        {
-          expression: `(() => { const out = [];
-            const walk = (w) => { out.push(w); for (let i = 0; i < w.frames.length; i++) { try { void w.frames[i].document; walk(w.frames[i]); } catch {} } };
-            walk(window);
-            return out; })()`,
-          objectGroup: group,
-        },
-        sid,
-      );
-      const activated = await this.cdp.send(
-        "Runtime.evaluate",
-        { expression: "navigator.userActivation ? navigator.userActivation.hasBeenActive : true", returnByValue: true },
-        sid,
-      );
+      // The page's own JavaScript context in every frame this session
+      // renders (cross-origin ones included): enabling Runtime replays the
+      // existing contexts.
+      const contexts: number[] = [];
+      const collect = (p: any, from?: string) => {
+        if (from === sid && p.context?.auxData?.isDefault) contexts.push(p.context.id);
+      };
+      this.cdp.on("Runtime.executionContextCreated", collect);
+      try {
+        await this.cdp.send("Runtime.enable", {}, sid);
+      } finally {
+        this.cdp.off("Runtime.executionContextCreated", collect);
+        this.cdp.send("Runtime.disable", {}, sid).catch(() => {});
+      }
       let guarded = false;
-      const { result: props } = await this.cdp.send("Runtime.getProperties", { objectId: result.objectId, ownProperties: true }, sid);
-      for (const prop of props) {
-        const id = prop.value?.objectId;
-        if (!id || !/^\d+$/.test(prop.name)) continue;
-        const { listeners } = await this.cdp.send("DOMDebugger.getEventListeners", { objectId: id }, sid);
-        const handler = await this.cdp.send(
-          "Runtime.callFunctionOn",
-          { objectId: id, functionDeclaration: "function () { return typeof this.onbeforeunload === 'function'; }", returnByValue: true },
-          sid,
-        );
-        if (listeners.some((l: any) => l.type === "beforeunload") || handler?.result?.value === true) guarded = true;
+      let activated = false;
+      for (const contextId of contexts) {
+        try {
+          const { result } = await this.cdp.send("Runtime.evaluate", { expression: "window", contextId, objectGroup: group }, sid);
+          const { listeners } = await this.cdp.send("DOMDebugger.getEventListeners", { objectId: result.objectId }, sid);
+          const state = await this.cdp.send(
+            "Runtime.evaluate",
+            {
+              expression: `[typeof window.onbeforeunload === "function",
+                navigator.userActivation ? navigator.userActivation.hasBeenActive : true]`,
+              contextId,
+              returnByValue: true,
+            },
+            sid,
+          );
+          const [handler, active] = (state?.result?.value ?? [false, false]) as boolean[];
+          if (listeners.some((l: any) => l.type === "beforeunload") || handler) guarded = true;
+          if (active) activated = true;
+        } catch {
+          // A context that went away meanwhile.
+        }
       }
       this.cdp.send("Runtime.releaseObjectGroup", { objectGroup: group }, sid).catch(() => {});
-      return guarded && activated?.result?.value !== false;
+      return guarded && activated;
     };
     // A page that can't be checked (it's showing a dialog, or busy) might
     // have unsaved changes: count it as one that asks.
@@ -1179,6 +1196,13 @@ export class App {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page) return;
     if (page.css && page.css.dsf > 1.01) {
+      // Taking a screenshot can itself produce a screencast frame with the
+      // same picture; only a frame that differs from the last one is a change.
+      if (p.data === page.lastCast) {
+        this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
+        return;
+      }
+      page.lastCast = p.data;
       // Screencast frames come at CSS-pixel size whatever the scale factor,
       // which is blurry on HiDPI. There a frame only says "something
       // changed": take a full-resolution screenshot instead.
@@ -2129,6 +2153,8 @@ export class App {
         if (!inner) return { crossFrame: true };
         d = inner; a = d.activeElement;
       }
+      // Like Chrome: nothing is copied out of a password field.
+      if (a && a.tagName === "INPUT" && a.type === "password") return { text: "" };
       if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA") && typeof a.selectionStart === "number")
         return { text: a.value.slice(a.selectionStart, a.selectionEnd) };
       return { text: String(d.getSelection()) }; })()`;

@@ -41,3 +41,4 @@ Initial release.
 - Ctrl+Q asks first if a page may have unsaved changes (again to force).
 - termium takes its own profile lock, so two termiums started at the same
   instant can't both run on one profile.
+- Nothing is copied out of password fields.

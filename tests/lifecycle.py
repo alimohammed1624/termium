@@ -96,6 +96,21 @@ try:
     check("an empty lock file doesn't block startup", at_address_bar(e6))
     e6.close()
 
+    # several termiums taking over the same stale lock at once: exactly one gets it
+    prof7 = os.path.join(tmp, "p7"); os.makedirs(prof7)
+    winners = []
+    for trial in range(4):
+        with open(os.path.join(prof7, "termium.lock"), "w") as f:
+            f.write('{"pid": 999999, "start": "never"}')
+        start_at = int(time.time() * 1000) + 1500
+        procs = [subprocess.Popen(["bun", os.path.join(ROOT, "tests/support/lock-race.ts"), prof7, str(start_at)],
+                                  stdout=subprocess.PIPE, text=True) for _ in range(6)]
+        outs = [p.communicate(timeout=30)[0].strip() for p in procs]
+        winners.append(outs.count("won"))
+        for n in os.listdir(prof7):
+            os.remove(os.path.join(prof7, n))
+    check("stale lock: exactly one of six racing termiums takes it", winners == [1, 1, 1, 1], winners)
+
     # option and profile-path errors
     bad = Term(["bun", main, "--incognito", "--profile", os.path.join(tmp, "px")], cwd=ROOT)
     bad.wait_for(lambda: not running(bad), 10)
@@ -177,6 +192,44 @@ try:
     check("busy page is reloaded, not replaced", hist is not None and page_eval("history.length") == hist, (hist, page_eval("history.length")))
     hd.close()
     hsrv.terminate()
+
+    # HiDPI: one scroll of a static page is one picture, not a storm of identical ones
+    sprof = os.path.join(tmp, "static")
+    st_ = Term(["bun", main, "--profile", sprof, "data:text/html,<div style='height:4000px;font:40px sans-serif'>static page</div>"],
+               cwd=ROOT, cols=100, rows=30, cell_w=20, cell_h=40)
+    st_.wait_frames(1, 25); time.sleep(5)
+    before = st_.frames
+    st_.scroll(600, 600, down=True, n=1); time.sleep(6)
+    check("HiDPI: one scroll, a handful of frames", st_.frames - before <= 6, st_.frames - before)
+    st_.close()
+
+    # quitting asks when an edited form lives in a same-site, cross-origin iframe
+    with _socket.socket() as so:
+        so.bind(("127.0.0.1", 0)); hport2 = so.getsockname()[1]
+    hsrv1 = subprocess.Popen([shutil.which("python3") or sys.executable, "-m", "http.server", str(hport), "--bind", "127.0.0.1",
+                              "--directory", os.path.join(ROOT, "tests", "fixtures")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    hsrv2 = subprocess.Popen([shutil.which("python3") or sys.executable, "-m", "http.server", str(hport2), "--bind", "127.0.0.1",
+                              "--directory", os.path.join(ROOT, "tests", "fixtures")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    qprof = os.path.join(tmp, "samesite")
+    q = Term(["bun", main, "--profile", qprof, f"http://127.0.0.1:{hport}/samesite.html?port={hport2}"], cwd=ROOT,
+             env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+    q.wait_frames(1, 25); time.sleep(5)
+    def q_state():
+        r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), qprof, "window.termiumState ? termiumState() : null"],
+                           capture_output=True, text=True, timeout=20)
+        import json as _json
+        vals = [p["value"] for p in _json.loads(r.stdout or "[]") if p["value"]]
+        return vals[0] if vals else None
+    q.wait_for(lambda: ((q_state() or {}).get("frame") or {}).get("textRect", [0])[0] > 0, 15)
+    qs = q_state() or {"at": [0, 0], "frame": {"textRect": [0, 0]}}
+    q.click(222 + int(qs["at"][0] + 1 + qs["frame"]["textRect"][0]), 40 + int(qs["at"][1] + 1 + qs["frame"]["textRect"][1])); time.sleep(0.3)
+    q.type("draft"); time.sleep(0.5)
+    q.key("ctrl+q")
+    check("quit asks about an edited same-site iframe", q.wait_text("Quit anyway?", 8), q.line(2))
+    q.key("escape"); time.sleep(0.5)
+    q.close()
+    hsrv1.terminate(); hsrv2.terminate()
 
     # paste into a page without an http origin still fires its paste event
     dprof = os.path.join(tmp, "datap")

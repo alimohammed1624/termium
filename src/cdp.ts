@@ -154,6 +154,10 @@ export class CDP {
     set.add(handler);
   }
 
+  off(method: string, handler: Handler): void {
+    this.handlers.get(method)?.delete(handler);
+  }
+
   close(): void {
     try {
       this.hangup();

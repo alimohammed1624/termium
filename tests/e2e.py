@@ -190,6 +190,10 @@ try:
     check("IME text commit is inserted", (state() or {}).get("inp") == "日本語です", (state() or {}).get("inp"))
     t.key("ctrl+a"); t.key("backspace"); t.paste("pasted text"); time.sleep(0.4)
 
+    # 6d2a2b. nothing is copied out of a password field
+    click_el("pw"); time.sleep(0.2); t.key("ctrl+a"); mark = len(t.raw); t.key("ctrl+c"); time.sleep(0.8)
+    check("password field contents never reach the clipboard", base64.b64encode(b"hunter2-pw") not in bytes(t.raw[mark:]))
+
     # 6d2a3. a long, multi-line alert is shown in full
     click_el("longmsg")
     check("long alert shown in full over the page", t.wait_text("END-OF-MESSAGE", 5) and "The page says" in t.text())
@@ -309,6 +313,22 @@ try:
     check("another site has no clipboard permission", rd.get("permission") != "granted", rd.get("permission"))
     # the reader tab is the one after tab 1: close it
     t.key("ctrl+b"); t.key("2"); time.sleep(0.4); t.key("ctrl+w"); time.sleep(1.0)
+    t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
+
+    # 8b2bb. a popup opened by a page you've switched away from opens behind
+    click_el("popuplater"); time.sleep(0.2)
+    t.key("ctrl+b"); t.key("2"); time.sleep(0.4)
+    here = t.line(2)
+    t.wait_for(lambda: any("late=1" in p["url"] for p in pages("1")), 8); time.sleep(0.8)
+    check("popup from a background tab doesn't take focus", "late=1" not in t.line(2) and t.line(2) == here, (here, t.line(2)))
+    # close it: go to it and Ctrl+W (from the address bar, Ctrl+W closes too)
+    for n in range(1, 9):
+        t.key("ctrl+b"); t.key(str(n)); time.sleep(0.4)
+        if "late=1" in t.line(2):
+            break
+    tabs_now = t.line(1).count("│")
+    t.key("ctrl+l"); time.sleep(0.2); t.key("ctrl+w"); time.sleep(1.0)
+    check("ctrl+w in the address bar closes the tab", t.line(1).count("│") == tabs_now - 1, t.line(1))
     t.key("ctrl+b"); t.key("1"); time.sleep(0.5)
 
     # 8b2c. a file chooser opened by a background tab waits for that tab

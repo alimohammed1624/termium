@@ -162,10 +162,6 @@ export class LineEdit {
       const to = ctrl || alt ? this.wordLeft() : this.prevBoundary();
       this.text = this.text.slice(0, to) + this.text.slice(this.cursor);
       this.cursor = to;
-    } else if (ctrl && k === "w") {
-      const to = this.wordLeft();
-      this.text = this.text.slice(0, to) + this.text.slice(this.cursor);
-      this.cursor = to;
     } else if (k === "Delete" || (ctrl && k === "d")) {
       const to = this.nextBoundary();
       this.text = this.text.slice(0, this.cursor) + this.text.slice(to);

@@ -40,7 +40,7 @@ describe("LineEdit", () => {
   test("cursor movement, word delete and submit", () => {
     const e = new LineEdit("", false);
     e.insert("foo bar");
-    e.key(key("w", { ctrl: true }));
+    e.key(key("Backspace", { ctrl: true }));
     expect(e.text).toBe("foo ");
     e.key(key("Home"));
     e.key(key("x", {}, "x"));

@@ -292,6 +292,9 @@ async function main(): Promise<void> {
     if (cdp) {
       await Promise.race([cdp.send("Browser.close").catch(() => {}), Bun.sleep(1500)]);
       cdp.close();
+      // Let the browser finish exiting on its own (it removes its profile
+      // lock as it goes) before anything gets killed.
+      if (browser) await Promise.race([browser.proc.exited, Bun.sleep(3000)]);
     }
     if (browser && browser.proc.exitCode === null) {
       browser.proc.kill();

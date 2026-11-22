@@ -33,6 +33,8 @@
 <select id="hsel"><option>start</option><option hidden>obsolete</option><option>current</option></select>
 <input id="afterhsel" size="4">
 <button id="longmsg" onclick="alert('First line of a long message.\n' + 'This message is much longer than the address bar can show, so termium shows it in full over the page. '.repeat(3) + '\nLast line: END-OF-MESSAGE')">Long alert</button>
+<input id="pw" type="password" value="hunter2-pw">
+<button id="popuplater" onclick="setTimeout(() => window.open('/page.html?late=1'), 2000)">Popup later</button>
 <button id="modal" onclick="document.getElementById('dlg').showModal()">Modal</button>
 <dialog id="dlg"><select id="msel"><option>Apple</option><option>Banana</option><option>Cherry</option></select>
 <button onclick="document.getElementById('dlg').close()">Close</button></dialog>
