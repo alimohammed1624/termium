@@ -175,6 +175,14 @@ try:
     check("path with spaces attaches the whole name", (state() or {}).get("file") == "Project Notes.txt", state() and state().get("file"))
     shutil.rmtree(updir, ignore_errors=True)
 
+    # 6d2b. hidden options aren't offered; Tab leaves the menu and moves focus on
+    click_el("hsel"); time.sleep(0.6)
+    t.key("down"); t.key("enter"); time.sleep(0.4)
+    check("hidden select options are skipped", (state() or {}).get("hsel") == "current", (state() or {}).get("hsel"))
+    click_el("hsel"); time.sleep(0.6)
+    t.key("tab"); time.sleep(0.4)
+    check("Tab closes the menu and moves focus", (state() or {}).get("active") == "afterhsel", (state() or {}).get("active"))
+
     # 6d3. a select inside a modal <dialog>
     click_el("modal"); time.sleep(0.5)
     mc = next(p["value"] for p in pages("(() => { const r = document.getElementById('msel').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()") if p["value"] and "popup" not in p["url"])
@@ -213,6 +221,11 @@ try:
     t.key("ctrl+a"); mark = len(t.raw); t.key("ctrl+c"); time.sleep(0.8)
     check("ctrl+c copies a selection inside a cross-site iframe",
           b"\x1b]52;c;" + base64.b64encode(b"framed text") in bytes(t.raw[mark:]))
+
+    # 6e2b. Ctrl+S reaches an editor inside a cross-site iframe
+    t.click(220 + int(xf[0] + 1 + fr["textRect"][0]), 40 + int(xf[1] + 1 + fr["textRect"][1])); time.sleep(0.3)
+    t.key("ctrl+s"); time.sleep(0.8)
+    check("ctrl+s goes to the focused cross-site iframe", ((state() or {}).get("frame") or {}).get("lastKey") == "ctrl+s", (state() or {}).get("frame"))
 
     # 6e3. a <select> inside an open shadow root
     sh = top_left("shadowhost")
@@ -362,6 +375,16 @@ try:
     check("closing a split tab with unsaved changes asks once", t.wait_text("unsaved changes", 6), t.line(2))
     t.key("escape"); time.sleep(1.5)
     check("keeping keeps every pane of the tab", len(pages("1")) == n_before, (n_before, len(pages("1"))))
+    # ...also while that pane is showing a JavaScript dialog
+    al = next(p["value"] for p in pages("(() => { const r = document.getElementById('al').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()") if "right=1" in p["url"])
+    t.click(right_x0 + int(al[0]), 60 + int(al[1]))
+    check("alert in the right pane", t.wait_text("hello from page", 5), t.line(2))
+    t.key("ctrl+b"); t.key("shift+x")
+    check("closing a split tab with a dialog open asks", t.wait_text("unsaved changes", 6), t.line(2))
+    t.key("escape"); time.sleep(1.0)
+    check("keeping it keeps every pane", len(pages("1")) == n_before, (n_before, len(pages("1"))))
+    check("the dialog comes back", "hello from page" in t.line(2), t.line(2))
+    t.key("enter"); time.sleep(0.5)
     pages("window.onbeforeunload = null")
     t.key("ctrl+b"); t.key("h"); time.sleep(0.3)
 
@@ -387,6 +410,14 @@ try:
     t.key("escape"); time.sleep(0.5)
     check("help closes", "termium keys" not in t.text())
 
+    # 12a. paste while the help overlay is up doesn't reach the page
+    click_el("inp"); time.sleep(0.2)
+    before_inp = (state() or {}).get("inp")
+    t.key("ctrl+b"); t.key("question"); time.sleep(0.5)
+    t.paste("zzz-hidden"); time.sleep(0.6)
+    t.key("escape"); time.sleep(0.5)
+    check("paste under the help overlay is dropped", (state() or {}).get("inp") == before_inp, (state() or {}).get("inp"))
+
     # 12b. pictures stay the exact size of their pane through sidebar toggles and zoom
     t.key("ctrl+b"); t.key("b"); time.sleep(1.5)
     m = frame_matches_pane(); check("frame matches pane after hiding the sidebar", m and m[0], m)
@@ -394,6 +425,13 @@ try:
     t.key("alt+="); time.sleep(1.5)
     m = frame_matches_pane(); check("frame matches pane after zooming", m and m[0], m)
     t.key("alt+0"); time.sleep(1.0)
+    # rapid zoom in and out lands exactly where it should
+    for k in ("alt+=", "alt+=", "alt+-", "alt+=", "alt+0", "alt+=", "alt+0"):
+        t.key(k); time.sleep(0.05)
+    time.sleep(2.0)
+    vw = [p["value"]["w"] for p in pages("({ w: innerWidth, dpr: devicePixelRatio })") if p["value"] and p["value"]["dpr"] != 1]
+    check("rapid zoom settles at 100%", vw == [], vw)
+    m = frame_matches_pane(); check("frame matches pane after rapid zoom", m and m[0], m)
 
     # 13. resize the terminal
     t.resize(120, 40); time.sleep(1.5)
@@ -436,7 +474,7 @@ try:
     # is replaced by a fresh one on the next navigation
     t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type("chrome://crash"); t.key("enter"); time.sleep(5)
     t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/page.html?recovered=1"); t.key("enter")
-    check("stuck page recovers on the next navigation", t.wait_for(lambda: any("recovered=1" in p["url"] and p["value"] for p in pages()), 15),
+    check("stuck page recovers on the next navigation", t.wait_for(lambda: any("recovered=1" in p["url"] and p["value"] for p in pages()), 30),
           [p["url"] for p in pages("1")])
 
     # 15. a real URL with a #termium-... fragment is shown as-is

@@ -21,7 +21,8 @@ for (const t of targets.filter((t) => t.type === "page")) {
       if (m.id === 1) { clearTimeout(timer); ws.close(); resolve(m.result?.result?.value ?? null); }
     });
   });
-  if (value !== undefined) results.push({ url: t.url, title: t.title, value });
+  // A page that didn't answer (busy, or showing a dialog) is listed with a null value.
+  results.push({ url: t.url, title: t.title, value: value === undefined ? null : value, answered: value !== undefined });
 }
 console.log(JSON.stringify(results));
 process.exit(0);

@@ -5,12 +5,14 @@
 <input id="ffile" type="file" onchange="report()">
 <input id="ftext" value="framed text" size="12" oninput="window.onbeforeunload = (e) => { e.preventDefault(); return ''; }">
 <script>
+ window.lastKey = '';
+ addEventListener('keydown', (e) => { window.lastKey = (e.ctrlKey ? 'ctrl+' : '') + e.key; report(); });
  // Reports to the parent page (tests read it there), with element positions
  // inside the frame so the test can click them.
  function rect(id) { const r = document.getElementById(id).getBoundingClientRect(); return [r.x + Math.min(r.width / 2, 30), r.y + r.height / 2]; }
  function report() {
    parent.postMessage({ ua: navigator.userAgent, brands: navigator.userAgentData ? navigator.userAgentData.brands.map(b => b.brand).join(',') : '',
-     sel: document.getElementById('fsel').value, file: (document.getElementById('ffile').files[0] || {}).name || '',
+     lastKey: window.lastKey, sel: document.getElementById('fsel').value, file: (document.getElementById('ffile').files[0] || {}).name || '',
      selRect: rect('fsel'), fileRect: rect('ffile'), textRect: rect('ftext') }, '*');
  }
  report();

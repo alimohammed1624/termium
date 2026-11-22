@@ -60,6 +60,8 @@ export const SELECT_POPUP = String.raw`(() => {
     const enabled = (i) => !!rows[i] && !disabled[i];
     opts.forEach((o, i) => {
       const g = o.parentElement && o.parentElement.tagName === "OPTGROUP" ? o.parentElement : null;
+      // Hidden options (hidden attribute or display: none) aren't offered.
+      if (o.hidden || (g && g.hidden) || getComputedStyle(o).display === "none") return;
       if (g && g !== lastGroup) {
         const gh = document.createElement("div");
         rowCss(gh, { "font-weight": "600", color: "#555" });
@@ -110,7 +112,8 @@ export const SELECT_POPUP = String.raw`(() => {
       else if (k === "PageDown") for (let n = 0; n < 8; n++) step(1);
       else if (k === "PageUp") for (let n = 0; n < 8; n++) step(-1);
       else if (k === "Enter" || k === " ") { if (enabled(active)) choose(sel, active); }
-      else if (k === "Escape" || k === "Tab") close();
+      else if (k === "Escape") close();
+      else if (k === "Tab") { close(); return; } // and let Tab move focus as usual
       else if (k.length === 1 && !e.ctrlKey && !e.metaKey) {
         const c = k.toLowerCase();
         for (let n = 1; n <= opts.length; n++) {

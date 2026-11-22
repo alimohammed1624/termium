@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><title>busy page</title></head>
+<body style="margin:0">
+<canvas id="c" width="300" height="150"></canvas>
+<script>
+ // Keeps the compositor busy: redraws every frame.
+ const c = document.getElementById('c').getContext('2d');
+ let n = 0;
+ (function tick() { n++; c.fillStyle = 'hsl(' + (n % 360) + ',80%,50%)'; c.fillRect(0, 0, 300, 150); requestAnimationFrame(tick); })();
+ window.termiumState = () => ({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
+</script>
+</body></html>

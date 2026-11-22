@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // termium: a Chromium (Helium) browser in your terminal.
 
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
@@ -122,7 +122,16 @@ async function sweepTemp(): Promise<void> {
     }
     const dir = join(base, name);
     try {
-      if (m[1] === "termium-incognito") await reapOrphans(dir).catch(() => 0);
+      // Two termiums starting at once mustn't both clean the same leftover:
+      // the first to create the marker does it, the other leaves it alone.
+      if (m[1] === "termium-incognito") {
+        try {
+          closeSync(openSync(join(dir, ".sweeping"), "wx"));
+        } catch {
+          continue;
+        }
+        await reapOrphans(dir).catch(() => 0);
+      }
       rmSync(dir, { recursive: true, force: true });
     } catch {
       // Not ours to remove (another user's); never a reason not to start.

@@ -100,13 +100,76 @@ try:
     check("killed mid-startup: next start recovers the profile", at_address_bar(k2))
     k2.close()
 
-    # HiDPI cells: the picture has the pane's full device resolution
-    hd = Term(["bun", main, "--incognito", "data:text/html,<h1>sharp</h1>"], cwd=ROOT, cols=100, rows=30, cell_w=20, cell_h=40)
-    hd.wait_frames(1, 25); time.sleep(3)
+    # HiDPI cells (scale 2) on a page that never stops redrawing: the picture
+    # has the pane's full device resolution, and the page's viewport follows
+    # every sidebar toggle, zoom and resize.
+    import http.server, functools, socket as _socket
+    with _socket.socket() as so:
+        so.bind(("127.0.0.1", 0)); hport = so.getsockname()[1]
+    hsrv = subprocess.Popen([shutil.which("python3") or sys.executable, "-m", "http.server", str(hport), "--bind", "127.0.0.1",
+                             "--directory", os.path.join(ROOT, "tests", "fixtures")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    hprof = os.path.join(tmp, "hidpi")
+    hd = Term(["bun", main, "--profile", hprof, f"http://127.0.0.1:{hport}/anim.html"], cwd=ROOT, cols=100, rows=30, cell_w=20, cell_h=40,
+              env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+    def viewport():
+        r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), hprof, "[innerWidth, innerHeight, devicePixelRatio]"],
+                           capture_output=True, text=True, timeout=20)
+        import json as _json
+        vals = [p["value"] for p in _json.loads(r.stdout or "[]") if p["value"]]
+        return vals[0] if vals else None
+    hd.wait_frames(1, 25); time.sleep(5)
     img = hd.latest_image()
     want = ((100 - 22) * 20, (30 - 2) * 40)
     check("HiDPI frames at full device resolution", img is not None and img.size == want, (img and img.size, want))
+    ok = True
+    steps = []
+    def expect(cols, rows, zoom, sidebar=True):
+        dsf = round(2 * zoom * 100) / 100
+        pane_cols = cols - (22 if sidebar and cols >= 52 else 0)
+        return [round(pane_cols * 20 / dsf), round((rows - 2) * 40 / dsf), dsf]
+    for action, exp in (
+        (lambda: (hd.key("ctrl+b"), hd.key("b")), expect(100, 30, 1, sidebar=False)),
+        (lambda: (hd.key("ctrl+b"), hd.key("b")), expect(100, 30, 1)),
+        (lambda: hd.key("alt+="), expect(100, 30, 1.1)),
+        (lambda: hd.key("alt+0"), expect(100, 30, 1)),
+        (lambda: hd.resize(80, 24), expect(80, 24, 1)),
+        (lambda: hd.resize(100, 30), expect(100, 30, 1)),
+    ):
+        action(); time.sleep(2.5)
+        got = viewport()
+        steps.append((got, exp))
+        if not got or abs(got[0] - exp[0]) > 1 or abs(got[1] - exp[1]) > 1 or abs(got[2] - exp[2]) > 0.02:
+            ok = False
+    check("busy HiDPI page's viewport follows every change", ok, steps)
+
+    # a page that is merely busy for a few seconds is reloaded, not replaced
+    def page_eval(expr):
+        r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), hprof, expr], capture_output=True, text=True, timeout=20)
+        import json as _json
+        vals = [p["value"] for p in _json.loads(r.stdout or "[]") if p.get("answered", True) and p["value"] is not None]
+        return vals[0] if vals else None
+    hd.key("ctrl+l"); hd.key("ctrl+a"); hd.key("ctrl+k"); hd.type(f"http://127.0.0.1:{hport}/anim.html?second=1"); hd.key("enter"); time.sleep(3)
+    hist = page_eval("history.length")
+    page_eval("setTimeout(() => { const t = Date.now(); while (Date.now() - t < 4000) {} }, 100)")
+    time.sleep(0.3)
+    hd.key("f5"); time.sleep(14)
+    check("busy page is reloaded, not replaced", hist is not None and page_eval("history.length") == hist, (hist, page_eval("history.length")))
     hd.close()
+    hsrv.terminate()
+
+    # paste into a page without an http origin still fires its paste event
+    dprof = os.path.join(tmp, "datap")
+    dp = Term(["bun", main, "--profile", dprof,
+               "data:text/html,<input id=i autofocus onpaste=\"event.preventDefault(); this.value = event.clipboardData.getData('text').toUpperCase()\">"],
+              cwd=ROOT, env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+    dp.wait_frames(1, 25); time.sleep(4)
+    dp.click(222 + 30, 40 + 15); time.sleep(0.3)
+    dp.paste("hello paste"); time.sleep(1.0)
+    r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), dprof, "document.getElementById('i').value"],
+                       capture_output=True, text=True, timeout=20)
+    check("paste on a data: page fires its paste event", '"HELLO PASTE"' in r.stdout, r.stdout[-200:])
+    dp.close()
 
     # garbage input doesn't crash it
     c.write("\x1b[1114112u\x1b[99999999;5u\x1b[;;u\x1b[;;;;;;;u\x1b[<;;M\x1b_Gq=1\x1b\\")

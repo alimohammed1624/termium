@@ -42,9 +42,17 @@ export interface Page {
   /** A file input waiting for a path (shown when the page is focused). */
   fileChooser: { sessionId: string; backendNodeId: number; multiple: boolean } | null;
 
-  /** Viewport we last gave the page, in CSS px. */
+  /** Viewport the page should have, in CSS px (mouse mapping uses it). */
   css: { w: number; h: number; dsf: number } | null;
+  /** Screencast size the page should have, in device px (null: hidden). */
   casting: { w: number; h: number } | null;
+  /** What the browser has actually been given and confirmed. */
+  appliedCss: { w: number; h: number; dsf: number } | null;
+  appliedCast: { w: number; h: number } | null;
+  /** The viewport/screencast target already queued, to skip duplicates. */
+  queuedKey: string | null;
+  /** Viewport changes, screencast restarts and screenshots run one at a time. */
+  ops: Promise<void>;
   lastFrame: string | null;
   frameSeq: number;
   navSeq: number;
@@ -506,6 +514,10 @@ export class App {
       fileChooser: null,
       css: null,
       casting: null,
+      appliedCss: null,
+      appliedCast: null,
+      queuedKey: null,
+      ops: Promise.resolve(),
       lastFrame: null,
       frameSeq: 0,
       navSeq: 0,
@@ -837,18 +849,41 @@ export class App {
     return Promise.race([probe, Bun.sleep(1500).then(() => false)]);
   }
 
-  /** Navigates, or replaces the page with a fresh one if it's crashed or hung. */
-  private async go(page: Page, url: string): Promise<void> {
-    if (this.wedged(page) || (!page.dialog && !(await this.responsive(page)))) this.recover(page, url);
-    else this.navigate(page, url);
+  /** Navigates; a crashed page, or one whose renderer is hung, is replaced by a fresh one. */
+  private go(page: Page, url: string): void {
+    if (this.wedged(page)) return this.recover(page, url);
+    this.navigate(page, url);
+    this.watchHang(page, page.navSeq, url);
   }
 
   private reload(page: Page, ignoreCache = false): void {
     if (this.wedged(page)) return this.recover(page, page.url);
-    void this.responsive(page).then((ok) => {
-      if (!ok && !page.dialog) this.recover(page, page.url);
-      else this.cdp.send("Page.reload", { ignoreCache }, page.sessionId).catch(() => {});
-    });
+    const seq = ++page.navSeq;
+    page.navStarted = Date.now();
+    this.cdp
+      .send("Page.reload", { ignoreCache }, page.sessionId)
+      .then(() => {
+        if (page.navSeq === seq) page.navStarted = 0;
+      })
+      .catch(() => {});
+    this.watchHang(page, seq, page.url);
+  }
+
+  /**
+   * A navigation still loading after 8 s on a page whose renderer doesn't
+   * answer means a hung page (a busy one answers eventually; a slow server
+   * has a responsive renderer): replace it.
+   */
+  private watchHang(page: Page, seq: number, url: string): void {
+    setTimeout(async () => {
+      const stuck = () => page.navSeq === seq && (page.loading || page.navStarted !== 0);
+      if (!stuck() || page.dialog || !this.pages.has(page.sessionId)) return;
+      if (await this.responsive(page)) return;
+      if (stuck() && this.pages.has(page.sessionId)) {
+        this.showToast("The page stopped responding; opened it again");
+        this.recover(page, url);
+      }
+    }, 8000);
   }
 
   /**
@@ -944,7 +979,10 @@ export class App {
       this.cdp.send("Runtime.releaseObjectGroup", { objectGroup: group }, sid).catch(() => {});
       return guarded && activated?.result?.value !== false;
     };
-    const one = (sid: string) => Promise.race([probe(sid).catch(() => false), Bun.sleep(1500).then(() => false)]);
+    // A page that can't be checked (it's showing a dialog, or busy) might
+    // have unsaved changes: count it as one that asks.
+    if (page.dialog) return true;
+    const one = (sid: string) => Promise.race([probe(sid).catch(() => true), Bun.sleep(1500).then(() => true)]);
     return (await Promise.all(sessions.map(one))).some(Boolean);
   }
 
@@ -1007,43 +1045,86 @@ export class App {
     const dsf = this.dsf;
     const w = Math.max(1, Math.round(devW / dsf));
     const h = Math.max(1, Math.round(devH / dsf));
-    const sid = page.sessionId;
-    if (!page.css || page.css.w !== w || page.css.h !== h || page.css.dsf !== dsf) {
-      page.css = { w, h, dsf };
-      this.cdp
-        .send("Emulation.setDeviceMetricsOverride", {
-          width: w,
-          height: h,
-          deviceScaleFactor: dsf,
-          mobile: false,
-          // A desktop-sized screen; a window a little taller than the page.
-          screenWidth: Math.max(w, 1920),
-          screenHeight: Math.max(h + 120, 1080),
-        }, sid)
-        .catch((e) => this.opts.log(`metrics: ${e}`));
-
-    }
-    if (!page.casting || page.casting.w !== devW || page.casting.h !== devH) {
-      const restart = !!page.casting;
-      page.casting = { w: devW, h: devH };
-      const start = () =>
-        this.cdp
-          .send("Page.startScreencast", { format: "png", maxWidth: devW, maxHeight: devH, everyNthFrame: 1 }, sid)
-          .catch((e) => this.opts.log(`screencast: ${e}`));
-      if (restart) this.cdp.send("Page.stopScreencast", {}, sid).catch(() => {}).then(start);
-      else start();
+    page.css = { w, h, dsf };
+    page.casting = { w: devW, h: devH };
+    const key = `${w}x${h}@${dsf}/${devW}x${devH}`;
+    if (page.queuedKey === key) return;
+    page.queuedKey = key;
+    const seq = page.frameSeq;
+    void this.serial(page, () => this.applyViewport(page)).then(() => {
       // Static pages may not produce a frame on their own; grab one.
-      const seq = page.frameSeq;
       setTimeout(() => {
-        if (page.frameSeq === seq && this.geom.has(page)) this.snapshot(page);
+        if (page.frameSeq === seq && this.geom.has(page)) void this.snapshot(page);
       }, 250);
+    });
+  }
+
+  /**
+   * Runs a page's viewport changes, screencast restarts and screenshots one
+   * at a time: a viewport change sent while a screenshot is being taken can
+   * be undone when the screenshot finishes. Each step is bounded so a hung
+   * page can't stall the queue for good.
+   */
+  private serial(page: Page, job: () => Promise<unknown>): Promise<void> {
+    const run = () => Promise.race([job(), Bun.sleep(5000)]);
+    const next = page.ops.then(run).then(
+      () => {},
+      (e) => this.opts.log(`page ${page.targetId}: ${e}`),
+    );
+    page.ops = next;
+    return next;
+  }
+
+  /** Gives the browser the page's wanted viewport and screencast size, and checks it took. */
+  private async applyViewport(page: Page): Promise<void> {
+    const sid = page.sessionId;
+    const want = page.css;
+    if (want && !sameSize(page.appliedCss, want)) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await this.cdp.send("Emulation.setDeviceMetricsOverride", {
+          width: want.w,
+          height: want.h,
+          deviceScaleFactor: want.dsf,
+          mobile: false,
+          // A desktop-sized screen around the page.
+          screenWidth: Math.max(want.w, 1920),
+          screenHeight: Math.max(want.h + 120, 1080),
+        }, sid);
+        // A busy page can drop the change: confirm it and send it again if not.
+        if (await this.viewportIs(page, want)) break;
+        await Bun.sleep(80 * (attempt + 1));
+      }
+      page.appliedCss = want;
     }
+    const cast = page.casting;
+    if (cast && !sameSize(page.appliedCast, cast)) {
+      if (page.appliedCast) await this.cdp.send("Page.stopScreencast", {}, sid).catch(() => {});
+      await this.cdp.send("Page.startScreencast", { format: "png", maxWidth: cast.w, maxHeight: cast.h, everyNthFrame: 1 }, sid);
+      page.appliedCast = cast;
+    }
+  }
+
+  /** Whether the page reports the viewport it was given (unknown, e.g. a page in a dialog, counts as yes). */
+  private async viewportIs(page: Page, want: { w: number; h: number; dsf: number }): Promise<boolean> {
+    const probe = this.cdp
+      .send("Runtime.evaluate", { expression: "[innerWidth, innerHeight, devicePixelRatio]", returnByValue: true }, page.sessionId)
+      .then((r) => {
+        const [w, h, dpr] = (r?.result?.value ?? []) as number[];
+        return Math.abs((w ?? 0) - want.w) <= 1 && Math.abs((h ?? 0) - want.h) <= 1 && Math.abs((dpr ?? 0) - want.dsf) < 0.02;
+      })
+      .catch(() => true);
+    return Promise.race([probe, Bun.sleep(1000).then(() => true)]);
   }
 
   private hidePage(page: Page): void {
     if (page.casting) {
       page.casting = null;
-      this.cdp.send("Page.stopScreencast", {}, page.sessionId).catch(() => {});
+      page.queuedKey = null;
+      void this.serial(page, async () => {
+        if (page.casting) return; // shown again meanwhile
+        page.appliedCast = null;
+        await this.cdp.send("Page.stopScreencast", {}, page.sessionId).catch(() => {});
+      });
     }
     if (page.imageId !== null) {
       out(`\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\`);
@@ -1052,14 +1133,14 @@ export class App {
     }
   }
 
-  private async snapshot(page: Page): Promise<void> {
-    try {
+  private snapshot(page: Page): Promise<void> {
+    return this.serial(page, async () => {
       const { data } = await this.cdp.send("Page.captureScreenshot", { format: "png" }, page.sessionId);
       if (page.frameSeq === 0 || !page.lastFrame) {
         page.lastFrame = data;
         this.paint(page);
       }
-    } catch {}
+    });
   }
 
   private onFrame(p: any, sid: string | undefined): void {
@@ -1092,17 +1173,13 @@ export class App {
       return;
     }
     this.capturing.add(page);
-    this.cdp
-      .send("Page.captureScreenshot", { format: "png", optimizeForSpeed: true }, page.sessionId)
-      .then(
-        ({ data }) =>
-          new Promise<void>((resolve) => {
-            page.lastFrame = data;
-            if (!this.paint(page, resolve)) resolve();
-          }),
-      )
-      .catch(() => {})
-      .finally(() => {
+    void this.serial(page, async () => {
+      const { data } = await this.cdp.send("Page.captureScreenshot", { format: "png", optimizeForSpeed: true }, page.sessionId);
+      await new Promise<void>((resolve) => {
+        page.lastFrame = data;
+        if (!this.paint(page, resolve)) resolve();
+      });
+    }).finally(() => {
         this.capturing.delete(page);
         if (this.captureAgain.delete(page) && this.pages.has(page.sessionId)) this.captureSharp(page);
       });
@@ -1439,6 +1516,9 @@ export class App {
       case "mouse":
         return this.onMouse(ev);
       case "paste": {
+        // Help, prefix, resize and space picking own the keyboard: a paste
+        // then must not slip through to the page underneath.
+        if (this.mode !== "normal") return;
         const p = this.prompt;
         if (p && p.kind !== "confirm" && (p.kind !== "dialog" || p.page.dialog?.type === "prompt")) {
           p.edit.insert(ev.text);
@@ -1684,6 +1764,8 @@ export class App {
       } else if (ev.key === "Escape") {
         this.prompt = null;
       }
+      // Whatever the page was asking before (a dialog, a file) comes back.
+      this.syncPrompt();
       this.queueChrome();
       return;
     }
@@ -1704,7 +1786,7 @@ export class App {
       if (prompt.kind === "url") {
         const url = toUrl(text, this.opts.search);
         if (url && this.pages.has(prompt.page.sessionId)) {
-          void this.go(prompt.page, url);
+          this.go(prompt.page, url);
         }
       } else if (prompt.kind === "rename") {
         if (text.trim()) prompt.space.name = text.trim();
@@ -1762,6 +1844,31 @@ export class App {
 
   private syntheticDown = new Map<string, Page>();
 
+  /**
+   * The session of the frame that has focus: the page's own, or a focused
+   * cross-site iframe's (a separate session).
+   */
+  private async focusedSession(page: Page): Promise<string> {
+    const crossFrame = `(() => { let a = document.activeElement;
+      while (a && (a.tagName === "IFRAME" || a.tagName === "FRAME")) {
+        let inner = null; try { inner = a.contentDocument; } catch {}
+        if (!inner) return true;
+        a = inner.activeElement;
+      }
+      return false; })()`;
+    const ask = (sid: string, expression: string) =>
+      Promise.race([
+        this.cdp.send("Runtime.evaluate", { expression, returnByValue: true }, sid).then((r) => r?.result?.value, () => null),
+        Bun.sleep(1000).then(() => null),
+      ]);
+    if ((await ask(page.sessionId, crossFrame)) !== true) return page.sessionId;
+    for (const [sid, owner] of this.frameOwner) {
+      if (owner !== page) continue;
+      if ((await ask(sid, `document.hasFocus() && !${crossFrame}`)) === true) return sid;
+    }
+    return page.sessionId;
+  }
+
   /** Delivers a key to the focused element as a DOM event only (see BROWSER_SHORTCUTS). */
   private domKey(page: Page, ev: KeyEvent, type: "keydown" | "keyup"): void {
     const init = {
@@ -1781,7 +1888,12 @@ export class App {
       }
       (a || d.body || d.documentElement).dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, ${JSON.stringify(init)}));
     })()`;
-    this.inputTail = this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {});
+    const hold = `domkey-${++this.pasteSeq}`;
+    this.holdInput(hold);
+    this.inputTail = (async () => {
+      const sid = await this.focusedSession(page);
+      await this.cdp.send("Runtime.evaluate", { expression }, sid).catch(() => {});
+    })().finally(() => this.releaseInput(hold));
   }
 
   private sendKey(page: Page, ev: KeyEvent): void {
@@ -1849,8 +1961,22 @@ export class App {
       await this.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...key }, sid);
       await evaluate(`navigator.clipboard.writeText("").then(() => true, () => false)`);
     } catch {
-      // No clipboard route (about:, file:, data:, or refused): insert directly.
-      await this.cdp.send("Input.insertText", { text }, sid).catch(() => {});
+      // No clipboard route (about:, file:, data:, or refused): fire a paste
+      // event the page can handle, and insert the text unless it did.
+      const handled = await this.cdp
+        .send("Runtime.evaluate", {
+          expression: `(() => {
+            let a = document.activeElement;
+            while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+            const data = new DataTransfer();
+            data.setData("text/plain", ${JSON.stringify(text)});
+            const ev = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true, composed: true });
+            (a || document.body || document.documentElement).dispatchEvent(ev);
+            return ev.defaultPrevented; })()`,
+          returnByValue: true,
+        }, sid)
+        .then((r) => r?.result?.value === true, () => false);
+      if (!handled) await this.cdp.send("Input.insertText", { text }, sid).catch(() => {});
     } finally {
       if (origin) await setClipboardAccess("prompt").catch(() => {});
       this.releaseInput(hold);
@@ -2254,6 +2380,10 @@ export function freeName(dir: string, name: string): string {
       if (e?.code !== "EEXIST") throw e;
     }
   }
+}
+
+function sameSize<T extends { w: number; h: number; dsf?: number }>(a: T | null, b: T | null): boolean {
+  return !!a && !!b && a.w === b.w && a.h === b.h && a.dsf === b.dsf;
 }
 
 function pageTitle(page: Page): string {
