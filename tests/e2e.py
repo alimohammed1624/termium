@@ -35,10 +35,13 @@ def pages(expr="window.termiumState ? termiumState() : null"):
     r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), profile, expr], capture_output=True, text=True, timeout=20)
     return json.loads(r.stdout or "[]")
 
-def center(id_, skip=("popup=1", "right=1")):
-    """Center of an element in the visible fixture page (other tabs share the layout code, not the layout)."""
+def center(id_, skip=("popup=1", "right=1", "mid=1", "elsewhere=1", "mover=1", "recovered=1", "step=2"), only=None):
+    """Center of an element in one fixture page: the main one, or the one whose URL contains `only`
+    (pages share the markup, not the layout: fonts and content make them wrap differently)."""
     for p in pages(f"(() => {{ const e = document.getElementById('{id_}'); if (!e) return null; const r = e.getBoundingClientRect(); return [r.x + Math.min(r.width/2, 40), r.y + r.height/2]; }})()"):
-        if p["value"] and not any(k in p["url"] for k in skip):
+        if not p["value"]:
+            continue
+        if (only and only in p["url"]) or (not only and not any(k in p["url"] for k in skip)):
             return p["value"]
     return None
 
@@ -68,11 +71,11 @@ def frame_matches_pane():
     w, h = Image.open(io.BytesIO(data)).size
     return (w, h) == (c * t.cell_w, r * t.cell_h), (w, h), (c * t.cell_w, r * t.cell_h)
 
-def click_el(id_, x0=220, y0=40):
-    c = center(id_)
+def click_el(id_, x0=220, y0=40, only=None):
+    c = center(id_, only=only)
     t.click(x0 + int(c[0]), y0 + int(c[1]))
 
-OTHER_PAGES = ("popup=1", "right=1", "elsewhere=1", "mover=1", "recovered=1", "step=2")
+OTHER_PAGES = ("popup=1", "right=1", "elsewhere=1", "mover=1", "recovered=1", "step=2", "mid=1")
 
 def state(match="page.html"):
     """termiumState() of the main fixture page (other fixture tabs share the script)."""
@@ -202,7 +205,7 @@ try:
     check("ctrl+s reaches the page", "down s KeyS C" in (state() or {}).get("log", ""), (state() or {}).get("log", "")[-80:])
 
     # 6e. cross-site iframe: user agent, select menu and file input work inside it
-    check("cross-site iframe loaded", t.wait_for(lambda: ((state() or {}).get("frame") or {}).get("ua"), 10))
+    check("cross-site iframe loaded", t.wait_for(lambda: (((state() or {}).get("frame") or {}).get("selRect") or [0])[0] > 0, 15))
     fr = (state() or {}).get("frame") or {}
     check("iframe user agent hides HeadlessChrome", "HeadlessChrome" not in fr.get("ua", "x") and "HeadlessChrome" not in fr.get("brands", ""), fr.get("ua"))
     xf = top_left("xf")
@@ -309,10 +312,16 @@ try:
 
     # 8b3. middle-clicked link opens in the background; a guarded page asks before closing
     tabs_before = t.line(1).count("│")
-    c = center("pop"); t.click(220 + int(c[0]), 40 + int(c[1]), button=1); time.sleep(2)
-    check("middle click opens a background tab", t.line(1).count("│") == tabs_before + 1 and "popup" not in t.line(2), (t.line(1), t.line(2)))
-    t.key("ctrl+b"); t.key("2"); time.sleep(1.0)
-    click_el("guard", ); time.sleep(0.2); t.type("x"); time.sleep(0.3)
+    c = center("popmid"); t.click(220 + int(c[0]), 40 + int(c[1]), button=1); time.sleep(2)
+    check("middle click opens a background tab", t.line(1).count("│") == tabs_before + 1 and "mid=1" not in t.line(2), (t.line(1), t.line(2)))
+    # switch to it by number: it's the tab whose address has mid=1
+    for n in range(2, tabs_before + 3):
+        t.key("ctrl+b"); t.key(str(n)); time.sleep(0.5)
+        if "mid=1" in t.line(2):
+            break
+    check("found the middle-clicked tab", "mid=1" in t.line(2), t.line(2))
+    t.wait_for(lambda: any("mid=1" in p["url"] and p["value"] for p in pages()), 10)
+    click_el("guard", only="mid=1"); time.sleep(0.2); t.type("x"); time.sleep(0.3)
     t.key("ctrl+w")
     check("ctrl+w on an edited page asks to leave", t.wait_text("Leave this page?", 5), t.line(2))
     t.key("escape"); time.sleep(0.8)

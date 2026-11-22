@@ -16,5 +16,8 @@
      selRect: rect('fsel'), fileRect: rect('ffile'), textRect: rect('ftext') }, '*');
  }
  report();
+ // Positions are only meaningful once the frame is laid out.
+ addEventListener('load', () => requestAnimationFrame(report));
+ addEventListener('resize', report);
 </script>
 </body></html>
