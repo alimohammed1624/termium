@@ -412,6 +412,10 @@ export class InputParser {
         return this.emit(makeKey(info, mods, event, legacy, t));
       }
       if (cp >= 57344 && cp <= 63743) return; // other private-use functional keys
+      if (cp === 0 && text) {
+        // Text with no key (an IME commit, a compose result).
+        return this.emit(makeKey({ key: "Unidentified", code: "", vk: 229 }, mods, event, legacy, text));
+      }
       let ch = cpString(cp);
       if (!ch) return;
       if (mods.shift) {

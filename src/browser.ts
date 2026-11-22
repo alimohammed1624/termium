@@ -6,6 +6,7 @@ import {
   appendFileSync,
   closeSync,
   constants,
+  linkSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -97,33 +98,37 @@ interface Owner {
  */
 export function lockProfile(profileDir: string): void {
   const path = join(profileDir, "termium.lock");
-  const mine = JSON.stringify({ pid: process.pid, start: startTime(process.pid) });
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const fd = openSync(path, "wx");
-      writeFileSync(fd, mine);
-      closeSync(fd);
-      return;
-    } catch (e: any) {
-      if (e?.code !== "EEXIST") throw new Error(`can't lock the profile ${profileDir}: ${e?.message ?? e}`);
+  // Written in full to a private file first, then linked into place: link
+  // fails if the lock exists (as O_EXCL would), and a lock is never seen
+  // half-written.
+  const tmp = join(profileDir, `termium.lock.${process.pid}`);
+  writeFileSync(tmp, JSON.stringify({ pid: process.pid, start: startTime(process.pid) }));
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        linkSync(tmp, path);
+        return;
+      } catch (e: any) {
+        if (e?.code !== "EEXIST") throw new Error(`can't lock the profile ${profileDir}: ${e?.message ?? e}`);
+      }
+      let holder: { pid: number; start: string } | null = null;
+      try {
+        holder = JSON.parse(readFileSync(path, "utf8"));
+      } catch {}
+      if (holder && alive(holder.pid) && startTime(holder.pid) === holder.start) {
+        throw new Error(
+          `the profile ${profileDir} is in use by another termium (pid ${holder.pid}). ` +
+            "Close it, or pass --profile <dir> or --incognito.",
+        );
+      }
+      // Left by a termium that died (or unreadable, e.g. from an older
+      // termium interrupted mid-write): take it over.
+      rmSync(path, { force: true });
     }
-    let holder: { pid: number; start: string } | null = null;
-    try {
-      holder = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      // Being written right now by its owner: give it a moment.
-      Bun.sleepSync(50);
-      continue;
-    }
-    if (holder && alive(holder.pid) && startTime(holder.pid) === holder.start) {
-      throw new Error(
-        `the profile ${profileDir} is in use by another termium (pid ${holder.pid}). ` +
-          "Close it, or pass --profile <dir> or --incognito.",
-      );
-    }
-    rmSync(path, { force: true }); // left by a termium that died
+    throw new Error(`can't lock the profile ${profileDir}`);
+  } finally {
+    rmSync(tmp, { force: true });
   }
-  throw new Error(`can't lock the profile ${profileDir}`);
 }
 
 export function unlockProfile(profileDir: string): void {

@@ -89,6 +89,13 @@ try:
             if z.alive:
                 z.close()
 
+    # an empty lock file (an older termium interrupted mid-write) doesn't block the profile
+    prof6 = os.path.join(tmp, "p6"); os.makedirs(prof6)
+    open(os.path.join(prof6, "termium.lock"), "w").close()
+    e6 = Term(["bun", main, "--profile", prof6], cwd=ROOT)
+    check("an empty lock file doesn't block startup", at_address_bar(e6))
+    e6.close()
+
     # option and profile-path errors
     bad = Term(["bun", main, "--incognito", "--profile", os.path.join(tmp, "px")], cwd=ROOT)
     bad.wait_for(lambda: not running(bad), 10)
@@ -183,6 +190,19 @@ try:
                        capture_output=True, text=True, timeout=20)
     check("paste on a data: page fires its paste event", '"HELLO PASTE"' in r.stdout, r.stdout[-200:])
     dp.close()
+
+    # ...including in a focused same-origin iframe
+    fprof = os.path.join(tmp, "datapf")
+    inner = "<input id=j autofocus onpaste=&quot;event.preventDefault(); this.value = event.clipboardData.getData('text').toUpperCase()&quot;>"
+    fp = Term(["bun", main, "--profile", fprof, f'data:text/html,<iframe id=f srcdoc="{inner}" width=300 height=60></iframe>'],
+              cwd=ROOT, env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+    fp.wait_frames(1, 25); time.sleep(4)
+    fp.click(222 + 40, 40 + 25); time.sleep(0.3)
+    fp.paste("token"); time.sleep(1.0)
+    r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), fprof,
+                        "document.getElementById('f').contentDocument.getElementById('j').value"], capture_output=True, text=True, timeout=20)
+    check("fallback paste reaches a focused same-origin iframe", '"TOKEN"' in r.stdout, r.stdout[-200:])
+    fp.close()
 
     # garbage input doesn't crash it
     c.write("\x1b[1114112u\x1b[99999999;5u\x1b[;;u\x1b[;;;;;;;u\x1b[<;;M\x1b_Gq=1\x1b\\")

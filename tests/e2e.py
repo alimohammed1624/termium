@@ -178,6 +178,24 @@ try:
     check("path with spaces attaches the whole name", (state() or {}).get("file") == "Project Notes.txt", state() and state().get("file"))
     shutil.rmtree(updir, ignore_errors=True)
 
+    # 6d2a. a relative path is taken relative to where termium runs, and doesn't crash the page
+    click_el("file")
+    check("file chooser prompt (relative)", t.wait_text("Upload file:", 5), t.line(2))
+    t.key("ctrl+a"); t.key("ctrl+k"); t.type("tests/fixtures/dl.txt"); t.key("enter"); time.sleep(0.8)
+    check("relative upload path attaches the file", (state() or {}).get("file") == "dl.txt", state() and state().get("file"))
+
+    # 6d2a2. text with no key (an IME commit) is typed in full
+    click_el("inp"); time.sleep(0.2); t.key("ctrl+a"); t.key("backspace")
+    t.write("\x1b[0;;26085:26412:35486:12391:12377u"); time.sleep(0.6)
+    check("IME text commit is inserted", (state() or {}).get("inp") == "日本語です", (state() or {}).get("inp"))
+    t.key("ctrl+a"); t.key("backspace"); t.paste("pasted text"); time.sleep(0.4)
+
+    # 6d2a3. a long, multi-line alert is shown in full
+    click_el("longmsg")
+    check("long alert shown in full over the page", t.wait_text("END-OF-MESSAGE", 5) and "The page says" in t.text())
+    t.key("enter"); time.sleep(0.8)
+    check("long alert gone, page back", "END-OF-MESSAGE" not in t.text() and bool(t.placements))
+
     # 6d2b. hidden options aren't offered; Tab leaves the menu and moves focus on
     click_el("hsel"); time.sleep(0.6)
     t.key("down"); t.key("enter"); time.sleep(0.4)
@@ -241,7 +259,8 @@ try:
     check("shadow-root select's input event reaches the page", (state() or {}).get("sselInputs", 0) >= 1, (state() or {}).get("sselInputs"))
 
     # 6f. downloads never overwrite
-    click_el("dl"); time.sleep(1.5); click_el("dl"); time.sleep(1.5)
+    click_el("dl"); time.sleep(1.5); click_el("dl")
+    t.wait_for(lambda: len(os.listdir(dl_dir)) >= 2, 10); time.sleep(0.5)
     got = sorted(os.listdir(dl_dir))
     check("second download gets a new name", got == ["dl (1).txt", "dl.txt"], got)
 
@@ -520,6 +539,12 @@ try:
     check("quit asks about unsaved changes", t.wait_text("Quit anyway?", 8), t.line(2))
     t.key("escape"); time.sleep(0.8)
     check("answering no keeps termium running", os.waitpid(t.pid, os.WNOHANG)[0] == 0)
+    # the question going away some other way (switching tabs) doesn't arm a silent quit
+    t.key("ctrl+q"); t.wait_text("Quit anyway?", 8)
+    t.key("ctrl+b"); t.key("n"); time.sleep(0.8)
+    t.key("ctrl+q"); time.sleep(1.5)
+    check("after switching tabs, Ctrl+Q asks again", os.waitpid(t.pid, os.WNOHANG)[0] == 0 and t.wait_text("Quit anyway?", 8))
+    t.key("escape"); time.sleep(0.5); t.key("ctrl+b"); t.key("p"); time.sleep(0.5)
 
     # 16. Ctrl+B q from the address bar quits (pressed twice: the second press
     # answers the unsaved-changes question), and nothing is drawn after the

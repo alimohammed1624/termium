@@ -3,7 +3,7 @@
 
 import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { CDP } from "./cdp";
 import type { InputEvent, KeyEvent, MouseEvent, Mods } from "./input";
 import {
@@ -91,7 +91,7 @@ type Prompt =
   | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page }
-  | { kind: "confirm"; edit: LineEdit; message: string; onYes: () => void; onNo?: () => void };
+  | { kind: "confirm"; tag: "quit" | "close"; edit: LineEdit; message: string; onYes: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help";
 
@@ -312,6 +312,7 @@ export class App {
       if (p.state === "completed") this.finishDownload(p.guid);
       else if (p.state === "canceled") {
         this.downloads.delete(p.guid);
+        rmSync(join(this.opts.downloadStaging, p.guid), { force: true });
         this.showToast("Download canceled");
       }
     });
@@ -619,7 +620,10 @@ export class App {
     this.byTarget.delete(page.targetId);
     if (page.imageId !== null) out(`\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\`);
     if (this.prompt && "page" in this.prompt && this.prompt.page === page) this.prompt = null;
-    if (this.mouseCapture === page) this.mouseCapture = null;
+    if (this.mouseCapture === page) {
+      this.mouseCapture = null;
+      this.mouseButtons = 0;
+    }
 
     const loc = this.locate(page);
     if (loc) {
@@ -917,23 +921,22 @@ export class App {
     else void this.closeGroup(pages, "tab");
   }
 
-  private quitAsked = false;
-
   /**
    * Quits, asking first (as Chrome does) if a page may have unsaved changes.
-   * Asked again while that question is up, it quits.
+   * Pressed again while that very question is showing, it quits; any other
+   * prompt (or the question having gone away) means it asks again.
    */
   private async requestQuit(): Promise<void> {
-    if (this.quitAsked || this.prompt?.kind === "confirm") return this.opts.quit();
-    this.quitAsked = true;
+    const p = this.prompt;
+    if (p?.kind === "confirm" && p.tag === "quit") return this.opts.quit();
     const pages = [...this.pages.values()];
-    const asking = (await Promise.all(pages.map((p) => this.wouldAsk(p)))).filter(Boolean).length;
+    const asking = (await Promise.all(pages.map((page) => this.wouldAsk(page)))).filter(Boolean).length;
     if (asking === 0) return this.opts.quit();
     this.prompt = {
       kind: "confirm",
+      tag: "quit",
       message: `${asking === 1 ? "A page" : `${asking} pages`} may have unsaved changes. Quit anyway?`,
       onYes: () => this.opts.quit(),
-      onNo: () => (this.quitAsked = false),
       edit: new LineEdit("", false),
     };
     this.queueChrome();
@@ -956,6 +959,7 @@ export class App {
     if (guarded.length === 0) return closeAll();
     this.prompt = {
       kind: "confirm",
+      tag: "close",
       message: `${guarded.length === 1 ? "A page" : `${guarded.length} pages`} in this ${what} may have unsaved changes. Close anyway?`,
       onYes: closeAll,
       edit: new LineEdit("", false),
@@ -1216,7 +1220,7 @@ export class App {
   /** Draws the page's latest frame into its pane; false if there was nothing to draw. */
   private paint(page: Page, done?: () => void): boolean {
     const g = this.geom.get(page);
-    if (!g || !page.lastFrame || this.mode === "help" || this.closingAll) return false;
+    if (!g || !page.lastFrame || this.mode === "help" || this.closingAll || page === this.panelPage) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
     const id = this.nextImage++;
@@ -1266,6 +1270,7 @@ export class App {
       return;
     }
     s += this.drawPaneChrome();
+    s += this.dialogPanel();
     out(s + RESET + this.cursorSeq());
   }
 
@@ -1323,7 +1328,8 @@ export class App {
     let first = 0;
     const active = space?.active ?? 0;
     const total = (from: number, to: number) => items.slice(from, to + 1).reduce((a, t) => a + width(t) + 1, 0);
-    while (first < active && total(first, active) + width(plus) > w) first++;
+    const markers = (from: number) => (from > 0 ? 1 : 0) + (active < items.length - 1 ? 1 : 0);
+    while (first < active && total(first, active) + width(plus) + markers(first) > w) first++;
 
     let s = at(1, col) + bg(C.crust);
     let used = 0;
@@ -1492,6 +1498,52 @@ export class App {
       }
     }
     return s + RESET;
+  }
+
+  /** The page whose pane shows a long dialog message in full (its picture is hidden meanwhile). */
+  private panelPage: Page | null = null;
+
+  /**
+   * A dialog message too long for the address line (or with line breaks)
+   * is shown in full over its page's pane; the address line keeps the
+   * buttons.
+   */
+  private dialogPanel(): string {
+    const p = this.prompt;
+    const d = p?.kind === "dialog" ? p.page.dialog : null;
+    const g = p?.kind === "dialog" ? this.geom.get(p.page) : undefined;
+    const message = d && d.type !== "beforeunload" ? d.message : "";
+    const fits = message && !/\n/.test(message) && width(message) + 40 < this.cols - this.mainCol();
+    const page = p?.kind === "dialog" && message && !fits && g ? p.page : null;
+    if (this.panelPage && this.panelPage !== page) {
+      // Message gone: clear it and put the page's picture back.
+      this.panelPage = null;
+      setTimeout(() => this.fullRedraw(), 0);
+    }
+    if (!page || !g) return "";
+    this.panelPage = page;
+    const r = g.content;
+    let s = page.imageId !== null ? `\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\` : "";
+    page.imageId = null;
+    page.placed = null;
+    const inner = Math.max(10, Math.min(r.cols - 4, 100));
+    const lines: string[] = [];
+    for (const para of message.replace(/\r/g, "").split("\n")) {
+      let rest = para;
+      do {
+        lines.push(truncate(rest, inner + 1).replace(/…$/, ""));
+        rest = rest.slice(lines[lines.length - 1]!.length);
+      } while (rest.length > 0 && lines.length < r.rows - 3);
+    }
+    const shown = lines.slice(0, Math.max(1, r.rows - 3));
+    const left = r.col + Math.max(0, Math.floor((r.cols - inner - 4) / 2));
+    const top = r.row + 1;
+    for (let i = 0; i < r.rows; i++) s += at(r.row + i, r.col) + bg(C.crust) + " ".repeat(r.cols);
+    s += at(top, left) + bg(C.base) + fg(C.yellow) + BOLD + fit("  ⚠ The page says:", inner + 4) + RESET;
+    shown.forEach((line, i) => {
+      s += at(top + 1 + i, left) + bg(C.base) + fg(C.text) + fit(`  ${line}`, inner + 4) + RESET;
+    });
+    return s;
   }
 
   /** The key reference, drawn over the (blanked) pane area; two columns if it's short. */
@@ -1807,7 +1859,6 @@ export class App {
         prompt.onYes();
       } else if (ev.key === "Escape") {
         this.prompt = null;
-        prompt.onNo?.();
       }
       // Whatever the page was asking before (a dialog, a file) comes back.
       this.syncPrompt();
@@ -1874,6 +1925,8 @@ export class App {
       this.prompt = { ...prompt, edit: new LineEdit(text, false) };
       return;
     }
+    // Absolute paths only: the browser kills the renderer over a relative one.
+    files = files.map((f) => resolvePath(f));
     this.lastUploadDir = `${dirname(files[0]!)}/`;
     this.cdp
       .send("DOM.setFileInputFiles", { files, backendNodeId: prompt.backendNodeId }, prompt.sessionId)
@@ -1972,6 +2025,12 @@ export class App {
       return;
     }
     const text = ev.text;
+    if (text.length > 4 || !ev.key || ev.key === "Unidentified") {
+      // A key event carries at most 4 UTF-16 units of text; longer text (an
+      // IME commit, a long emoji sequence) is inserted instead.
+      if (text) this.inputTail = this.cdp.send("Input.insertText", { text }, sid).catch(() => {});
+      return;
+    }
     void send({
       type: text ? "keyDown" : "rawKeyDown",
       ...base,
@@ -2025,12 +2084,19 @@ export class App {
       const handled = await this.cdp
         .send("Runtime.evaluate", {
           expression: `(() => {
-            let a = document.activeElement;
-            while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+            let d = document, a = d.activeElement;
+            for (;;) {
+              if (a && a.shadowRoot && a.shadowRoot.activeElement) { a = a.shadowRoot.activeElement; continue; }
+              if (a && (a.tagName === "IFRAME" || a.tagName === "FRAME")) {
+                let inner = null; try { inner = a.contentDocument; } catch {}
+                if (inner) { d = inner; a = d.activeElement; continue; }
+              }
+              break;
+            }
             const data = new DataTransfer();
             data.setData("text/plain", ${JSON.stringify(text)});
             const ev = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true, composed: true });
-            (a || document.body || document.documentElement).dispatchEvent(ev);
+            (a || d.body || d.documentElement).dispatchEvent(ev);
             return ev.defaultPrevented; })()`,
           returnByValue: true,
         }, sid)
@@ -2318,10 +2384,12 @@ export class App {
     }
     const name = names[ev.button] ?? "none";
     if (name === "none" || !name) return;
+    // A press or release supersedes motion still waiting to be sent.
+    this.pendingMoves.delete(page);
     if (ev.action === "press") {
       const now = Date.now();
-      if (ev.button === 1) {
-        // Only a middle click on a link opens its tab in the background.
+      if (ev.button === 1 || (ev.button === 0 && ev.mods.ctrl)) {
+        // Only a middle (or Ctrl+) click on a link opens its tab in the background.
         const at = { x, y };
         this.cdp
           .send("Runtime.evaluate", {
@@ -2387,7 +2455,7 @@ function isModifier(ev: KeyEvent): boolean {
 
 /** "ctrl+shift+r", "alt+arrowleft", "?" (shift dropped for symbols). */
 export function comboOf(ev: KeyEvent): string {
-  const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key.toLowerCase();
+  const k = ev.key.toLowerCase();
   const letterOrNamed = ev.key.length > 1 || /[a-z]/i.test(ev.key);
   const parts: string[] = [];
   if (ev.mods.ctrl) parts.push("ctrl");
