@@ -185,12 +185,13 @@ try:
 
     # 6d3. a select inside a modal <dialog>
     click_el("modal"); time.sleep(0.5)
-    mc = next(p["value"] for p in pages("(() => { const r = document.getElementById('msel').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()") if p["value"] and "popup" not in p["url"])
+    mc = next(p["value"] for p in pages("(() => { const r = document.getElementById('msel').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2, r.bottom]; })()") if p["value"] and "popup" not in p["url"])
     before_blue = blue_pixels()
     t.click(220 + int(mc[0]), 40 + int(mc[1])); time.sleep(0.8)
     check("select menu shows above a modal dialog", blue_pixels() > before_blue + 200, (before_blue, blue_pixels()))
-    t.key("down"); t.key("enter"); time.sleep(0.4)
-    check("modal select picks a value", (state() or {}).get("msel") == "Banana", (state() or {}).get("msel"))
+    # click the second option with the mouse (menu rows are 24 px, after 4 px padding)
+    t.click(220 + int(mc[0]), 40 + int(mc[2] + 4 + 24 + 12)); time.sleep(0.5)
+    check("modal select option clicked with the mouse", (state() or {}).get("msel") == "Banana", (state() or {}).get("msel"))
     pages("document.getElementById('dlg') && document.getElementById('dlg').close()"); time.sleep(0.3)
 
     # 6d4. browser shortcuts: Ctrl+S reaches the page, Ctrl+Shift+W doesn't close anything
@@ -234,6 +235,7 @@ try:
     check("select menu opens inside a shadow root", blue_pixels() > before_blue + 200, (before_blue, blue_pixels()))
     t.key("down"); t.key("enter"); time.sleep(0.5)
     check("shadow-root select picks a value", (state() or {}).get("ssel") == "South", (state() or {}).get("ssel"))
+    check("shadow-root select's input event reaches the page", (state() or {}).get("sselInputs", 0) >= 1, (state() or {}).get("sselInputs"))
 
     # 6f. downloads never overwrite
     click_el("dl"); time.sleep(1.5); click_el("dl"); time.sleep(1.5)
@@ -294,8 +296,16 @@ try:
     check("background file chooser doesn't prompt in the wrong tab", "Upload file" not in t.line(2), t.line(2))
     t.key("ctrl+b"); t.key("1"); time.sleep(0.6)
     check("file chooser asks when its tab is shown", "Upload file" in t.line(2), t.line(2))
-    t.key("escape"); time.sleep(0.3)
+    t.key("escape"); time.sleep(0.5)
+    check("cancelling the file prompt fires the input's cancel event", (state() or {}).get("cancels", 0) >= 1, (state() or {}).get("cancels"))
     check("tab titles unharmed", t.line(1).split("│")[0] == title1.split("│")[0], (title1, t.line(1)))
+
+    # 8b2d. a middle click that isn't on a link doesn't push the next popup into the background
+    h1 = center("h"); t.click(220 + int(h1[0]), 40 + int(h1[1]), button=1); time.sleep(0.2)
+    c = center("pop"); t.click(220 + int(c[0]), 40 + int(c[1]))
+    check("popup after a stray middle click opens in front", t.wait_for(lambda: "popup=1" in t.line(2), 6), t.line(2))
+    t.key("ctrl+w"); time.sleep(1.0)
+    check("closing it returns to the page", "popup" not in t.line(2), t.line(2))
 
     # 8b3. middle-clicked link opens in the background; a guarded page asks before closing
     tabs_before = t.line(1).count("│")
@@ -373,6 +383,9 @@ try:
     n_before = len(pages("1"))
     t.key("ctrl+b"); t.key("shift+x")
     check("closing a split tab with unsaved changes asks once", t.wait_text("unsaved changes", 6), t.line(2))
+    t.paste("leaked-paste"); time.sleep(0.6)
+    rv = next((p["value"] for p in pages() if p["value"] and "right=1" in p["url"]), {})
+    check("paste during the confirmation goes nowhere", "leaked-paste" not in json.dumps(rv), rv.get("inp"))
     t.key("escape"); time.sleep(1.5)
     check("keeping keeps every pane of the tab", len(pages("1")) == n_before, (n_before, len(pages("1"))))
     # ...also while that pane is showing a JavaScript dialog
@@ -492,9 +505,20 @@ try:
     v = next((p["value"] for p in pages("document.getElementById('csel') && document.getElementById('csel').value") if "csp.html" in p["url"]), None)
     check("CSP page select picks a value", v == "Green", v)
 
-    # 16. Ctrl+B q from the address bar quits, and nothing is drawn after the terminal is restored
+    # 15c. quitting with a page that may have unsaved changes asks first
+    pages("window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; })")
+    t.key("ctrl+q")
+    check("quit asks about unsaved changes", t.wait_text("Quit anyway?", 8), t.line(2))
+    t.key("escape"); time.sleep(0.8)
+    check("answering no keeps termium running", os.waitpid(t.pid, os.WNOHANG)[0] == 0)
+
+    # 16. Ctrl+B q from the address bar quits (pressed twice: the second press
+    # answers the unsaved-changes question), and nothing is drawn after the
+    # terminal is restored
     t.key("ctrl+l"); time.sleep(0.3)
     t.key("ctrl+b"); t.key("q")
+    t.wait_text("Quit anyway?", 8)
+    t.key("ctrl+q")
     status, end = None, time.time() + 10
     while time.time() < end and status is None:
         pid, st = os.waitpid(t.pid, os.WNOHANG)

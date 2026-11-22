@@ -6,7 +6,15 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { App } from "./app";
-import { clearOwner, findBrowser, launchBrowser, reapOrphans, type LaunchedBrowser } from "./browser";
+import {
+  clearOwner,
+  findBrowser,
+  launchBrowser,
+  lockProfile,
+  reapOrphans,
+  unlockProfile,
+  type LaunchedBrowser,
+} from "./browser";
 import { CDP } from "./cdp";
 import { InputParser, type InputEvent } from "./input";
 import { DEFAULT_SEARCH } from "./text";
@@ -85,6 +93,7 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
+  if (args.incognito && args.profile) fail("--incognito and --profile can't be used together");
   return args;
 }
 
@@ -242,13 +251,23 @@ async function main(): Promise<void> {
   parser.expectApc = true;
 
   await sweepTemp();
-  const chosen = args.incognito
-    ? mkdtempSync(join(tempBase(), `termium-incognito-${process.pid}-`))
-    : (args.profile ?? join(dataDir, "profile"));
-  mkdirSync(chosen, { recursive: true });
-  // One spelling per directory, so locks and leftover-browser records match
-  // however the path was typed (relative, symlinked, trailing slash).
-  const profile = realpathSync(chosen);
+  let profile: string;
+  try {
+    const chosen = args.incognito
+      ? mkdtempSync(join(tempBase(), `termium-incognito-${process.pid}-`))
+      : (args.profile ?? join(dataDir, "profile"));
+    mkdirSync(chosen, { recursive: true });
+    // One spelling per directory, so locks and leftover-browser records match
+    // however the path was typed (relative, symlinked, trailing slash).
+    profile = realpathSync(chosen);
+    lockProfile(profile);
+  } catch (e: any) {
+    restoreTerminal();
+    try {
+      process.stdin.setRawMode(false);
+    } catch {}
+    fail(/in use|can't lock/.test(e?.message ?? "") ? e.message : `can't use that profile directory: ${e?.message ?? e}`);
+  }
 
   // The browser's temp files (it makes a few per run) go here and are removed on exit.
   const browserTmp = mkdtempSync(join(tempBase(), `tmb-${process.pid}-`));
@@ -292,6 +311,7 @@ async function main(): Promise<void> {
     // Only now that the browser is gone: a kill before this point leaves
     // the record for the next start to act on.
     clearOwner(profile);
+    unlockProfile(profile);
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
     rmSync(browserTmp, { recursive: true, force: true });
     if (err) {

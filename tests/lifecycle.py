@@ -72,18 +72,31 @@ try:
     check("reopened by absolute path after SIGKILL", at_address_bar(r2))
     r2.close()
 
-    # two termiums started at the same moment on one profile: one runs, the other refuses
-    prof4 = os.path.join(tmp, "p4")
-    x = Term(["bun", main, "--profile", prof4], cwd=ROOT)
-    y = Term(["bun", main, "--profile", prof4], cwd=ROOT)
-    time.sleep(12)
-    alive = [z for z in (x, y) if running(z)]
-    check("simultaneous start: exactly one survives", len(alive) == 1, [running(x), running(y)])
-    if alive:
-        check("simultaneous start: the survivor works", at_address_bar(alive[0], 5) and helium_on(prof4) > 0)
-        loser = y if alive[0] is x else x
-        check("simultaneous start: the other says why", "in use" in output(loser), output(loser)[-200:])
-        alive[0].close()
+    # two termiums started at the same moment on one profile: one runs, the
+    # other refuses (several tries: the race is timing-dependent)
+    for attempt in range(3):
+        prof4 = os.path.join(tmp, f"p4-{attempt}")
+        x = Term(["bun", main, "--profile", prof4], cwd=ROOT)
+        y = Term(["bun", main, "--profile", prof4], cwd=ROOT)
+        time.sleep(10)
+        alive = [z for z in (x, y) if running(z)]
+        check(f"simultaneous start #{attempt + 1}: exactly one survives", len(alive) == 1, [running(x), running(y)])
+        if alive:
+            check(f"simultaneous start #{attempt + 1}: the survivor works", at_address_bar(alive[0], 5) and helium_on(prof4) > 0)
+            loser = y if alive[0] is x else x
+            check(f"simultaneous start #{attempt + 1}: the other says why", "in use" in output(loser), output(loser)[-200:])
+        for z in (x, y):
+            if z.alive:
+                z.close()
+
+    # option and profile-path errors
+    bad = Term(["bun", main, "--incognito", "--profile", os.path.join(tmp, "px")], cwd=ROOT)
+    bad.wait_for(lambda: not running(bad), 10)
+    check("--incognito with --profile is an error", "can't be used together" in output(bad), output(bad)[-200:])
+    blocker = os.path.join(tmp, "afile"); open(blocker, "w").write("x")
+    bad2 = Term(["bun", main, "--profile", os.path.join(blocker, "sub")], cwd=ROOT)
+    bad2.wait_for(lambda: not running(bad2), 10)
+    check("an unusable profile path says so", "can't use that profile directory" in output(bad2), output(bad2)[-200:])
 
     # killed during startup, after the browser took the profile but before the terminal answered
     class SlowTerminal(Term):

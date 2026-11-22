@@ -91,7 +91,9 @@ divider between panes.
 ### Good to know
 
 - Helium holds network requests for a few seconds after it starts while its
-  built-in content blocker loads, so the very first page can take a moment.
+  built-in content blocker loads, so the very first page can take a moment,
+  and Helium may reload a page that loaded before the blocker was ready
+  (anything typed into it in those first seconds is lost).
 - Only one termium can use a profile at a time; use `--profile` or
   `--incognito` for a second one. If termium was killed outright (`kill
   -9`), the next start stops the browser it left behind.
@@ -107,14 +109,20 @@ divider between panes.
   Ctrl+N, …) are not passed on; ones pages use themselves (Ctrl+S, Ctrl+K,
   Ctrl+F, …) reach the page.
 - Known limits of headless Chromium: background tabs still count as
-  visible, WebGL runs on the SwiftShader software renderer, and zoom
-  applies to all pages rather than per site.
+  visible, WebGL runs on the SwiftShader software renderer,
+  `window.outerWidth`/`outerHeight` report the headless window's size
+  rather than the page's, and zoom applies to all pages rather than per
+  site.
 - Pasting gives clipboard access to the page you paste into, for that
   paste only, and empties the browser's clipboard afterwards, so no other
   site can read it.
 - A page that crashed or hung (Helium blocks some `chrome://` pages that
-  way) is replaced by a fresh one on the next reload or address. A dialog from a page you're not looking at waits (its tab
-  shows `!`) instead of taking focus.
+  way) is replaced by a fresh one on the next reload or address; a page
+  that is only busy is left alone.
+- A dialog from a page you're not looking at waits (its tab shows `!`)
+  instead of taking focus.
+- Ctrl+Q asks first if a page may have unsaved changes; press it again to
+  quit anyway.
 - The page is a bitmap, so termium needs a graphics-capable terminal. It
   checks on startup and says so if yours is not.
 

@@ -38,3 +38,6 @@ Initial release.
 - Crashed or hung pages are replaced on the next reload or navigation.
 - Sharp rendering on HiDPI terminals (full device resolution).
 - Browser shortcuts that would act on the hidden browser are not passed on.
+- Ctrl+Q asks first if a page may have unsaved changes (again to force).
+- termium takes its own profile lock, so two termiums started at the same
+  instant can't both run on one profile.

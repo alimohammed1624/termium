@@ -91,7 +91,7 @@ type Prompt =
   | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page }
-  | { kind: "confirm"; edit: LineEdit; message: string; onYes: () => void };
+  | { kind: "confirm"; edit: LineEdit; message: string; onYes: () => void; onNo?: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help";
 
@@ -842,11 +842,11 @@ export class App {
   }
 
   /** Whether the page's renderer answers at all (a hung one never does). */
-  private async responsive(page: Page): Promise<boolean> {
+  private async responsive(page: Page, timeoutMs = 1500): Promise<boolean> {
     const probe = this.cdp
       .send("Runtime.evaluate", { expression: "1", returnByValue: true }, page.sessionId)
       .then(() => true, () => false);
-    return Promise.race([probe, Bun.sleep(1500).then(() => false)]);
+    return Promise.race([probe, Bun.sleep(timeoutMs).then(() => false)]);
   }
 
   /** Navigates; a crashed page, or one whose renderer is hung, is replaced by a fresh one. */
@@ -878,7 +878,11 @@ export class App {
     setTimeout(async () => {
       const stuck = () => page.navSeq === seq && (page.loading || page.navStarted !== 0);
       if (!stuck() || page.dialog || !this.pages.has(page.sessionId)) return;
-      if (await this.responsive(page)) return;
+      // Busy pages answer eventually: only two unanswered probes a few
+      // seconds apart count as hung.
+      if (await this.responsive(page, 3000)) return;
+      await Bun.sleep(2000);
+      if (!stuck() || (await this.responsive(page, 3000))) return;
       if (stuck() && this.pages.has(page.sessionId)) {
         this.showToast("The page stopped responding; opened it again");
         this.recover(page, url);
@@ -911,6 +915,28 @@ export class App {
     // A single page asks for itself (its own "Leave this page?").
     if (pages.length === 1) this.closePage(pages[0]!);
     else void this.closeGroup(pages, "tab");
+  }
+
+  private quitAsked = false;
+
+  /**
+   * Quits, asking first (as Chrome does) if a page may have unsaved changes.
+   * Asked again while that question is up, it quits.
+   */
+  private async requestQuit(): Promise<void> {
+    if (this.quitAsked || this.prompt?.kind === "confirm") return this.opts.quit();
+    this.quitAsked = true;
+    const pages = [...this.pages.values()];
+    const asking = (await Promise.all(pages.map((p) => this.wouldAsk(p)))).filter(Boolean).length;
+    if (asking === 0) return this.opts.quit();
+    this.prompt = {
+      kind: "confirm",
+      message: `${asking === 1 ? "A page" : `${asking} pages`} may have unsaved changes. Quit anyway?`,
+      onYes: () => this.opts.quit(),
+      onNo: () => (this.quitAsked = false),
+      edit: new LineEdit("", false),
+    };
+    this.queueChrome();
   }
 
   /**
@@ -1095,6 +1121,8 @@ export class App {
         await Bun.sleep(80 * (attempt + 1));
       }
       page.appliedCss = want;
+      // (window.outerWidth/outerHeight stay at the headless window's size:
+      // resizing that window shrinks the captured frames. See README.)
     }
     const cast = page.casting;
     if (cast && !sameSize(page.appliedCast, cast)) {
@@ -1225,6 +1253,8 @@ export class App {
 
   private drawChrome(): void {
     if (!this.started || this.closingAll) return;
+    // A dialog or file chooser hidden by another prompt comes back once that's done.
+    this.syncPrompt();
     let s = "\x1b[?25l";
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
@@ -1250,8 +1280,11 @@ export class App {
     line(2, " SPACES", base + "\x1b[2m");
     this.spaceHits = [];
     let row = 3;
+    const fits = Math.max(1, this.rows - 4);
+    const keep = this.mode === "spaces" ? this.spaceCursor : this.activeSpace;
+    const firstSpace = Math.max(0, Math.min(keep - fits + 1, this.spaces.length - fits));
     this.spaces.forEach((space, i) => {
-      if (row > this.rows - 2) return;
+      if (i < firstSpace || row > this.rows - 2) return;
       const active = i === this.activeSpace;
       const cursor = this.mode === "spaces" && i === this.spaceCursor;
       const marker = cursor ? "▸" : active ? "●" : " ";
@@ -1312,6 +1345,15 @@ export class App {
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
       used += tw + 1;
     }
+    if (last < first && items.length > 0) {
+      // Not even the active tab fits whole: show it cut to the space there is.
+      const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
+      const text = truncate(items[active]!, room);
+      s += bg(C.base) + fg(C.text) + BOLD + text + RESET + bg(C.crust);
+      this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
+      used += width(text);
+      last = active;
+    }
     if (last < items.length - 1) {
       // Tabs that don't fit on the right.
       s += bg(C.crust) + fg(C.peach) + "›";
@@ -1351,7 +1393,7 @@ export class App {
 
     const prompt = this.prompt;
     if (prompt && prompt.kind === "confirm") {
-      const text = fit(` ⚠ ${prompt.message}  [Enter] Close  [Esc] Keep`, w - modeW);
+      const text = fit(` ⚠ ${prompt.message}  [Enter] Yes  [Esc] No`, w - modeW);
       this.promptCursor = null;
       this.navHits = null;
       return s + bg(C.yellow) + fg(C.crust) + BOLD + text + RESET + bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
@@ -1499,7 +1541,7 @@ export class App {
 
   handle(ev: InputEvent): void {
     if (ev.type === "key" && ev.event !== "release" && comboOf(ev) === "ctrl+q" && this.started) {
-      this.opts.quit();
+      void this.requestQuit();
       return;
     }
     if (!this.ready || this.holds.size > 0) {
@@ -1523,6 +1565,8 @@ export class App {
         if (p && p.kind !== "confirm" && (p.kind !== "dialog" || p.page.dialog?.type === "prompt")) {
           p.edit.insert(ev.text);
           this.queueChrome();
+        } else if (p) {
+          // A yes/no prompt or a page blocked on alert/confirm: nowhere for text to go.
         } else if (this.focused) {
           void this.pastePage(this.focused, ev.text);
         }
@@ -1616,7 +1660,7 @@ export class App {
         if (page) this.closePage(page);
         return true;
       case "ctrl+q":
-        this.opts.quit();
+        void this.requestQuit();
         return true;
       case "alt+arrowleft":
         if (page) void this.history(page, -1);
@@ -1693,7 +1737,7 @@ export class App {
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
-      case "q": this.opts.quit(); return;
+      case "q": void this.requestQuit(); return;
       case "?":
         this.mode = "help";
         this.fullRedraw();
@@ -1763,6 +1807,7 @@ export class App {
         prompt.onYes();
       } else if (ev.key === "Escape") {
         this.prompt = null;
+        prompt.onNo?.();
       }
       // Whatever the page was asking before (a dialog, a file) comes back.
       this.syncPrompt();
@@ -1777,6 +1822,7 @@ export class App {
     }
     const result = prompt.edit.key(ev);
     if (result && prompt.kind === "file") prompt.page.fileChooser = null;
+    if (result === "cancel" && prompt.kind === "file") this.cancelFileInput(prompt.sessionId, prompt.backendNodeId);
     if (result === "cancel") {
       if (prompt.kind === "dialog") this.answerDialog(prompt.page, false, "");
       this.prompt = null;
@@ -1797,6 +1843,19 @@ export class App {
       }
     }
     this.queueChrome();
+  }
+
+  /** Escape in the file prompt is a cancelled file picker: the input gets its `cancel` event. */
+  private cancelFileInput(sessionId: string, backendNodeId: number): void {
+    this.cdp
+      .send("DOM.resolveNode", { backendNodeId }, sessionId)
+      .then(({ object }) =>
+        this.cdp.send("Runtime.callFunctionOn", {
+          objectId: object.objectId,
+          functionDeclaration: "function () { this.dispatchEvent(new Event('cancel', { bubbles: true })); }",
+        }, sessionId),
+      )
+      .catch(() => {});
   }
 
   private uploadFiles(prompt: Extract<Prompt, { kind: "file" }>, text: string): void {
@@ -2261,7 +2320,19 @@ export class App {
     if (name === "none" || !name) return;
     if (ev.action === "press") {
       const now = Date.now();
-      if (ev.button === 1) this.lastMiddlePress = now;
+      if (ev.button === 1) {
+        // Only a middle click on a link opens its tab in the background.
+        const at = { x, y };
+        this.cdp
+          .send("Runtime.evaluate", {
+            expression: `(() => { const e = document.elementFromPoint(${at.x}, ${at.y}); return !!(e && e.closest && e.closest("a[href], area[href]")); })()`,
+            returnByValue: true,
+          }, sid)
+          .then((r) => {
+            if (r?.result?.value === true) this.lastMiddlePress = now;
+          })
+          .catch(() => {});
+      }
       const lc = this.lastClick;
       const near = Math.abs(lc.x - px) < this.cellW && Math.abs(lc.y - py) < this.cellH;
       lc.count = now - lc.time < 450 && near && lc.button === ev.button ? Math.min(3, lc.count + 1) : 1;

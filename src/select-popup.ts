@@ -19,7 +19,7 @@ export const SELECT_POPUP = String.raw`(() => {
     close();
     if (index >= 0 && sel.selectedIndex !== index) {
       sel.selectedIndex = index;
-      sel.dispatchEvent(new Event("input", { bubbles: true }));
+      sel.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
       sel.dispatchEvent(new Event("change", { bubbles: true }));
     }
     sel.focus();
@@ -97,7 +97,13 @@ export const SELECT_POPUP = String.raw`(() => {
     });
     css(menu, { "pointer-events": "auto" });
     host.setAttribute("popover", "manual");
-    document.documentElement.appendChild(host);
+    // A modal dialog (or a fullscreen element) makes everything outside it
+    // inert, so the menu lives inside it when the select does.
+    const modal = sel.closest("dialog");
+    const container = modal && modal.matches(":modal") ? modal
+      : document.fullscreenElement && document.fullscreenElement.contains(sel) ? document.fullscreenElement
+      : document.documentElement;
+    container.appendChild(host);
     try { host.showPopover(); } catch {}
     setActive(Math.max(0, sel.selectedIndex));
     const step = (dir) => {

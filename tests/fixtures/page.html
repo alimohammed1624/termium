@@ -21,7 +21,7 @@
   <option value="alpha">Alpha</option><option value="beta">Beta</option><option value="gamma">Gamma</option>
 </select>
 <span id="selout"></span>
-<input id="file" type="file">
+<input id="file" type="file" oncancel="cancels++">
 <a id="next" href="/page.html?step=2">Next page</a>
 <a id="dl" href="/dl.txt" download="dl.txt">Download</a>
 <button id="later" onclick="setTimeout(() => alert('delayed alert'), 1500)">Alert later</button>
@@ -38,7 +38,8 @@
 <div id="log"></div>
 <div class="tall"></div>
 <script>
- var clicks = 0, pastes = 0, moves = 0, ticks = 0;
+ var clicks = 0, pastes = 0, moves = 0, ticks = 0, cancels = 0, sselInputs = 0;
+ addEventListener('input', (e) => { const t = e.composedPath()[0]; if (t && t.id === 'ssel') sselInputs++; });
  addEventListener('mousemove', () => moves++);
  setInterval(() => ticks++, 100);
  addEventListener('paste', () => pastes++, true);
@@ -55,6 +56,6 @@
  addEventListener('keyup', e => log(`up ${e.key}`));
  addEventListener('dblclick', e => log(`dblclick`));
  addEventListener('scroll', () => { document.title = 'scrolled ' + Math.round(scrollY); });
- window.termiumState = () => ({ hsel: document.getElementById('hsel').value, active: document.activeElement && document.activeElement.id, moves, ticks, vis: document.visibilityState, msel: document.getElementById('msel').value, ssel: document.getElementById('shadowhost').shadowRoot.getElementById('ssel').value, focused: document.hasFocus(), pastes, frame: window.frameState, sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
+ window.termiumState = () => ({ cancels, sselInputs, outer: [outerWidth, outerHeight], inner: [innerWidth, innerHeight], hsel: document.getElementById('hsel').value, active: document.activeElement && document.activeElement.id, moves, ticks, vis: document.visibilityState, msel: document.getElementById('msel').value, ssel: document.getElementById('shadowhost').shadowRoot.getElementById('ssel').value, focused: document.hasFocus(), pastes, frame: window.frameState, sel: document.getElementById('sel').value, selout: document.getElementById('selout').textContent, file: (document.getElementById('file').files[0] || {}).name || "", ua: navigator.userAgent, webdriver: navigator.webdriver, inp: document.getElementById('inp').value, ta: document.getElementById('ta').value, clicks, scrollY, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, log: document.getElementById('log').textContent });
 </script>
 </body></html>

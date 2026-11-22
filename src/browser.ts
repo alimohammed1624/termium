@@ -88,6 +88,51 @@ interface Owner {
   browsers: number[];
 }
 
+/**
+ * Takes <profile>/termium.lock for this termium, or throws if a live
+ * termium holds it. Created with O_EXCL, so of two termiums starting on
+ * one profile at the same instant exactly one gets it (Chromium's own
+ * profile lock has a window where both browsers start). A lock whose
+ * termium has died is taken over.
+ */
+export function lockProfile(profileDir: string): void {
+  const path = join(profileDir, "termium.lock");
+  const mine = JSON.stringify({ pid: process.pid, start: startTime(process.pid) });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = openSync(path, "wx");
+      writeFileSync(fd, mine);
+      closeSync(fd);
+      return;
+    } catch (e: any) {
+      if (e?.code !== "EEXIST") throw new Error(`can't lock the profile ${profileDir}: ${e?.message ?? e}`);
+    }
+    let holder: { pid: number; start: string } | null = null;
+    try {
+      holder = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      // Being written right now by its owner: give it a moment.
+      Bun.sleepSync(50);
+      continue;
+    }
+    if (holder && alive(holder.pid) && startTime(holder.pid) === holder.start) {
+      throw new Error(
+        `the profile ${profileDir} is in use by another termium (pid ${holder.pid}). ` +
+          "Close it, or pass --profile <dir> or --incognito.",
+      );
+    }
+    rmSync(path, { force: true }); // left by a termium that died
+  }
+  throw new Error(`can't lock the profile ${profileDir}`);
+}
+
+export function unlockProfile(profileDir: string): void {
+  const path = join(profileDir, "termium.lock");
+  try {
+    if (JSON.parse(readFileSync(path, "utf8")).pid === process.pid) rmSync(path, { force: true });
+  } catch {}
+}
+
 /** Each termium writes its own record: <profile>/termium.owner.<pid>. */
 const OWNER_PREFIX = "termium.owner.";
 
@@ -227,6 +272,8 @@ export async function launchBrowser(
     "--disable-session-crashed-bubble",
     // Don't advertise automation (navigator.webdriver) to every page.
     "--disable-blink-features=AutomationControlled",
+    // Crash dumps stay with this profile rather than the user's own Helium config.
+    `--crash-dumps-dir=${join(profileDir, "crashes")}`,
   ];
   // Tests inspect pages over a DevTools port; termium itself never uses one.
   if (process.env.TERMIUM_TEST_DEVTOOLS_PORT) args.push("--remote-debugging-port=0");
