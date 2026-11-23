@@ -28,10 +28,13 @@ import pty
 import re
 import select
 import signal
+import shutil
 import struct
+import tempfile
 import termios
 import threading
 import time
+import unicodedata
 
 import pyte
 from PIL import Image, ImageDraw, ImageFont
@@ -67,16 +70,28 @@ class Term:
     def __init__(self, argv, cols=160, rows=45, cell_w=10, cell_h=20, cwd=None, env=None, passthrough=False):
         """With passthrough, run inside a real terminal: the child's output goes
         to our stdout and the terminal's replies come back from our stdin, so the
-        real terminal renders and answers; scripted input is mixed in."""
+        real terminal renders and answers; scripted input is mixed in.
+
+        termium runs as a client of a background session server. Unless env
+        sets XDG_RUNTIME_DIR, each Term gets a private one, so its session
+        can't meet any other (the user's own included), and close() makes
+        sure that session's server is gone too."""
         self.passthrough = passthrough
+        env = dict(env or {})
+        self.own_runtime = "XDG_RUNTIME_DIR" not in env
+        if self.own_runtime:
+            env["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="trt-")
+        self.runtime_dir = env["XDG_RUNTIME_DIR"]
         if passthrough:
             rows, cols, xpix, ypix = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
             cell_w, cell_h = (xpix // cols or 10), (ypix // rows or 20)
         self.cols, self.rows, self.cell_w, self.cell_h = cols, rows, cell_w, cell_h
-        self.screen = pyte.Screen(cols, rows)
+        self.screen = _Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
         self.images: dict[int, bytes] = {}
         self.placements: dict[int, tuple[int, int, int, int]] = {}
+        # Virtual placements (U=1, shown through unicode placeholder cells): id -> (cols, rows)
+        self.virtual: dict[int, tuple[int, int]] = {}
         self.frames = 0
         self.last_output = time.time()
         self.lock = threading.Lock()
@@ -88,7 +103,8 @@ class Term:
         if self.pid == 0:
             if cwd:
                 os.chdir(cwd)
-            e = dict(os.environ, TERM="xterm-ghostty", **(env or {}))
+            e = dict(os.environ, TERM="xterm-ghostty", **env)
+            e.pop("TMUX", None)  # we are the terminal here, not whatever tmux runs this script
             os.execvpe(argv[0], argv, e)
         self._set_size()
         self.alive = True
@@ -174,9 +190,15 @@ class Term:
             pos = m.end()
         text += buf[pos:]
         self._track_cursor(bytes(text))
-        cleaned = re.sub(rb"\x1b\[[<>=?][0-9;:]*u|\x1b\[[0-9;]*t|\x1b\[\?1016\$p|\x1b\[\d+ q", b"", bytes(text))
+        # Sequences pyte can't parse (or chokes on, like tmux's CSI ? n) are dropped.
+        cleaned = re.sub(rb"\x1b\[[<>=?][0-9;:]*u|\x1b\[[0-9;]*t|\x1b\[\?[0-9;]*\$p|\x1b\[\?[0-9;]*n|\x1b\[\d+ q", b"", bytes(text))
+        # Colon-separated SGR (tmux writes 38:2:r:g:b) as pyte's semicolons.
+        cleaned = re.sub(rb"\x1b\[[0-9:;]*:[0-9:;]*m", lambda m: m.group(0).replace(b"::", b":").replace(b":", b";"), cleaned)
         with self.lock:
-            self.stream.feed(cleaned)
+            try:
+                self.stream.feed(cleaned)
+            except Exception:
+                pass  # never let a parser bug kill the reader
             self.raw += buf
             self.last_output = time.time()
         return hold
@@ -187,8 +209,10 @@ class Term:
 
     def _answer_queries(self, data: bytes):
         replies = b""
-        if b"a=q" in data and b"i=31" in data:
-            replies += b"\x1b_Gi=31;OK\x1b\\"
+        for m in re.finditer(rb"\x1b_G([^;\x1b]*)", data):
+            kv = dict(p.split(b"=", 1) for p in m.group(1).split(b",") if b"=" in p)
+            if kv.get(b"a") == b"q" and b"i" in kv:
+                replies += b"\x1b_Gi=" + kv[b"i"] + b";OK\x1b\\"
         for m in re.finditer(rb"\x1b\[>(\d+)u", data):
             self._kbd_flags = int(m.group(1))
         if b"\x1b[?u" in data:
@@ -213,10 +237,12 @@ class Term:
                 if d in ("A", "a"):
                     self.images.clear()
                     self.placements.clear()
+                    self.virtual.clear()
                 elif d in ("I", "i"):
                     i = int(kv.get("i", "0"))
                     self.images.pop(i, None)
                     self.placements.pop(i, None)
+                    self.virtual.pop(i, None)
             return
         if a == "q":
             return
@@ -224,6 +250,7 @@ class Term:
         if a == "T":
             self._pending_apc[key] = payload
             self._pending_meta = (int(kv["i"]), self._cursor, int(kv.get("c", "0")), int(kv.get("r", "0")))
+            self._pending_virtual = kv.get("U") == "1"
         else:
             self._pending_apc[key] = self._pending_apc.get(key, b"") + payload
         if kv.get("m", "0") == "0":
@@ -231,7 +258,12 @@ class Term:
             i, (row, col), c, r = self._pending_meta
             with self.lock:
                 self.images[i] = data
-                self.placements[i] = (row, col, c, r)
+                if self._pending_virtual:
+                    self.virtual[i] = (c, r)
+                    self.placements.pop(i, None)
+                else:
+                    self.placements[i] = (row, col, c, r)
+                    self.virtual.pop(i, None)
                 self.frames += 1
 
     # -- input
@@ -378,10 +410,92 @@ class Term:
                 im = Image.open(io.BytesIO(self.images[i])).convert("RGB")
                 im = im.resize((c * cw, r * ch))
                 img.paste(im, ((col - 1) * cw, (row - 1) * ch))
+            scaled = {}
+            for y, x, i, pr, pc in self._placeholder_cells():
+                if i not in scaled:
+                    c, r = self.virtual[i]
+                    scaled[i] = Image.open(io.BytesIO(self.images[i])).convert("RGB").resize((c * cw, r * ch))
+                img.paste(scaled[i].crop((pc * cw, pr * ch, (pc + 1) * cw, (pr + 1) * ch)), (x * cw, y * ch))
         img.save(path)
         return path
 
+    def _placeholder_cells(self):
+        """Unicode placeholder cells on screen showing a known image:
+        (y, x, image id, row in image, column in image). Call with the lock held."""
+        found = []
+        for y in range(self.rows):
+            line = self.screen.buffer[y]
+            for x in range(self.cols):
+                cell = line[x]
+                if not cell.data.startswith(PLACEHOLDER) or len(cell.data) < 3:
+                    continue
+                i = _COLOR_INDEX.get(cell.fg)
+                if i is None or i not in self.virtual:
+                    continue
+                pr, pc = _DIACRITIC.get(cell.data[1]), _DIACRITIC.get(cell.data[2])
+                if pr is None or pc is None:
+                    continue
+                found.append((y, x, i, pr, pc))
+        return found
+
+    def placeholder_images(self):
+        """Ids of virtually placed images shown on screen, with the cell rectangle
+        (row, col, cols, rows; 1-based) their placeholders cover."""
+        with self.lock:
+            boxes = {}
+            for y, x, i, _, _ in self._placeholder_cells():
+                r0, c0, r1, c1 = boxes.get(i, (y, x, y, x))
+                boxes[i] = (min(r0, y), min(c0, x), max(r1, y), max(c1, x))
+            return {i: (r0 + 1, c0 + 1, c1 - c0 + 1, r1 - r0 + 1) for i, (r0, c0, r1, c1) in boxes.items()}
+
+    # -- sessions
+
+    def server_pid(self, session="default"):
+        """Pid of the session server this client talks to (None if not running)."""
+        try:
+            with open(os.path.join(self.runtime_dir, "termium", f"{session}.pid")) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            return pid
+        except (OSError, ValueError):
+            return None
+
+    def kill9(self, session="default"):
+        """SIGKILLs the session server and then this client: termium killed outright."""
+        pid = self.server_pid(session)
+        if pid:
+            os.kill(pid, signal.SIGKILL)
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+            os.waitpid(self.pid, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+        self.alive = False
+        return pid
+
+    def stop_server(self, session="default"):
+        pid = self.server_pid(session)
+        if not pid:
+            return
+        os.kill(pid, signal.SIGTERM)
+        end = time.time() + 8
+        while time.time() < end:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.1)
+        os.kill(pid, signal.SIGKILL)
+
     def close(self):
+        try:
+            self._close_client()
+        finally:
+            if self.own_runtime:
+                self.stop_server()
+                shutil.rmtree(self.runtime_dir, ignore_errors=True)
+
+    def _close_client(self):
         try:
             try:
                 self.key("ctrl+q")
@@ -408,6 +522,59 @@ class Term:
 
     def __exit__(self, *exc):
         self.close()
+
+
+class _Screen(pyte.Screen):
+    """pyte, except that a combining mark after a character in the last column
+    joins that character (as in real terminals) instead of wrapping first."""
+
+    def draw(self, data: str) -> None:
+        if not any(unicodedata.combining(ch) for ch in data):
+            return super().draw(data)
+        run = ""
+        for ch in data:
+            if unicodedata.combining(ch) and self.cursor.x == self.columns:
+                super().draw(run)
+                run = ""
+                line = self.buffer[self.cursor.y]
+                last = line[self.columns - 1]
+                line[self.columns - 1] = last._replace(data=last.data + ch)
+            else:
+                run += ch
+                if not unicodedata.combining(ch):
+                    # Flush before a base character, so cursor.x is current for the next mark.
+                    super().draw(run)
+                    run = ""
+        if run:
+            super().draw(run)
+
+
+PLACEHOLDER = "\U0010EEEE"
+# pyte stores 256-colour foregrounds as hex; map them back to the index (the image id).
+_COLOR_INDEX: dict[str, int] = {}
+for _n, _hex in enumerate(pyte.graphics.FG_BG_256):
+    _COLOR_INDEX.setdefault(_hex, _n)
+# ...and the 16 basic colours by name (tmux re-encodes 38;5;1 as 31, and so on).
+for _code, _name in pyte.graphics.FG_ANSI.items():
+    if _name != "default":
+        _COLOR_INDEX[_name] = _code - 30
+for _code, _name in pyte.graphics.FG_AIXTERM.items():
+    _COLOR_INDEX[_name] = _code - 90 + 8
+_DIACRITICS_FILE = [
+    0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351,
+    0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369, 0x036A, 0x036B, 0x036C, 0x036D,
+    0x036E, 0x036F, 0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597, 0x0598, 0x0599,
+    0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1, 0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611,
+    0x0612, 0x0613, 0x0614, 0x0615, 0x0616, 0x0617, 0x0657, 0x0658, 0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6,
+    0x06D7, 0x06D8, 0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2, 0x06E4, 0x06E7, 0x06E8, 0x06EB,
+    0x06EC, 0x0730, 0x0732, 0x0733, 0x0735, 0x0736, 0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743, 0x0745, 0x0747,
+    0x0749, 0x074A, 0x07EB, 0x07EC, 0x07ED, 0x07EE, 0x07EF, 0x07F0, 0x07F1, 0x07F3, 0x0816, 0x0817, 0x0818, 0x0819,
+    0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822, 0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A,
+    0x082B, 0x082C, 0x082D, 0x0951, 0x0953, 0x0954, 0x0F82, 0x0F83, 0x0F86, 0x0F87, 0x135D, 0x135E, 0x135F, 0x17DD,
+    0x193A, 0x1A17, 0x1A75, 0x1A76, 0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C, 0x1B6B, 0x1B6D, 0x1B6E, 0x1B6F,
+    0x1B70, 0x1B71, 0x1B72, 0x1B73, 0x1CD0, 0x1CD1, 0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4,
+]
+_DIACRITIC = {chr(c): n for n, c in enumerate(_DIACRITICS_FILE)}
 
 
 def _color(c, default):
