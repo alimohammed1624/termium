@@ -6,6 +6,37 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+Planned as 0.2.0 (`package.json` already says 0.2.0).
+
+### Added
+- Detachable sessions, like tmux: the browser, its pages and all of
+  termium's spaces, tabs and splits live in a background session server;
+  `termium` attaches the terminal to it (starting it if needed).
+  `Ctrl+B d` detaches, and attaching again from any terminal redraws
+  everything at that terminal's size. `termium attach [name]`,
+  `termium ls`, `termium kill [name]` and `-s/--session NAME` for several
+  sessions. A second attach takes the session over and tells the first
+  terminal. Closing or killing the terminal only detaches; if the session
+  dies, the attached terminal gets its screen back with a message.
+  Sessions listen on a private Unix socket in `$XDG_RUNTIME_DIR/termium`;
+  sockets left by a killed session are cleaned up.
+- tmux support: pictures go through tmux's passthrough as unicode
+  placeholders (so they stay in their pane through splits, zoom and
+  redraws), as temporary files when the terminal is on the same machine.
+  A clear message if `allow-passthrough` is off.
+- Works inside herdr panes (`Ctrl+B Ctrl+B d` detaches termium there and
+  in tmux).
+
+### Changed
+- Launch options (`--profile`, `--incognito`, `--browser`, `--scale`,
+  `--search`) apply when a session starts; given to a running session
+  they're an error.
+
+### Fixed
+- No more flicker: redraws (switching tabs, splitting, toggling the
+  sidebar, resizing) are synchronized updates (DECSET 2026), and a page's
+  old picture is deleted only after its new one is placed.
+
 ## [0.1.0] - 2026-11-22
 
 Initial release.

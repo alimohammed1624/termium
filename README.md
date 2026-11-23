@@ -15,6 +15,10 @@ not character art, so text is sharp and video, canvas and WebGL work.
 
 ## Features
 
+- **Detachable sessions**, like tmux: the browser runs in a background
+  session; detach with `Ctrl+B d` and attach again from any terminal, at
+  any size, with every page as you left it.
+- **Works inside tmux and herdr** (see [tmux and herdr](#tmux-and-herdr)).
 - **Spaces, tabs and split panes**, arranged like
   [herdr](https://herdr.dev): spaces (think browser windows) in a sidebar,
   tabs along the top, and any tab split into panes, each a live page.
@@ -39,6 +43,8 @@ not character art, so text is sharp and video, canvas and WebGL work.
 | Browsing | Spaces in the sidebar, tabs on top |
 | ![Split view](docs/screenshots/split.png) | ![Key reference](docs/screenshots/help.png) |
 | Two panes in one tab | Ctrl+B ? shows every key |
+| ![termium in a tmux split](docs/screenshots/tmux-split.png) | ![Re-attached in another tmux window](docs/screenshots/tmux-reattach.png) |
+| In a tmux split | Detached, then attached from another tmux window |
 
 ## Usage
 
@@ -53,6 +59,65 @@ Options: `--browser <path>` (default: Helium on `PATH`, or
 `$TERMIUM_BROWSER`), `--profile <dir>` (default
 `~/.local/share/termium/profile`), `--incognito`, `--scale <n>` (device
 pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
+They apply when a session starts.
+
+### Sessions
+
+termium runs the browser in a background session, so it survives the
+terminal it was started from:
+
+```sh
+termium                  # attach to the session "default", starting it if needed
+termium example.com      # ...and open a page (in a new tab if it's running)
+termium -s work          # another session, with its own browser
+termium attach [name]    # attach to a running session
+termium ls               # list sessions (attached or detached, pages, profile)
+termium kill [name]      # end a session and its browser
+```
+
+- `Ctrl+B d` detaches: the terminal gets its shell back, the browser and
+  every page keep running. Attaching again, from
+  this terminal or another of any size, redraws everything at the new
+  size.
+- `Ctrl+Q` ends the session, as before (it asks first if a page may have
+  unsaved changes).
+- One terminal at a time: attaching from a second terminal takes the
+  session over, and the first is told it was detached (like
+  `tmux attach -d`).
+- Closing the terminal (or `kill`ing the `termium` in it) only detaches.
+  If the session itself dies, an attached terminal gets its screen back
+  with a message.
+- `--browser`, `--profile`, `--incognito`, `--scale` and `--search`
+  apply when a session starts; given to a running one they're an error
+  (start another with `-s NAME`).
+- Sessions listen on a Unix socket in `$XDG_RUNTIME_DIR/termium/` (else
+  `termium-<uid>` in the temp dir), readable only by you. A socket left
+  by a session that was killed outright is removed by `termium ls`,
+  `termium kill` or the next start.
+
+### tmux and herdr
+
+**tmux** (3.3 or later) passes termium's pictures on only if you allow it,
+in `~/.tmux.conf`:
+
+```
+set -g allow-passthrough on
+```
+
+termium says so if it's off. The terminal running tmux must support the
+kitty graphics protocol (Ghostty, kitty, WezTerm). Inside tmux, pages are
+drawn with unicode placeholders, so they stay in their pane through splits,
+zoom and redraws, and pictures are handed to the terminal as temporary
+files (in `/dev/shm`) when it runs on the same machine. `allow-passthrough
+all` also keeps pictures current while the pane is in a hidden window;
+with `on`, a page that changed while hidden shows its old picture until it
+changes again.
+
+**herdr** needs no setup: it draws termium's pictures itself.
+
+tmux and herdr both use `Ctrl+B` as their prefix too: press it twice to
+reach termium (`Ctrl+B Ctrl+B d` detaches termium), or change one of the
+prefixes.
 
 ### Keys
 
@@ -78,6 +143,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `N` / `W` / `D` | new / rename / close space |
 | `b` | show or hide the sidebar |
 | `Ctrl+B` | send Ctrl+B to the page |
+| `d` | detach (the session keeps running; `termium attach` resumes) |
 | `q` / `?` | quit / show keys |
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
@@ -95,9 +161,9 @@ divider between panes.
   built-in content blocker loads, so the very first page can take a moment,
   and Helium may reload a page that loaded before the blocker was ready
   (anything typed into it in those first seconds is lost).
-- Only one termium can use a profile at a time; use `--profile` or
-  `--incognito` for a second one. If termium was killed outright (`kill
-  -9`), the next start stops the browser it left behind.
+- Only one session can use a profile at a time; use `--profile` or
+  `--incognito` for a second one. If a session was killed outright
+  (`kill -9`), the next start stops the browser it left behind.
 - Logs: `~/.local/state/termium/termium.log` (set `TERMIUM_DEBUG=1` to log
   DevTools traffic) and `browser.log` next to it.
 - Downloads go to `$TERMIUM_DOWNLOAD_DIR`, else your XDG download directory
@@ -134,7 +200,16 @@ divider between panes.
 
 ## How it works
 
-termium starts Helium with `--headless=new` and speaks the DevTools
+`termium` is a thin client: it sets up the terminal, works out what it
+supports, parses its input and draws what it is sent. The session server
+it attaches to (started on demand, in the background) owns everything
+else; the two speak a small framed protocol over the session's Unix
+socket, and the client acknowledges each frame once its terminal has
+taken it, so the browser still produces frames only as fast as the
+terminal shows them. While no terminal is attached nothing is drawn and
+the screencasts stop.
+
+The server starts Helium with `--headless=new` and speaks the DevTools
 protocol over a private pipe (`--remote-debugging-pipe`, so no port is open
 for other local programs), auto-attaching to every page, cross-site iframe
 and worker. Each visible pane gets a
@@ -271,13 +346,22 @@ page state through DevTools. Needs Helium and Python 3 with `pyte` and
 ```sh
 python3 tests/e2e.py /tmp/termium-e2e    # screenshots land there
 python3 tests/lifecycle.py               # second instances, kill -9 recovery, bad terminals
+python3 tests/sessions.py                # detach, re-attach, takeover, ls/kill, dead servers
+python3 tests/multiplexers.py /tmp/mux   # inside a private tmux server and herdr session
 ```
+
+`tests/multiplexers.py` needs tmux 3.3 or later (and runs the herdr part
+if herdr is installed); it starts its own tmux server and herdr session
+and removes them. `tests/ghostty-flicker.py` is a manual check in a real
+Ghostty window (see its header): it captures the window over and over while
+browsing and counts frames where a page shows no picture.
 
 CI runs both against Google Chrome (runners have no Helium), alongside the
 type check, unit tests and builds.
 
 `scripts/screenshots.sh` regenerates `docs/screenshots/` from a real Ghostty
-window (KDE's Spectacle captures it; keep that window focused).
+window (KDE's Spectacle captures it; keep that window focused);
+`scripts/screenshots.sh tmux` takes the tmux ones.
 
 CI runs on GitHub Actions (`.github/workflows/ci.yml`) on every push to
 `main`, every pull request and by hand: `bun install --frozen-lockfile`,

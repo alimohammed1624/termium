@@ -1,6 +1,6 @@
 {
   "name": "termium",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Chromium (Helium) browser in your terminal, rendered with the kitty graphics protocol",
   "type": "module",
   "license": "MIT",
