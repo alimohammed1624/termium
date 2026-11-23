@@ -21,7 +21,7 @@ import {
   sessionPaths,
   socketDir,
 } from "./session";
-import { drained, enterTerminal, out, queryCapabilities, querySizes, restoreTerminal } from "./terminal";
+import { drained, enterTerminal, out, queryCapabilities, querySizes, restoreTerminal, setTmuxPassthrough } from "./terminal";
 
 export interface ClientOptions {
   name: string;
@@ -41,6 +41,26 @@ function fail(msg: string, code = 2): never {
   process.exit(code);
 }
 
+/** Inside tmux: is passthrough allowed for this pane? null if tmux can't say. */
+function tmuxPassthroughSetting(): string | null {
+  try {
+    const args = ["show-options", "-Apqv"];
+    if (process.env.TMUX_PANE) args.push("-t", process.env.TMUX_PANE);
+    const r = Bun.spawnSync(["tmux", ...args, "allow-passthrough"], { stdout: "pipe", stderr: "ignore" });
+    if (r.exitCode !== 0) return null;
+    const v = r.stdout.toString().trim().split("\n").pop()?.trim() ?? "";
+    return v || null;
+  } catch {
+    return null;
+  }
+}
+
+const TMUX_HINT =
+  "termium draws pages with the kitty graphics protocol, which tmux only passes on with\n" +
+  "  set -g allow-passthrough on\n" +
+  "in ~/.tmux.conf (or run: tmux set -g allow-passthrough on). The terminal running tmux\n" +
+  "must support kitty graphics too (Ghostty, kitty, WezTerm).";
+
 export async function runClient(o: ClientOptions): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail("needs an interactive terminal");
   let paths: ReturnType<typeof sessionPaths>;
@@ -49,6 +69,12 @@ export async function runClient(o: ClientOptions): Promise<void> {
   } catch (e: any) {
     fail(e?.message ?? String(e));
   }
+
+  const inTmux = !!process.env.TMUX;
+  if (inTmux && tmuxPassthroughSetting() === "off") fail(`tmux has allow-passthrough off.\n${TMUX_HINT}`);
+  setTmuxPassthrough(inTmux);
+  const forced = process.env.TERMIUM_GRAPHICS;
+  const placeholders = forced === "placeholders" ? true : forced === "direct" ? false : inTmux;
 
   // Already running? Then this terminal just attaches.
   let sock: Socket | null = null;
@@ -88,6 +114,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     area: null as { width: number; height: number } | null,
   };
   let onCapsDone: (() => void) | null = null;
+  let onGraphics: (() => void) | null = null;
   let onSizes: (() => void) | null = null;
   let conn: Socket | null = null;
   const pending: InputEvent[] = [];
@@ -98,7 +125,10 @@ export async function runClient(o: ClientOptions): Promise<void> {
   const parser = new InputParser((ev) => {
     switch (ev.type) {
       case "kittyGraphics":
-        if (ev.id === 31) caps.graphics = ev.message === "OK";
+        if (ev.id === 31) {
+          caps.graphics = ev.message === "OK";
+          onGraphics?.();
+        }
         return;
       case "kittyKeyboard":
         caps.kittyFlags = ev.flags;
@@ -156,11 +186,25 @@ export async function runClient(o: ClientOptions): Promise<void> {
   process.on("SIGINT", lost);
   process.stdin.resume();
   enterTerminal();
-  queryCapabilities();
   parser.expectApc = true;
+  if (inTmux) {
+    // tmux drops passthrough while it has a redraw pending, as it does
+    // right after the switch to the alternate screen (unless
+    // allow-passthrough is "all"). A round trip through tmux first lets it
+    // catch up.
+    out("\x1b[c");
+    await Promise.race([new Promise<void>((r) => (onCapsDone = r)), Bun.sleep(500)]);
+    await Bun.sleep(50);
+  }
+  queryCapabilities();
 
+  const graphicsReply = new Promise<void>((r) => (onGraphics = r));
   await Promise.race([new Promise<void>((r) => (onCapsDone = r)), Bun.sleep(1500)]);
   onCapsDone = null;
+  // tmux answers the other queries itself, but the graphics one makes a
+  // round trip through the outer terminal, so its reply can come last.
+  if (inTmux && !caps.graphics) await Promise.race([graphicsReply, Bun.sleep(1500)]);
+  onGraphics = null;
   // From here on ESC _ is a legacy Alt+_ keypress, not a reply we're waiting for.
   parser.expectApc = false;
 
@@ -198,7 +242,12 @@ export async function runClient(o: ClientOptions): Promise<void> {
 
   if (!caps.graphics) {
     await stopOwnServer();
-    await leave(1, "termium: this terminal does not support the kitty graphics protocol. Use Ghostty, kitty or WezTerm.");
+    await leave(
+      1,
+      inTmux
+        ? `termium: no kitty graphics through tmux.\n${TMUX_HINT}`
+        : "termium: this terminal does not support the kitty graphics protocol. Use Ghostty, kitty or WezTerm.",
+    );
     return;
   }
 
@@ -296,6 +345,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     version: o.version,
     ...g,
     pixelMouse: caps.pixelMouse,
+    placeholders,
     // A session we just started opens the URL itself.
     url: child ? null : o.url,
   } satisfies Hello);

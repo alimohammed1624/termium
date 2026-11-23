@@ -37,6 +37,7 @@ export interface Hello {
   cellW?: number;
   cellH?: number;
   pixelMouse?: boolean;
+  placeholders?: boolean;
   /** Open this in a new tab (attaching to a session that's already running). */
   url?: string | null;
 }
@@ -428,7 +429,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       everAttached = true;
       lastHello = h;
       setSink((data, done) => c.output(data, done));
-      log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse}`);
+      log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders}`);
       if (!app) {
         void startApp(h);
       } else {
@@ -512,5 +513,6 @@ function terminalOf(h: Partial<Hello>) {
     cellW: num(h.cellW, 10, 512),
     cellH: num(h.cellH, 20, 512),
     pixelMouse: !!h.pixelMouse,
+    placeholders: !!h.placeholders,
   };
 }

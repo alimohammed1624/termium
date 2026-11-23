@@ -15,7 +15,25 @@ let entered = false;
 export type Sink = (data: string, done?: () => void) => void;
 let sink: Sink | null = null;
 
+/** Inside tmux: kitty graphics escapes are wrapped in tmux's passthrough. */
+let tmuxPassthrough = false;
+
+export function setTmuxPassthrough(on: boolean): void {
+  tmuxPassthrough = on;
+}
+
+/**
+ * Wraps every kitty graphics escape in tmux's DCS passthrough (ESCs
+ * doubled), so tmux hands it to the outer terminal instead of eating it.
+ * Each escape is wrapped on its own: tmux limits the size of one sequence.
+ */
+export function wrapGraphics(data: string): string {
+  if (!tmuxPassthrough || !data.includes(`${ESC}_G`)) return data;
+  return data.replace(/\x1b_G[^\x1b]*\x1b\\/g, (m) => `${ESC}Ptmux;${m.replaceAll(ESC, ESC + ESC)}${ST}`);
+}
+
 const stdoutSink: Sink = (data, done) => {
+  data = wrapGraphics(data);
   if (done) process.stdout.write(data, () => done());
   else process.stdout.write(data);
 };
@@ -76,7 +94,7 @@ export function restoreTerminal(): void {
   sink = null;
   try {
     outSync(
-      `${ESC}_Ga=d,d=A,q=2${ST}` + // delete all images
+      wrapGraphics(`${ESC}_Ga=d,d=A,q=2${ST}`) + // delete all images
         `${ESC}[<u` + // pop kitty keyboard flags
         `${ESC}[?2004l${ESC}[?1016l${ESC}[?1006l${ESC}[?1003l` +
         `${ESC}[0m${ESC}[0 q${ESC}[?25h` + // default cursor shape, visible
@@ -141,3 +159,85 @@ export function setClipboard(text: string): string {
   return `${ESC}]52;c;${Buffer.from(text, "utf8").toString("base64")}${ST}`;
 }
 
+// ------------------------------------------------- unicode placeholders
+//
+// Inside tmux an image can't be placed at a cell: tmux moves the outer
+// terminal's cursor as it likes. Instead the image is sent as a virtual
+// placement (U=1) and the pane's cells are filled with U+10EEEE
+// placeholder characters, ordinary text that tmux keeps, redraws and clips
+// like any other. Each cell's foreground colour names the image (a 256-colour
+// index, which tmux never remaps) and two combining marks give its row and
+// column within the image.
+
+/** Combining marks for row/column 0, 1, 2… (kitty's rowcolumn-diacritics.txt). */
+const DIACRITICS = [
+  0x0305, 0x030d, 0x030e, 0x0310, 0x0312, 0x033d, 0x033e, 0x033f, 0x0346, 0x034a, 0x034b, 0x034c, 0x0350, 0x0351,
+  0x0352, 0x0357, 0x035b, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369, 0x036a, 0x036b, 0x036c, 0x036d,
+  0x036e, 0x036f, 0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597, 0x0598, 0x0599,
+  0x059c, 0x059d, 0x059e, 0x059f, 0x05a0, 0x05a1, 0x05a8, 0x05a9, 0x05ab, 0x05ac, 0x05af, 0x05c4, 0x0610, 0x0611,
+  0x0612, 0x0613, 0x0614, 0x0615, 0x0616, 0x0617, 0x0657, 0x0658, 0x0659, 0x065a, 0x065b, 0x065d, 0x065e, 0x06d6,
+  0x06d7, 0x06d8, 0x06d9, 0x06da, 0x06db, 0x06dc, 0x06df, 0x06e0, 0x06e1, 0x06e2, 0x06e4, 0x06e7, 0x06e8, 0x06eb,
+  0x06ec, 0x0730, 0x0732, 0x0733, 0x0735, 0x0736, 0x073a, 0x073d, 0x073f, 0x0740, 0x0741, 0x0743, 0x0745, 0x0747,
+  0x0749, 0x074a, 0x07eb, 0x07ec, 0x07ed, 0x07ee, 0x07ef, 0x07f0, 0x07f1, 0x07f3, 0x0816, 0x0817, 0x0818, 0x0819,
+  0x081b, 0x081c, 0x081d, 0x081e, 0x081f, 0x0820, 0x0821, 0x0822, 0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082a,
+  0x082b, 0x082c, 0x082d, 0x0951, 0x0953, 0x0954, 0x0f82, 0x0f83, 0x0f86, 0x0f87, 0x135d, 0x135e, 0x135f, 0x17dd,
+  0x193a, 0x1a17, 0x1a75, 0x1a76, 0x1a77, 0x1a78, 0x1a79, 0x1a7a, 0x1a7b, 0x1a7c, 0x1b6b, 0x1b6d, 0x1b6e, 0x1b6f,
+  0x1b70, 0x1b71, 0x1b72, 0x1b73, 0x1cd0, 0x1cd1, 0x1cd2, 0x1cda, 0x1cdb, 0x1ce0, 0x1dc0, 0x1dc1, 0x1dc3, 0x1dc4,
+  0x1dc5, 0x1dc6, 0x1dc7, 0x1dc8, 0x1dc9, 0x1dcb, 0x1dcc, 0x1dd1, 0x1dd2, 0x1dd3, 0x1dd4, 0x1dd5, 0x1dd6, 0x1dd7,
+  0x1dd8, 0x1dd9, 0x1dda, 0x1ddb, 0x1ddc, 0x1ddd, 0x1dde, 0x1ddf, 0x1de0, 0x1de1, 0x1de2, 0x1de3, 0x1de4, 0x1de5,
+  0x1de6, 0x1dfe, 0x20d0, 0x20d1, 0x20d4, 0x20d5, 0x20d6, 0x20d7, 0x20db, 0x20dc, 0x20e1, 0x20e7, 0x20e9, 0x20f0,
+  0x2cef, 0x2cf0, 0x2cf1, 0x2de0, 0x2de1, 0x2de2, 0x2de3, 0x2de4, 0x2de5, 0x2de6, 0x2de7, 0x2de8, 0x2de9, 0x2dea,
+  0x2deb, 0x2dec, 0x2ded, 0x2dee, 0x2def, 0x2df0, 0x2df1, 0x2df2, 0x2df3, 0x2df4, 0x2df5, 0x2df6, 0x2df7, 0x2df8,
+  0x2df9, 0x2dfa, 0x2dfb, 0x2dfc, 0x2dfd, 0x2dfe, 0x2dff, 0xa66f, 0xa67c, 0xa67d, 0xa6f0, 0xa6f1, 0xa8e0, 0xa8e1,
+  0xa8e2, 0xa8e3, 0xa8e4, 0xa8e5, 0xa8e6, 0xa8e7, 0xa8e8, 0xa8e9, 0xa8ea, 0xa8eb, 0xa8ec, 0xa8ed, 0xa8ee, 0xa8ef,
+  0xa8f0, 0xa8f1, 0xaab0, 0xaab2, 0xaab3, 0xaab7, 0xaab8, 0xaabe, 0xaabf, 0xaac1, 0xfe20, 0xfe21, 0xfe22, 0xfe23,
+  0xfe24, 0xfe25, 0xfe26, 0x10a0f, 0x10a38, 0x1d185, 0x1d186, 0x1d187, 0x1d188, 0x1d189, 0x1d1aa, 0x1d1ab, 0x1d1ac,
+  0x1d1ad, 0x1d242, 0x1d243, 0x1d244,
+].map((c) => String.fromCodePoint(c));
+
+/** Largest image, in cells either way, that placeholders can address. */
+export const PLACEHOLDER_MAX = DIACRITICS.length;
+
+/**
+ * Image ids usable with placeholders: a 256-colour index other than 0,
+ * plus a high byte (a third combining mark) that keeps two termiums in two
+ * tmux panes, which share one outer terminal, from using the same ids.
+ */
+export const PLACEHOLDER_IDS = 255;
+
+export function placeholderImageId(high: number, index: number): number {
+  return ((high & 0xff) << 24 >>> 0) + index;
+}
+
+/**
+ * Transmits a base64 PNG as image `id` with a virtual placement of
+ * cols x rows cells, replacing any earlier image with that id.
+ */
+export function transmitVirtual(base64Png: string, id: number, cols: number, rows: number): string {
+  const parts: string[] = [];
+  for (let i = 0; i < base64Png.length; i += CHUNK) {
+    const chunk = base64Png.slice(i, i + CHUNK);
+    const more = i + CHUNK < base64Png.length ? 1 : 0;
+    const ctrl = i === 0 ? `a=T,U=1,f=100,i=${id},q=2,c=${cols},r=${rows},m=${more}` : `m=${more}`;
+    parts.push(`${ESC}_G${ctrl};${chunk}${ST}`);
+  }
+  return parts.join("");
+}
+
+/**
+ * Placeholder text showing image placeholderImageId(high, index) in the
+ * cols x rows cells at (row, col).
+ */
+export function placeholderCells(high: number, index: number, row: number, col: number, cols: number, rows: number): string {
+  const c = Math.min(cols, PLACEHOLDER_MAX);
+  const r = Math.min(rows, PLACEHOLDER_MAX);
+  const top = DIACRITICS[high & 0xff];
+  let s = `${ESC}[0m${ESC}[38;5;${index}m`;
+  for (let y = 0; y < r; y++) {
+    s += `${ESC}[${row + y};${col}H`;
+    // Every cell carries its row, column and the id's high byte, so a
+    // multiplexer redrawing only part of a line can't shift the picture.
+    for (let x = 0; x < c; x++) s += `\u{10EEEE}${DIACRITICS[y]}${DIACRITICS[x]}${top}`;
+  }
+  return s + `${ESC}[0m`;
+}

@@ -22,7 +22,7 @@ import {
   type Rect,
   type SepGeom,
 } from "./layout";
-import { deleteAllImages, drawImage, out, setClipboard } from "./terminal";
+import { PLACEHOLDER_IDS, deleteAllImages, drawImage, out, placeholderCells, placeholderImageId, setClipboard, transmitVirtual } from "./terminal";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 
@@ -63,6 +63,8 @@ export interface Page {
   /** When title/URL were last fetched. */
   infoAt: number;
   imageId: number | null;
+  /** Its image id while it's on screen, with unicode placeholders (tmux). */
+  phId: number | null;
   /** Where its image currently sits, so a stale placement can be redrawn. */
   placed: Rect | null;
 }
@@ -210,8 +212,15 @@ export class App {
   cellW = 10;
   cellH = 20;
   pixelMouse = false;
+  /** Draw pages with unicode placeholders (inside tmux) rather than placing images at cells. */
+  placeholders = false;
   /** Whether a terminal is attached; detached, nothing is drawn and screencasts stop. */
   attached = false;
+  private phInUse = new Set<number>();
+  private phNext = 1;
+  /** High byte of placeholder image ids, picked per terminal (see placeholderImageId). */
+  private phHigh = 1;
+  private repaintTimer: ReturnType<typeof setTimeout> | null = null;
   private zoom = 1;
   sidebar = true;
 
@@ -531,6 +540,7 @@ export class App {
       navSeq: 0,
       navStarted: 0,
       imageId: null,
+      phId: null,
       placed: null,
     };
 
@@ -629,6 +639,7 @@ export class App {
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
     if (page.imageId !== null) out(`\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\`);
+    this.releasePlaceholder(page);
     if (this.prompt && "page" in this.prompt && this.prompt.page === page) this.prompt = null;
     if (this.mouseCapture === page) {
       this.mouseCapture = null;
@@ -1044,18 +1055,41 @@ export class App {
    * A terminal attached: draw everything for it from scratch, at its size.
    * Image ids and positions from an earlier terminal mean nothing to it.
    */
-  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean }): void {
+  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean }): void {
     this.attached = true;
     this.pixelMouse = t.pixelMouse;
+    this.placeholders = t.placeholders;
     for (const page of this.pages.values()) {
       page.imageId = null;
+      page.phId = null;
       page.placed = null;
     }
+    this.phInUse.clear();
+    this.phHigh = 1 + Math.floor(Math.random() * 255);
     this.cols = t.cols;
     this.rows = t.rows;
     this.cellW = t.cellW;
     this.cellH = t.cellH;
-    if (this.started) this.relayoutAndRedraw();
+    if (this.started) {
+      this.relayoutAndRedraw();
+      this.repaintSoon();
+    }
+  }
+
+  /**
+   * tmux drops passthrough (our pictures) while it's redrawing a window,
+   * which is just when a resize or attach makes us draw everything. With
+   * placeholders, send the pictures once more after it has settled; a
+   * page that isn't changing wouldn't send another on its own.
+   */
+  private repaintSoon(): void {
+    if (!this.placeholders) return;
+    if (this.repaintTimer) clearTimeout(this.repaintTimer);
+    this.repaintTimer = setTimeout(() => {
+      this.repaintTimer = null;
+      if (!this.attached || this.closingAll || this.mode === "help") return;
+      for (const page of this.geom.keys()) if (page.imageId !== null) this.paint(page);
+    }, 400);
   }
 
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
@@ -1079,6 +1113,7 @@ export class App {
     if (this.started) {
       this.relayout();
       this.fullRedraw();
+      this.repaintSoon();
     }
   }
 
@@ -1216,6 +1251,31 @@ export class App {
       page.imageId = null;
       page.placed = null;
     }
+    this.releasePlaceholder(page);
+  }
+
+  /**
+   * A free placeholder image id (a 256-colour index). Handed out round
+   * robin, so cells still showing a page that just went away don't pick up
+   * the next page's picture before they're redrawn.
+   */
+  private placeholderId(page: Page): number | null {
+    if (page.phId !== null) return page.phId;
+    for (let i = 0; i < PLACEHOLDER_IDS; i++) {
+      const id = ((this.phNext - 1 + i) % PLACEHOLDER_IDS) + 1;
+      if (this.phInUse.has(id)) continue;
+      this.phInUse.add(id);
+      this.phNext = (id % PLACEHOLDER_IDS) + 1;
+      page.phId = id;
+      return id;
+    }
+    return null;
+  }
+
+  private releasePlaceholder(page: Page): void {
+    if (page.phId === null) return;
+    this.phInUse.delete(page.phId);
+    page.phId = null;
   }
 
   private snapshot(page: Page): Promise<void> {
@@ -1283,6 +1343,21 @@ export class App {
     if (!g || !page.lastFrame || this.mode === "help" || this.closingAll || page === this.panelPage) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
+    if (this.placeholders) {
+      // One image id per page, replaced in place; the cells only need
+      // writing when the pane moved or was cleared.
+      const index = this.placeholderId(page);
+      if (index === null) return false;
+      const id = placeholderImageId(this.phHigh, index);
+      const p = page.placed;
+      const moved = page.imageId !== id || !p || p.row !== r.row || p.col !== r.col || p.cols !== r.cols || p.rows !== r.rows;
+      let s = transmitVirtual(page.lastFrame, id, r.cols, r.rows);
+      if (moved) s += placeholderCells(this.phHigh, index, r.row, r.col, r.cols, r.rows);
+      out(s + this.cursorSeq(), done);
+      page.imageId = id;
+      page.placed = { ...r };
+      return true;
+    }
     const id = this.nextImage++;
     if (this.nextImage > 4_000_000_000) this.nextImage = 100;
     out(drawImage(page.lastFrame, id, page.imageId, r.row, r.col, r.cols, r.rows) + this.cursorSeq(), done);

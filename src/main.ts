@@ -36,8 +36,8 @@ Options:
 
 --browser, --profile, --incognito, --scale and --search apply when a session starts.
 Ctrl+B d detaches (the browser keeps running); Ctrl+Q ends the session.
-Needs a terminal with the kitty graphics protocol, such as Ghostty, kitty or WezTerm.
-Press Ctrl+B then ? inside termium for keys.`;
+Needs a terminal with the kitty graphics protocol, such as Ghostty, kitty or WezTerm
+(inside tmux: set -g allow-passthrough on). Press Ctrl+B then ? inside termium for keys.`;
 
 type Command = "open" | "attach" | "ls" | "kill" | "server";
 
