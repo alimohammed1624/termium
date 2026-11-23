@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Startup and shutdown edge cases against the real stack (termium + Helium).
 
+termium runs as a client of a background session server that owns the
+browser; "killed outright" below means the server and the client both get
+SIGKILL (Term.kill9). Detaching, takeover and the other session cases are in
+tests/sessions.py.
+
 Covers: a bad --browser, a profile already in use (under several launch
 spellings, the first instance must survive), recovery after termium is
 SIGKILLed (persistent and incognito profiles), a terminal without kitty
@@ -56,7 +61,7 @@ try:
         check(f"first instance survives ({' '.join(argv)})", running(a) and helium_on(prof) > 0)
 
     # SIGKILL: the next start stops the leftover browser and works
-    os.kill(a.pid, signal.SIGKILL); os.waitpid(a.pid, 0); a.alive = False
+    a.kill9()
     time.sleep(1)
     check("browser outlives a SIGKILLed termium (precondition)", helium_on(prof) > 0)
     c = Term(["bun", main, "--profile", prof], cwd=ROOT)
@@ -66,7 +71,7 @@ try:
     rel_parent = tmp
     r1 = Term(["bun", main, "--profile", "p3"], cwd=rel_parent)
     check("relative profile starts", at_address_bar(r1))
-    os.kill(r1.pid, signal.SIGKILL); os.waitpid(r1.pid, 0); r1.alive = False
+    r1.kill9()
     time.sleep(1)
     r2 = Term(["bun", main, "--profile", os.path.join(tmp, "p3") + "/"], cwd="/")
     check("reopened by absolute path after SIGKILL", at_address_bar(r2))
@@ -129,7 +134,7 @@ try:
     t0 = time.time()
     while time.time() - t0 < 10 and not os.path.lexists(os.path.join(prof5, "SingletonLock")):
         time.sleep(0.05)
-    os.kill(k.pid, signal.SIGKILL); os.waitpid(k.pid, 0); k.alive = False
+    k.kill9()
     time.sleep(1)
     k2 = Term(["bun", main, "--profile", prof5], cwd=ROOT)
     check("killed mid-startup: next start recovers the profile", at_address_bar(k2))
@@ -270,9 +275,9 @@ try:
     # SIGKILLed incognito session: the next start removes its profile and browser
     i1 = Term(["bun", main, "--incognito"], cwd=ROOT)
     check("incognito starts", at_address_bar(i1))
-    inc = [d for d in glob.glob(f"/tmp/termium-incognito-{i1.pid}-*")]
+    inc = [d for d in glob.glob(f"/tmp/termium-incognito-{i1.server_pid()}-*")]
     check("incognito profile is in the temp dir", len(inc) == 1, inc)
-    os.kill(i1.pid, signal.SIGKILL); os.waitpid(i1.pid, 0); i1.alive = False
+    i1.kill9()
     time.sleep(1)
     i2 = Term(["bun", main, "--incognito"], cwd=ROOT)
     check("next start after a killed incognito session works", at_address_bar(i2))

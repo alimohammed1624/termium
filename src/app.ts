@@ -104,6 +104,8 @@ export interface AppOptions {
   /** Where downloads land (under generated names) before being moved to downloadDir. */
   downloadStaging: string;
   quit: () => void;
+  /** Detaches the terminal; the session keeps running. */
+  detach: () => void;
   log: (msg: string) => void;
 }
 
@@ -190,6 +192,7 @@ const HELP: [string, string][] = [
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
   ["Ctrl+B", "send Ctrl+B to the page"],
+  ["d", "detach (termium attach resumes)"],
   ["q", "quit"],
   ["?", "this help"],
 ];
@@ -207,6 +210,8 @@ export class App {
   cellW = 10;
   cellH = 20;
   pixelMouse = false;
+  /** Whether a terminal is attached; detached, nothing is drawn and screencasts stop. */
+  attached = false;
   private zoom = 1;
   sidebar = true;
 
@@ -1035,6 +1040,37 @@ export class App {
 
   // ---------------------------------------------------------- geometry
 
+  /**
+   * A terminal attached: draw everything for it from scratch, at its size.
+   * Image ids and positions from an earlier terminal mean nothing to it.
+   */
+  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean }): void {
+    this.attached = true;
+    this.pixelMouse = t.pixelMouse;
+    for (const page of this.pages.values()) {
+      page.imageId = null;
+      page.placed = null;
+    }
+    this.cols = t.cols;
+    this.rows = t.rows;
+    this.cellW = t.cellW;
+    this.cellH = t.cellH;
+    if (this.started) this.relayoutAndRedraw();
+  }
+
+  /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
+  detach(): void {
+    this.attached = false;
+    if (this.mode === "prefix" || this.mode === "resize") this.mode = "normal";
+    this.mouseCapture = null;
+    this.mouseButtons = 0;
+    this.drag = null;
+    this.hoverPage = null;
+    this.pageKeysDown.clear();
+    this.syntheticDown.clear();
+    if (this.started) this.relayout();
+  }
+
   setGeometry(cols: number, rows: number, cellW: number, cellH: number): void {
     this.cols = cols;
     this.rows = rows;
@@ -1069,7 +1105,7 @@ export class App {
     this.seps = [];
     const tab = this.tab;
     const visible = new Set<Page>();
-    if (tab) {
+    if (tab && this.attached) {
       const multi = leaves(tab.root).length > 1;
       const root = tab.zoomed ? leaf(tab.focused) : tab.root;
       const { panes, seps } = computeLayout(root, this.paneArea(), multi);
@@ -1268,7 +1304,7 @@ export class App {
 
   /** Clears everything and redraws chrome and every visible page. */
   fullRedraw(): void {
-    if (!this.started || this.closingAll) return;
+    if (!this.started || this.closingAll || !this.attached) return;
     for (const page of this.pages.values()) {
       page.imageId = null;
       page.placed = null;
@@ -1280,7 +1316,7 @@ export class App {
   }
 
   private drawChrome(): void {
-    if (!this.started || this.closingAll) return;
+    if (!this.started || this.closingAll || !this.attached) return;
     // A dialog or file chooser hidden by another prompt comes back once that's done.
     this.syncPrompt();
     let s = "\x1b[?25l";
@@ -1814,6 +1850,7 @@ export class App {
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
       case "q": void this.requestQuit(); return;
+      case "d": this.opts.detach(); return;
       case "?":
         this.mode = "help";
         this.fullRedraw();

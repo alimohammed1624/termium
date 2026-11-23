@@ -11,18 +11,31 @@ export const KITTY_KBD_FLAGS = 1 | 2 | 8 | 16;
 
 let entered = false;
 
+/** Where out() sends terminal output; null drops it (nothing attached). */
+export type Sink = (data: string, done?: () => void) => void;
+let sink: Sink | null = null;
+
+const stdoutSink: Sink = (data, done) => {
+  if (done) process.stdout.write(data, () => done());
+  else process.stdout.write(data);
+};
+
+/** Points out() somewhere else (the session server sends it to its client). */
+export function setSink(s: Sink | null): void {
+  sink = s;
+}
+
 /**
  * Queues output for the terminal without blocking the event loop. `done`
  * runs once the terminal has taken the data, which paces screencast frames.
  */
 export function out(data: string, done?: () => void): void {
-  if (!entered) {
-    // After restoreTerminal nothing may reach the shell's screen.
+  if (!sink) {
+    // Nothing to show it on (after restoreTerminal, or no client attached).
     done?.();
     return;
   }
-  if (done) process.stdout.write(data, () => done());
-  else process.stdout.write(data);
+  sink(data, done);
 }
 
 /** Resolves once everything queued so far has been written. */
@@ -44,6 +57,7 @@ function outSync(data: string): void {
 
 export function enterTerminal(): void {
   entered = true;
+  sink = stdoutSink;
   out(
     `${ESC}[?1049h` + // alternate screen
       `${ESC}[?25l` + // hide cursor
@@ -59,6 +73,7 @@ export function enterTerminal(): void {
 export function restoreTerminal(): void {
   if (!entered) return;
   entered = false;
+  sink = null;
   try {
     outSync(
       `${ESC}_Ga=d,d=A,q=2${ST}` + // delete all images
@@ -125,3 +140,4 @@ export function deleteAllImages(): string {
 export function setClipboard(text: string): string {
   return `${ESC}]52;c;${Buffer.from(text, "utf8").toString("base64")}${ST}`;
 }
+
