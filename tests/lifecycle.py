@@ -29,6 +29,16 @@ def helium_on(profile):
     r = subprocess.run(["pgrep", "-c", "-f", "--", f"user-data-dir={profile}"], capture_output=True, text=True)
     return int(r.stdout.strip() or 0)
 
+def freeze_browser(profile):
+    """Stops the browser on a profile (SIGSTOP). Killed outright, a session's
+    browser usually exits by itself once its DevTools pipe closes; frozen,
+    it stands for one that doesn't, which the next start must stop."""
+    r = subprocess.run(["pgrep", "-a", "-f", "--", f"user-data-dir={profile}"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        pid, _, cmd = line.partition(" ")
+        if " --type=" not in f" {cmd}":  # the browser itself, not its renderers and helpers
+            os.kill(int(pid), signal.SIGSTOP)
+
 def at_address_bar(t, timeout=25):
     return t.wait_for(lambda: "SPACES" in t.text() and not t.screen.cursor.hidden and t.screen.cursor.y == 1, timeout)
 
@@ -61,6 +71,7 @@ try:
         check(f"first instance survives ({' '.join(argv)})", running(a) and helium_on(prof) > 0)
 
     # SIGKILL: the next start stops the leftover browser and works
+    freeze_browser(prof)
     a.kill9()
     time.sleep(1)
     check("browser outlives a SIGKILLed termium (precondition)", helium_on(prof) > 0)
@@ -71,6 +82,7 @@ try:
     rel_parent = tmp
     r1 = Term(["bun", main, "--profile", "p3"], cwd=rel_parent)
     check("relative profile starts", at_address_bar(r1))
+    freeze_browser(os.path.join(tmp, "p3"))
     r1.kill9()
     time.sleep(1)
     r2 = Term(["bun", main, "--profile", os.path.join(tmp, "p3") + "/"], cwd="/")
@@ -277,6 +289,7 @@ try:
     check("incognito starts", at_address_bar(i1))
     inc = [d for d in glob.glob(f"/tmp/termium-incognito-{i1.server_pid()}-*")]
     check("incognito profile is in the temp dir", len(inc) == 1, inc)
+    freeze_browser(inc[0]) if inc else None
     i1.kill9()
     time.sleep(1)
     i2 = Term(["bun", main, "--incognito"], cwd=ROOT)
@@ -307,6 +320,10 @@ finally:
     for t in [x for x in globals().values() if isinstance(x, Term)]:
         if t.alive:
             t.close()
+    # Nothing frozen may outlive the run.
+    subprocess.run(["pkill", "-KILL", "-f", "--", f"user-data-dir={tmp}"])
+    for d in globals().get("inc") or []:
+        subprocess.run(["pkill", "-KILL", "-f", "--", f"user-data-dir={d}"])
     shutil.rmtree(tmp, ignore_errors=True)
 
 print("FAILED: " + ", ".join(failures) if failures else "ALL PASSED")
