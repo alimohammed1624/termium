@@ -22,7 +22,19 @@ import {
   type Rect,
   type SepGeom,
 } from "./layout";
-import { PLACEHOLDER_IDS, deleteAllImages, drawImage, out, placeholderCells, placeholderImageId, setClipboard, transmitVirtual } from "./terminal";
+import {
+  PLACEHOLDER_IDS,
+  SYNC_END,
+  SYNC_START,
+  deleteAllImages,
+  deleteImage,
+  drawImage,
+  out,
+  placeholderCells,
+  placeholderImageId,
+  setClipboard,
+  transmitVirtual,
+} from "./terminal";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 
@@ -221,6 +233,16 @@ export class App {
   /** High byte of placeholder image ids, picked per terminal (see placeholderImageId). */
   private phHigh = 1;
   private repaintTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Pictures of pages that went off screen, deleted with the next
+   * (synchronized) update rather than at once, so their panes never show
+   * empty in between.
+   */
+  private staleImages: number[] = [];
+  /** Inside fullRedraw: one synchronized update around everything it draws. */
+  private redrawing = false;
+  /** The terminal attached since the last full redraw (nothing of ours is on it yet). */
+  private freshTerminal = true;
   private zoom = 1;
   sidebar = true;
 
@@ -638,7 +660,7 @@ export class App {
     if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
-    if (page.imageId !== null) out(`\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\`);
+    if (page.imageId !== null) this.staleImages.push(page.imageId);
     this.releasePlaceholder(page);
     if (this.prompt && "page" in this.prompt && this.prompt.page === page) this.prompt = null;
     if (this.mouseCapture === page) {
@@ -1065,6 +1087,8 @@ export class App {
       page.placed = null;
     }
     this.phInUse.clear();
+    this.staleImages = [];
+    this.freshTerminal = true;
     this.phHigh = 1 + Math.floor(Math.random() * 255);
     this.cols = t.cols;
     this.rows = t.rows;
@@ -1087,9 +1111,14 @@ export class App {
     if (this.repaintTimer) clearTimeout(this.repaintTimer);
     this.repaintTimer = setTimeout(() => {
       this.repaintTimer = null;
-      if (!this.attached || this.closingAll || this.mode === "help") return;
-      for (const page of this.geom.keys()) if (page.imageId !== null) this.paint(page);
+      this.repaintVisible();
     }, 400);
+  }
+
+  /** Sends every visible page's picture again (the client's terminal may have lost them). */
+  repaintVisible(): void {
+    if (!this.attached || this.closingAll || this.mode === "help") return;
+    for (const page of this.geom.keys()) if (page.imageId !== null) this.paint(page);
   }
 
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
@@ -1247,11 +1276,22 @@ export class App {
       });
     }
     if (page.imageId !== null) {
-      out(`\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\`);
+      this.staleImages.push(page.imageId);
       page.imageId = null;
       page.placed = null;
     }
     this.releasePlaceholder(page);
+  }
+
+  /** Deletes for pictures that went off screen; goes after what replaces them, in the same update. */
+  private takeStale(): string {
+    const ids = this.staleImages.splice(0);
+    return ids.map(deleteImage).join("");
+  }
+
+  /** Wraps one update so the terminal shows it at once (unless a full redraw already does). */
+  private sync(s: string): string {
+    return this.redrawing ? s : SYNC_START + s + SYNC_END;
   }
 
   /**
@@ -1351,16 +1391,18 @@ export class App {
       const id = placeholderImageId(this.phHigh, index);
       const p = page.placed;
       const moved = page.imageId !== id || !p || p.row !== r.row || p.col !== r.col || p.cols !== r.cols || p.rows !== r.rows;
-      let s = transmitVirtual(page.lastFrame, id, r.cols, r.rows);
+      // A stale delete first: its id may be the one handed out again here.
+      let s = this.takeStale() + transmitVirtual(page.lastFrame, id, r.cols, r.rows);
       if (moved) s += placeholderCells(this.phHigh, index, r.row, r.col, r.cols, r.rows);
-      out(s + this.cursorSeq(), done);
+      out(this.sync(s + this.cursorSeq()), done);
       page.imageId = id;
       page.placed = { ...r };
       return true;
     }
     const id = this.nextImage++;
     if (this.nextImage > 4_000_000_000) this.nextImage = 100;
-    out(drawImage(page.lastFrame, id, page.imageId, r.row, r.col, r.cols, r.rows) + this.cursorSeq(), done);
+    // New picture placed first, old one deleted after, in one synchronized update.
+    out(this.sync(drawImage(page.lastFrame, id, page.imageId, r.row, r.col, r.cols, r.rows) + this.takeStale() + this.cursorSeq()), done);
     page.imageId = id;
     page.placed = { ...r };
     return true;
@@ -1380,14 +1422,34 @@ export class App {
   /** Clears everything and redraws chrome and every visible page. */
   fullRedraw(): void {
     if (!this.started || this.closingAll || !this.attached) return;
-    for (const page of this.pages.values()) {
-      page.imageId = null;
-      page.placed = null;
+    // Everything below is one synchronized update: the terminal never shows
+    // the cleared screen, only the finished redraw.
+    let s = SYNC_START + RESET;
+    if (this.placeholders && !this.freshTerminal) {
+      // Pictures stay (each page keeps its id and is sent again in place);
+      // only the cells are redrawn. Through tmux, pictures pass straight to
+      // the outer terminal while tmux holds back the text, so deleting them
+      // here would show as empty panes.
+      s += this.takeStale();
+      for (const page of this.pages.values()) page.placed = null;
+    } else {
+      this.staleImages = [];
+      s += deleteAllImages();
+      for (const page of this.pages.values()) {
+        page.imageId = null;
+        page.placed = null;
+      }
     }
-    out(`${RESET}${deleteAllImages()}\x1b[2J`);
-    this.drawChrome();
-    if (this.mode === "help") return;
-    for (const page of this.geom.keys()) this.paint(page);
+    this.freshTerminal = false;
+    out(s + "\x1b[2J");
+    this.redrawing = true;
+    try {
+      this.drawChrome();
+      if (this.mode !== "help") for (const page of this.geom.keys()) this.paint(page);
+    } finally {
+      this.redrawing = false;
+      out(SYNC_END);
+    }
   }
 
   private drawChrome(): void {
@@ -1401,12 +1463,13 @@ export class App {
     s += this.drawTabBar(mainCol, mainW);
     s += this.drawUrlBar(mainCol, mainW);
     if (this.mode === "help") {
-      out(s + RESET + this.helpOverlay() + this.cursorSeq());
+      if (!this.placeholders) this.staleImages = []; // the overlay deletes every picture
+      out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
       return;
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
-    out(s + RESET + this.cursorSeq());
+    out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
   private drawSidebar(): string {
@@ -1695,7 +1758,8 @@ export class App {
     const shown = Math.max(0, Math.min(perCol, boxH - 4)); // entry rows per column that fit
     const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 2));
     const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
-    let s = deleteAllImages();
+    // (With placeholders the overlay's text replaces the cells showing them.)
+    let s = this.placeholders ? "" : deleteAllImages();
     for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
     const panel = bg(C.base) + fg(C.text);
     const hidden = Math.max(0, HELP.length - shown * columns);

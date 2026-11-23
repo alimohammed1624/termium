@@ -92,6 +92,10 @@ class Term:
         self.placements: dict[int, tuple[int, int, int, int]] = {}
         # Virtual placements (U=1, shown through unicode placeholder cells): id -> (cols, rows)
         self.virtual: dict[int, tuple[int, int]] = {}
+        # Graphics commands that arrived in the middle of a chunked transfer
+        # (a real terminal takes them as the end of that picture).
+        self.violations = 0
+        self._loading = False
         self.frames = 0
         self.last_output = time.time()
         self.lock = threading.Lock()
@@ -101,6 +105,9 @@ class Term:
         self._kbd_flags = 0
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
+            # The child must see its size (pixels too) from the start: tmux,
+            # for one, takes the cell size once, as it attaches.
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, cols * cell_w, rows * cell_h))
             if cwd:
                 os.chdir(cwd)
             e = dict(os.environ, TERM="xterm-ghostty", **env)
@@ -168,8 +175,13 @@ class Term:
             while out:
                 out = out[os.write(1, out):]
             with self.lock:
+                self.raw += buf
                 text = APC_RE.sub(b"", buf)
-                self.stream.feed(re.sub(rb"\x1b_[^\x1b]*", b"", text))
+                text = re.sub(rb"\x1b_[^\x1b]*|\x1bP[^\x1b]*(?:\x1b\x1b[^\x1b]*)*\x1b\\|\x1b\[\?[0-9;]*n", b"", text)
+                try:
+                    self.stream.feed(text)
+                except Exception:
+                    pass  # never let a parser bug kill the reader
                 self.last_output = time.time()
             return b""
         # Hold back an unterminated APC so it is parsed whole.
@@ -212,10 +224,20 @@ class Term:
 
     def _answer_queries(self, data: bytes):
         replies = b""
-        for m in re.finditer(rb"\x1b_G([^;\x1b]*)", data):
+        for m in re.finditer(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?", data):
             kv = dict(p.split(b"=", 1) for p in m.group(1).split(b",") if b"=" in p)
             if kv.get(b"a") == b"q" and b"i" in kv:
-                replies += b"\x1b_Gi=" + kv[b"i"] + b";OK\x1b\\"
+                ok = True
+                if kv.get(b"t") in (b"t", b"f"):
+                    # A file: answer OK only if it can be read (and remove a temporary one).
+                    try:
+                        path = base64.b64decode(m.group(2) or b"").decode()
+                        open(path, "rb").close()
+                        if kv.get(b"t") == b"t":
+                            os.remove(path)
+                    except (OSError, ValueError):
+                        ok = False
+                replies += b"\x1b_Gi=" + kv[b"i"] + (b";OK\x1b\\" if ok else b";ENOENT:no such file\x1b\\")
         for m in re.finditer(rb"\x1b\[>(\d+)u", data):
             self._kbd_flags = int(m.group(1))
         if b"\x1b[?u" in data:
@@ -247,6 +269,9 @@ class Term:
                     self.placements.pop(i, None)
                     self.virtual.pop(i, None)
             return
+        if self._loading and not (a is None and set(kv) <= {"m", "q"}):
+            self.violations += 1
+            self._loading = False
         if a == "q":
             return
         if a == "p":
@@ -260,12 +285,20 @@ class Term:
             return
         key = "cur"
         if a in ("T", "t"):
+            if kv.get("t") in ("t", "f"):
+                # The picture is in a file (named by the payload); a temporary one is removed once read.
+                path = base64.b64decode(payload).decode()
+                with open(path, "rb") as f:
+                    payload = base64.b64encode(f.read())
+                if kv.get("t") == "t":
+                    os.remove(path)
             self._pending_apc[key] = payload
             self._pending_meta = (int(kv["i"]), self._cursor, int(kv.get("c", "0")), int(kv.get("r", "0")))
             self._pending_kind = "virtual" if kv.get("U") == "1" else "place" if a == "T" else "store"
             self._pending_format = (kv.get("f", "32"), int(kv.get("s", "0")), int(kv.get("v", "0")))
         else:
             self._pending_apc[key] = self._pending_apc.get(key, b"") + payload
+        self._loading = kv.get("m", "0") == "1"
         if kv.get("m", "0") == "0":
             data = base64.b64decode(self._pending_apc.pop(key))
             f, w, h = self._pending_format
@@ -469,6 +502,27 @@ class Term:
                 r0, c0, r1, c1 = boxes.get(i, (y, x, y, x))
                 boxes[i] = (min(r0, y), min(c0, x), max(r1, y), max(c1, x))
             return {i: (r0 + 1, c0 + 1, c1 - c0 + 1, r1 - r0 + 1) for i, (r0, c0, r1, c1) in boxes.items()}
+
+    def unsynced_clears(self, since=0):
+        """Image deletes and screen clears outside a synchronized update
+        (DECSET 2026) in the output since `since`: each is a moment the
+        terminal may show a pane without its picture. The goodbye on exit
+        (after the last alternate-screen switch back) doesn't count."""
+        raw = bytes(self.raw[since:])
+        end = raw.rfind(b"\x1b[?1049l")
+        if end >= 0:
+            raw = raw[:max(0, raw.rfind(b"\x1b_Ga=d,d=A", 0, end))] if raw.rfind(b"\x1b_Ga=d,d=A", 0, end) >= 0 else raw[:end]
+        # (Entering the alternate screen clears it before anything is drawn: not counted.)
+        first = raw.find(b"\x1b[?2026h")
+        raw = raw[first:] if first >= 0 else raw
+        found, depth = [], False
+        for m in re.finditer(rb"\x1b\[\?2026([hl])|\x1b_Ga=d[^\x1b]*|\x1b\[2J", raw):
+            g = m.group(0)
+            if m.group(1):
+                depth = m.group(1) == b"h"
+            elif not depth:
+                found.append((m.start(), g[:30]))
+        return found
 
     # -- sessions
 

@@ -150,6 +150,16 @@ try:
     s = state() or {}
     check("resizing the re-attached terminal resizes the page", abs(s.get("w", 0) - 88 * 12 / dsf) <= 1, (s.get("w"), s.get("h")))
 
+    # --- no frame without its picture: every clear or image delete is inside a synchronized update
+    mark = len(b.raw)
+    b.key("ctrl+t"); time.sleep(1); b.type(f"{BASE}/page.html?second=1"); b.key("enter"); time.sleep(3)
+    for k in ("n", "n", "b", "b", "z"):
+        b.key("ctrl+b"); b.key(k); time.sleep(0.8)
+    b.key("ctrl+w"); time.sleep(1.5)
+    check("tab switches, sidebar, new and closed tabs never clear outside a synchronized update", not b.unsynced_clears(mark),
+          b.unsynced_clears(mark)[:5])
+    check("...and the whole attached session neither", not b.unsynced_clears(), b.unsynced_clears()[:5])
+
     # --- takeover by a second client
     c = termium("attach", cols=120, rows=36)
     code = exit_code(b)

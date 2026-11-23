@@ -150,6 +150,19 @@ export function drawImage(
   return parts.join("");
 }
 
+/**
+ * Synchronized output (DECSET 2026): the terminal shows what comes between
+ * these two at once, so a redraw never shows a cleared screen or a pane
+ * whose old picture is gone and new one not yet there. Terminals without
+ * it ignore them; tmux holds the pane's text back the same way.
+ */
+export const SYNC_START = `${ESC}[?2026h`;
+export const SYNC_END = `${ESC}[?2026l`;
+
+export function deleteImage(id: number): string {
+  return `${ESC}_Ga=d,d=I,i=${id},q=2${ST}`;
+}
+
 export function deleteAllImages(): string {
   return `${ESC}_Ga=d,d=A,q=2${ST}`;
 }
