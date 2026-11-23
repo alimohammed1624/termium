@@ -97,44 +97,66 @@ interface Owner {
  * termium has died is taken over.
  */
 export function lockProfile(profileDir: string): void {
-  const path = join(profileDir, "termium.lock");
-  // Written in full to a private file first, then linked into place: link
-  // fails if the lock exists (as O_EXCL would), and a lock is never seen
-  // half-written.
-  const tmp = join(profileDir, `termium.lock.${process.pid}`);
-  writeFileSync(tmp, JSON.stringify({ pid: process.pid, start: startTime(process.pid) }));
+  const holder = lockFile(join(profileDir, "termium.lock"));
+  if (holder === "failed") throw new Error(`can't lock the profile ${profileDir}`);
+  if (holder !== null) {
+    throw new Error(
+      `the profile ${profileDir} is in use by another termium (pid ${holder}). ` +
+        "Close it, or pass --profile <dir> or --incognito.",
+    );
+  }
+}
+
+/**
+ * Takes the lock file `path` for this process: null once taken, the pid of
+ * a live process holding it, or "failed". Created atomically (written in
+ * full to a private file, then hard-linked into place, which fails if the
+ * lock exists, as O_EXCL would), so of several processes starting at the
+ * same instant exactly one gets it. A lock whose holder died is taken over.
+ */
+export function lockFile(path: string): number | null | "failed" {
+  const tmp = `${path}.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify({ pid: process.pid, start: startTime(process.pid) }), { mode: 0o600 });
   try {
     for (let attempt = 0; attempt < 20; attempt++) {
       try {
         linkSync(tmp, path);
-        return;
+        return null;
       } catch (e: any) {
-        if (e?.code !== "EEXIST") throw new Error(`can't lock the profile ${profileDir}: ${e?.message ?? e}`);
+        if (e?.code !== "EEXIST") throw new Error(`can't lock ${path}: ${e?.message ?? e}`);
       }
       const seen = readLock(path);
-      if (seen.holder && alive(seen.holder.pid) && startTime(seen.holder.pid) === seen.holder.start) {
-        throw new Error(
-          `the profile ${profileDir} is in use by another termium (pid ${seen.holder.pid}). ` +
-            "Close it, or pass --profile <dir> or --incognito.",
-        );
-      }
-      // Stale (its termium died, or it's unreadable). Only one termium may
+      if (seen.holder && alive(seen.holder.pid) && startTime(seen.holder.pid) === seen.holder.start) return seen.holder.pid;
+      // Stale (its holder died, or it's unreadable). Only one process may
       // clear it, and only if it's still the very lock that was judged
       // stale; otherwise two starters could each delete the other's fresh lock.
-      if (takeReclaim(profileDir)) {
+      if (takeReclaim(path)) {
         try {
           if (readLock(path).raw === seen.raw) rmSync(path, { force: true });
         } finally {
-          rmSync(join(profileDir, "termium.lock.reclaim"), { force: true });
+          rmSync(`${path}.reclaim`, { force: true });
         }
       } else {
         Bun.sleepSync(25);
       }
     }
-    throw new Error(`can't lock the profile ${profileDir}`);
+    return "failed";
   } finally {
     rmSync(tmp, { force: true });
   }
+}
+
+/** The live holder of lock file `path`, if any. */
+export function lockHolder(path: string): number | null {
+  const seen = readLock(path);
+  return seen.holder && alive(seen.holder.pid) && startTime(seen.holder.pid) === seen.holder.start ? seen.holder.pid : null;
+}
+
+/** Releases lock file `path` if this process holds it. */
+export function unlockFile(path: string): void {
+  try {
+    if (JSON.parse(readFileSync(path, "utf8")).pid === process.pid) rmSync(path, { force: true });
+  } catch {}
 }
 
 function readLock(path: string): { raw: string | null; holder: { pid: number; start: string } | null } {
@@ -148,8 +170,8 @@ function readLock(path: string): { raw: string | null; holder: { pid: number; st
 }
 
 /** The right to clear a stale lock; itself taken over if its holder died holding it (older than 5 s). */
-function takeReclaim(profileDir: string): boolean {
-  const path = join(profileDir, "termium.lock.reclaim");
+function takeReclaim(lockPath: string): boolean {
+  const path = `${lockPath}.reclaim`;
   try {
     closeSync(openSync(path, "wx"));
     return true;
@@ -162,10 +184,7 @@ function takeReclaim(profileDir: string): boolean {
 }
 
 export function unlockProfile(profileDir: string): void {
-  const path = join(profileDir, "termium.lock");
-  try {
-    if (JSON.parse(readFileSync(path, "utf8")).pid === process.pid) rmSync(path, { force: true });
-  } catch {}
+  unlockFile(join(profileDir, "termium.lock"));
 }
 
 /** Each termium writes its own record: <profile>/termium.owner.<pid>. */

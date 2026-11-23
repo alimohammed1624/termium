@@ -24,9 +24,9 @@ import {
 } from "./layout";
 import {
   PLACEHOLDER_IDS,
+  PLACEHOLDER_MAX,
   SYNC_END,
   SYNC_START,
-  deleteAllImages,
   deleteImage,
   drawImage,
   out,
@@ -35,6 +35,7 @@ import {
   setClipboard,
   transmitVirtual,
 } from "./terminal";
+import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 
@@ -74,9 +75,10 @@ export interface Page {
   navStarted: number;
   /** When title/URL were last fetched. */
   infoAt: number;
-  imageId: number | null;
-  /** Its image id while it's on screen, with unicode placeholders (tmux). */
-  phId: number | null;
+  /** Image ids of its picture on screen (several when a wide pane is tiled). */
+  imageIds: number[];
+  /** Placeholder ids (256-colour indexes) it holds, one per tile, with unicode placeholders (tmux). */
+  phIds: number[];
   /** Where its image currently sits, so a stale placement can be redrawn. */
   placed: Rect | null;
 }
@@ -241,8 +243,7 @@ export class App {
   private staleImages: number[] = [];
   /** Inside fullRedraw: one synchronized update around everything it draws. */
   private redrawing = false;
-  /** The terminal attached since the last full redraw (nothing of ours is on it yet). */
-  private freshTerminal = true;
+
   private zoom = 1;
   sidebar = true;
 
@@ -561,8 +562,8 @@ export class App {
       frameSeq: 0,
       navSeq: 0,
       navStarted: 0,
-      imageId: null,
-      phId: null,
+      imageIds: [],
+      phIds: [],
       placed: null,
     };
 
@@ -660,7 +661,8 @@ export class App {
     if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
-    if (page.imageId !== null) this.staleImages.push(page.imageId);
+    this.staleImages.push(...page.imageIds);
+    page.imageIds = [];
     this.releasePlaceholder(page);
     if (this.prompt && "page" in this.prompt && this.prompt.page === page) this.prompt = null;
     if (this.mouseCapture === page) {
@@ -1082,14 +1084,16 @@ export class App {
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
     for (const page of this.pages.values()) {
-      page.imageId = null;
-      page.phId = null;
+      page.imageIds = [];
+      page.phIds = [];
       page.placed = null;
     }
     this.phInUse.clear();
     this.staleImages = [];
-    this.freshTerminal = true;
+    // Ids of our own, unlikely to meet another program's in the same
+    // terminal (tmux panes share one): only these are ever deleted.
     this.phHigh = 1 + Math.floor(Math.random() * 255);
+    this.nextImage = 1 + Math.floor(Math.random() * 0x7f000000);
     this.cols = t.cols;
     this.rows = t.rows;
     this.cellW = t.cellW;
@@ -1118,7 +1122,7 @@ export class App {
   /** Sends every visible page's picture again (the client's terminal may have lost them). */
   repaintVisible(): void {
     if (!this.attached || this.closingAll || this.mode === "help") return;
-    for (const page of this.geom.keys()) if (page.imageId !== null) this.paint(page);
+    for (const page of this.geom.keys()) if (page.imageIds.length) this.paint(page);
   }
 
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
@@ -1275,12 +1279,22 @@ export class App {
         await this.cdp.send("Page.stopScreencast", {}, page.sessionId).catch(() => {});
       });
     }
-    if (page.imageId !== null) {
-      this.staleImages.push(page.imageId);
-      page.imageId = null;
+    if (page.imageIds.length) {
+      this.staleImages.push(...page.imageIds);
+      page.imageIds = [];
       page.placed = null;
     }
     this.releasePlaceholder(page);
+  }
+
+  /** Deletes every picture of ours on screen (never another program's). */
+  private deleteOwnImages(): string {
+    for (const page of this.pages.values()) {
+      this.staleImages.push(...page.imageIds);
+      page.imageIds = [];
+      page.placed = null;
+    }
+    return this.takeStale();
   }
 
   /** Deletes for pictures that went off screen; goes after what replaces them, in the same update. */
@@ -1299,23 +1313,26 @@ export class App {
    * robin, so cells still showing a page that just went away don't pick up
    * the next page's picture before they're redrawn.
    */
-  private placeholderId(page: Page): number | null {
-    if (page.phId !== null) return page.phId;
-    for (let i = 0; i < PLACEHOLDER_IDS; i++) {
-      const id = ((this.phNext - 1 + i) % PLACEHOLDER_IDS) + 1;
-      if (this.phInUse.has(id)) continue;
-      this.phInUse.add(id);
-      this.phNext = (id % PLACEHOLDER_IDS) + 1;
-      page.phId = id;
-      return id;
+  private placeholderIds(page: Page, n: number): number[] | null {
+    while (page.phIds.length > n) this.phInUse.delete(page.phIds.pop()!);
+    while (page.phIds.length < n) {
+      let found = 0;
+      for (let i = 0; i < PLACEHOLDER_IDS && !found; i++) {
+        const id = ((this.phNext - 1 + i) % PLACEHOLDER_IDS) + 1;
+        if (this.phInUse.has(id)) continue;
+        this.phInUse.add(id);
+        this.phNext = (id % PLACEHOLDER_IDS) + 1;
+        found = id;
+      }
+      if (!found) return null;
+      page.phIds.push(found);
     }
-    return null;
+    return page.phIds;
   }
 
   private releasePlaceholder(page: Page): void {
-    if (page.phId === null) return;
-    this.phInUse.delete(page.phId);
-    page.phId = null;
+    for (const id of page.phIds) this.phInUse.delete(id);
+    page.phIds = [];
   }
 
   private snapshot(page: Page): Promise<void> {
@@ -1383,27 +1400,69 @@ export class App {
     if (!g || !page.lastFrame || this.mode === "help" || this.closingAll || page === this.panelPage) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
-    if (this.placeholders) {
-      // One image id per page, replaced in place; the cells only need
-      // writing when the pane moved or was cleared.
-      const index = this.placeholderId(page);
-      if (index === null) return false;
-      const id = placeholderImageId(this.phHigh, index);
-      const p = page.placed;
-      const moved = page.imageId !== id || !p || p.row !== r.row || p.col !== r.col || p.cols !== r.cols || p.rows !== r.rows;
-      // A stale delete first: its id may be the one handed out again here.
-      let s = this.takeStale() + transmitVirtual(page.lastFrame, id, r.cols, r.rows);
-      if (moved) s += placeholderCells(this.phHigh, index, r.row, r.col, r.cols, r.rows);
-      out(this.sync(s + this.cursorSeq()), done);
-      page.imageId = id;
-      page.placed = { ...r };
-      return true;
-    }
+    if (this.placeholders) return this.paintPlaceholders(page, r, done);
     const id = this.nextImage++;
-    if (this.nextImage > 4_000_000_000) this.nextImage = 100;
+    if (this.nextImage > 0xfffffff0) this.nextImage = 1;
     // New picture placed first, old one deleted after, in one synchronized update.
-    out(this.sync(drawImage(page.lastFrame, id, page.imageId, r.row, r.col, r.cols, r.rows) + this.takeStale() + this.cursorSeq()), done);
-    page.imageId = id;
+    const replaces = page.imageIds[0] ?? null;
+    out(this.sync(drawImage(page.lastFrame, id, replaces, r.row, r.col, r.cols, r.rows) + this.takeStale() + this.cursorSeq()), done);
+    page.imageIds = [id];
+    page.placed = { ...r };
+    return true;
+  }
+
+  /**
+   * Unicode placeholders (tmux): one image id per page, replaced in place;
+   * the cells only need writing when the pane moved or was cleared. A pane
+   * more than PLACEHOLDER_MAX cells across or down (the marks only count so
+   * far) is cut into tiles, each its own image.
+   */
+  private paintPlaceholders(page: Page, r: Rect, done?: () => void): boolean {
+    const nx = Math.ceil(r.cols / PLACEHOLDER_MAX);
+    const ny = Math.ceil(r.rows / PLACEHOLDER_MAX);
+    let raster: Raster | null = null;
+    if (nx * ny > 1) {
+      raster = decodePng(Buffer.from(page.lastFrame!, "base64"));
+      if (!raster) this.opts.log("can't tile this frame (unexpected PNG format)");
+    }
+    const tiles: (Rect & { x: number; y: number; w: number; h: number })[] = [];
+    if (!raster) {
+      // One image (clipped to what placeholders can address if the pane is bigger).
+      tiles.push({ ...r, x: 0, y: 0, w: 0, h: 0 });
+    } else {
+      for (let ty = 0; ty < ny; ty++) {
+        for (let tx = 0; tx < nx; tx++) {
+          const c0 = Math.floor((tx * r.cols) / nx);
+          const c1 = Math.floor(((tx + 1) * r.cols) / nx);
+          const r0 = Math.floor((ty * r.rows) / ny);
+          const r1 = Math.floor(((ty + 1) * r.rows) / ny);
+          const x0 = Math.round((c0 * raster.width) / r.cols);
+          const x1 = Math.round((c1 * raster.width) / r.cols);
+          const y0 = Math.round((r0 * raster.height) / r.rows);
+          const y1 = Math.round((r1 * raster.height) / r.rows);
+          tiles.push({ row: r.row + r0, col: r.col + c0, cols: c1 - c0, rows: r1 - r0, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+        }
+      }
+    }
+    const indexes = this.placeholderIds(page, tiles.length);
+    if (!indexes) return false;
+    const ids = indexes.map((i) => placeholderImageId(this.phHigh, i));
+    const p = page.placed;
+    const moved =
+      ids.length !== page.imageIds.length || ids.some((id, i) => id !== page.imageIds[i]) ||
+      !p || p.row !== r.row || p.col !== r.col || p.cols !== r.cols || p.rows !== r.rows;
+    for (const old of page.imageIds) if (!ids.includes(old)) this.staleImages.push(old);
+    // Stale deletes first: their ids may be the ones handed out again here.
+    let s = this.takeStale();
+    tiles.forEach((t, i) => {
+      const data = raster ? encodeRegion(raster, t.x, t.y, t.w, t.h).toString("base64") : page.lastFrame!;
+      const cols = Math.min(t.cols, PLACEHOLDER_MAX);
+      const rows = Math.min(t.rows, PLACEHOLDER_MAX);
+      s += transmitVirtual(data, ids[i]!, cols, rows);
+      if (moved) s += placeholderCells(this.phHigh, indexes[i]!, t.row, t.col, cols, rows);
+    });
+    out(this.sync(s + this.cursorSeq()), done);
+    page.imageIds = ids;
     page.placed = { ...r };
     return true;
   }
@@ -1424,23 +1483,14 @@ export class App {
     if (!this.started || this.closingAll || !this.attached) return;
     // Everything below is one synchronized update: the terminal never shows
     // the cleared screen, only the finished redraw.
-    let s = SYNC_START + RESET;
-    if (this.placeholders && !this.freshTerminal) {
-      // Pictures stay (each page keeps its id and is sent again in place);
-      // only the cells are redrawn. Through tmux, pictures pass straight to
-      // the outer terminal while tmux holds back the text, so deleting them
-      // here would show as empty panes.
-      s += this.takeStale();
-      for (const page of this.pages.values()) page.placed = null;
-    } else {
-      this.staleImages = [];
-      s += deleteAllImages();
-      for (const page of this.pages.values()) {
-        page.imageId = null;
-        page.placed = null;
-      }
-    }
-    this.freshTerminal = false;
+    // Pictures aren't deleted: each page's is replaced by its next one (and
+    // a picture's old copy deleted after the new one is placed). Through
+    // tmux, pictures pass straight to the outer terminal while tmux holds
+    // back the text, so deleting them here would show as empty panes; and
+    // the terminal may show other programs' pictures (other tmux panes),
+    // so nothing is ever deleted wholesale.
+    const s = SYNC_START + RESET + this.takeStale();
+    for (const page of this.pages.values()) page.placed = null;
     out(s + "\x1b[2J");
     this.redrawing = true;
     try {
@@ -1463,7 +1513,6 @@ export class App {
     s += this.drawTabBar(mainCol, mainW);
     s += this.drawUrlBar(mainCol, mainW);
     if (this.mode === "help") {
-      if (!this.placeholders) this.staleImages = []; // the overlay deletes every picture
       out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
       return;
     }
@@ -1721,8 +1770,8 @@ export class App {
     if (!page || !g) return "";
     this.panelPage = page;
     const r = g.content;
-    let s = page.imageId !== null ? `\x1b_Ga=d,d=I,i=${page.imageId},q=2\x1b\\` : "";
-    page.imageId = null;
+    let s = page.imageIds.map(deleteImage).join("");
+    page.imageIds = [];
     page.placed = null;
     const inner = Math.max(10, Math.min(r.cols - 4, 100));
     const lines: string[] = [];
@@ -1759,7 +1808,7 @@ export class App {
     const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 2));
     const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
     // (With placeholders the overlay's text replaces the cells showing them.)
-    let s = this.placeholders ? "" : deleteAllImages();
+    let s = this.placeholders ? "" : this.deleteOwnImages();
     for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
     const panel = bg(C.base) + fg(C.text);
     const hidden = Math.max(0, HELP.length - shown * columns);
@@ -2366,6 +2415,11 @@ export class App {
   }
 
   // ---------------------------------------------------------- actions
+
+  /** Opens what the user typed (an address, a bare host, or a search) in a new tab. */
+  openTab(text: string): void {
+    this.newTab(toUrl(text, this.opts.search) ?? undefined);
+  }
 
   newTab(url?: string): void {
     const space = this.space;

@@ -51,7 +51,7 @@ not character art, so text is sharp and video, canvas and WebGL work.
 ```sh
 termium                         # opens with the address bar focused
 termium news.ycombinator.com    # or start on a page
-termium --incognito             # throwaway profile, deleted on exit
+termium --incognito             # throwaway profile, deleted when the session ends
 termium --help
 ```
 
@@ -69,7 +69,8 @@ terminal it was started from:
 ```sh
 termium                  # attach to the session "default", starting it if needed
 termium example.com      # ...and open a page (in a new tab if it's running)
-termium -s work          # another session, with its own browser
+termium -s work --profile ~/work-profile   # another session, with its own browser
+termium -s private --incognito             # ...or with a throwaway profile
 termium attach [name]    # attach to a running session
 termium ls               # list sessions (attached or detached, pages, profile)
 termium kill [name]      # end a session and its browser
@@ -161,9 +162,11 @@ divider between panes.
   built-in content blocker loads, so the very first page can take a moment,
   and Helium may reload a page that loaded before the blocker was ready
   (anything typed into it in those first seconds is lost).
-- Only one session can use a profile at a time; use `--profile` or
-  `--incognito` for a second one. If a session was killed outright
-  (`kill -9`), the next start stops the browser it left behind.
+- Only one session can use a profile at a time. For a second browser,
+  start a second session with its own profile: `termium -s NAME
+  --profile DIR` or `termium -s NAME --incognito` (plain `termium` again
+  just attaches to the session that's running). If a session was killed
+  outright (`kill -9`), the next start stops the browser it left behind.
 - Logs: `~/.local/state/termium/termium.log` (set `TERMIUM_DEBUG=1` to log
   DevTools traffic) and `browser.log` next to it.
 - Downloads go to `$TERMIUM_DOWNLOAD_DIR`, else your XDG download directory

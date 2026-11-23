@@ -3,10 +3,12 @@
 // one first if needed. It draws what the server sends and forwards input.
 
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { lockHolder } from "./browser";
 import { InputParser, type InputEvent } from "./input";
 import type { Hello } from "./server";
 import { stateDir } from "./server";
@@ -56,6 +58,27 @@ function tmuxPassthroughSetting(): string | null {
   }
 }
 
+/**
+ * Inside tmux: is ours the pane tmux hands the outer terminal's answers to
+ * (the active pane of a window being shown)? Queries sent from any other
+ * pane are answered into that one, typed into whatever runs there.
+ */
+function tmuxPaneActive(): boolean {
+  const pane = process.env.TMUX_PANE;
+  if (!pane) return true;
+  try {
+    const r = Bun.spawnSync(["tmux", "display-message", "-p", "-t", pane, "#{pane_active} #{window_active} #{session_attached}"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (r.exitCode !== 0) return true;
+    const [p, w, attached] = r.stdout.toString().trim().split(" ");
+    return p === "1" && w === "1" && attached !== "0";
+  } catch {
+    return true;
+  }
+}
+
 const TMUX_HINT =
   "termium draws pages with the kitty graphics protocol, which tmux only passes on with\n" +
   "  set -g allow-passthrough on\n" +
@@ -71,7 +94,6 @@ const TMUX_HINT =
 const graphicsFiles = (() => {
   const dir = existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
   const made = new Map<string, number>();
-  let n = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
   const sweep = () => {
     const now = Date.now();
@@ -82,8 +104,15 @@ const graphicsFiles = (() => {
   };
   return {
     write(data: Uint8Array): string {
-      const path = join(dir, `termium-tty-graphics-protocol-${process.pid}-${++n}`);
-      writeFileSync(path, data, { mode: 0o600 });
+      // An unguessable name, created exclusively (never through a symlink
+      // someone planted), readable only by us (and the terminal: same user).
+      const path = join(dir, `termium-tty-graphics-protocol-${randomBytes(16).toString("hex")}`);
+      const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try {
+        for (let off = 0; off < data.length; ) off += writeSync(fd, data, off);
+      } finally {
+        closeSync(fd);
+      }
       made.set(path, Date.now());
       if (!timer) {
         timer = setInterval(sweep, 2000);
@@ -108,8 +137,14 @@ export async function runClient(o: ClientOptions): Promise<void> {
     fail(e?.message ?? String(e));
   }
 
+  // What the server we may start says if it fails (ours alone: a second
+  // client starting the same session at once has its own).
+  const errPath = `${paths.err.slice(0, -4)}.${process.pid}.err`;
+  process.on("exit", () => rmSync(errPath, { force: true }));
+
   const inTmux = !!process.env.TMUX;
-  if (inTmux && tmuxPassthroughSetting() === "off") fail(`tmux has allow-passthrough off.\n${TMUX_HINT}`);
+  const passthrough = inTmux ? tmuxPassthroughSetting() : null;
+  if (passthrough === "off") fail(`tmux has allow-passthrough off.\n${TMUX_HINT}`);
   setTmuxPassthrough(inTmux);
   const forced = process.env.TERMIUM_GRAPHICS;
   const placeholders = forced === "placeholders" ? true : forced === "direct" ? false : inTmux;
@@ -135,7 +170,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
   let child: ReturnType<typeof spawn> | null = null;
   let childExit: number | null = null;
   if (!sock) {
-    const errFd = openSync(paths.err, "w", 0o600);
+    const errFd = openSync(errPath, "w", 0o600);
     child = spawn(o.serverArgv[0]!, o.serverArgv.slice(1), { detached: true, stdio: ["ignore", errFd, errFd] });
     closeSync(errFd);
     child.on("exit", (code, signal) => (childExit = code ?? (signal ? 1 : 0)));
@@ -158,6 +193,22 @@ export async function runClient(o: ClientOptions): Promise<void> {
   let onFileProbe: ((ok: boolean) => void) | null = null;
   /** Pictures go to the terminal as temporary files (tmux, terminal on this machine). */
   let fileTransport = false;
+  /** Whether the terminal reads our files: "unknown" until it answers at all. */
+  let fileProbe: "yes" | "no" | "unknown" = "no";
+  /** Asks whether the terminal can read our files (not when it runs on another machine). */
+  const probeFiles = async (): Promise<"yes" | "no" | "unknown"> => {
+    const path = graphicsFiles.write(new Uint8Array([0, 0, 0]));
+    let answer: boolean | null = null;
+    const answered = new Promise<void>((r) => (onFileProbe = (ok) => ((answer = ok), r())));
+    const apc = parser.expectApc;
+    parser.expectApc = true;
+    out(`\x1b_Gi=32,s=1,v=1,a=q,t=t,f=24;${Buffer.from(path).toString("base64")}\x1b\\`);
+    await Promise.race([answered, Bun.sleep(1000)]);
+    parser.expectApc = apc;
+    onFileProbe = null;
+    rmSync(path, { force: true });
+    return answer === null ? "unknown" : answer ? "yes" : "no";
+  };
   let onSizes: (() => void) | null = null;
   let conn: Socket | null = null;
   const pending: InputEvent[] = [];
@@ -195,9 +246,31 @@ export async function runClient(o: ClientOptions): Promise<void> {
         onSizes?.();
         return;
     }
-    if (conn) send({ t: "input", ev });
-    else pending.push(ev);
+    if (conn) {
+      send({ t: "input", ev });
+      watchKey(ev);
+    } else pending.push(ev);
   });
+
+  // A session that stopped answering (hung, or stopped with SIGSTOP) must
+  // not trap the terminal: the keys that leave (Ctrl+B d, Ctrl+Q, Ctrl+C)
+  // ask it for a sign of life, and without one the terminal is let go.
+  let afterCtrlB = false;
+  let pingTimer: ReturnType<typeof setTimeout> | null = null;
+  const unresponsive = () =>
+    `termium: session "${o.name}" isn't responding${serverPid ? ` (pid ${serverPid})` : ""}; detached. ` +
+    `\`termium kill ${o.name}\` ends it.`;
+  function watchKey(ev: InputEvent): void {
+    if (ev.type !== "key" || ev.event === "release") return;
+    const plain = !ev.mods.alt && !ev.mods.meta;
+    const ctrlKey = (k: string) => ev.mods.ctrl && plain && ev.key.toLowerCase() === k;
+    const leaving = (afterCtrlB && ev.key === "d" && !ev.mods.ctrl && plain) || ctrlKey("q") || ctrlKey("c");
+    afterCtrlB = ctrlKey("b");
+    if (!leaving || pingTimer) return;
+    send({ t: "ping" });
+    pingTimer = setTimeout(() => void leave(1, unresponsive()), 3000);
+  }
+  let serverPid = 0;
 
   let leaving = false;
   /** Gives the terminal back and exits, saying why. */
@@ -244,23 +317,41 @@ export async function runClient(o: ClientOptions): Promise<void> {
     await Promise.race([new Promise<void>((r) => (onCapsDone = r)), Bun.sleep(500)]);
     await Bun.sleep(50);
   }
-  queryCapabilities();
+  // Not the active pane: the graphics question would be answered into
+  // another pane, so it isn't asked (tmux answers the others itself).
+  let paneActive = !inTmux || tmuxPaneActive();
+  queryCapabilities(paneActive);
 
   const graphicsReply = new Promise<void>((r) => (onGraphics = r));
   await Promise.race([new Promise<void>((r) => (onCapsDone = r)), Bun.sleep(1500)]);
   onCapsDone = null;
   // tmux answers the other queries itself, but the graphics one makes a
   // round trip through the outer terminal, so its reply can come last.
-  if (inTmux && !caps.graphics) await Promise.race([graphicsReply, Bun.sleep(1500)]);
+  if (inTmux && paneActive && !caps.graphics) await Promise.race([graphicsReply, Bun.sleep(1500)]);
   onGraphics = null;
+  // tmux hands the outer terminal's answers to the pane that's active, so
+  // started in another one (from a script, or as the pane loses focus), the
+  // answer never comes. When tmux itself says passthrough is allowed, that
+  // is no reason to refuse; what the terminal can do is found out later.
+  const unanswered = inTmux && !caps.graphics && (passthrough === "on" || passthrough === "all");
+  if (unanswered) caps.graphics = true;
+  if (inTmux && !paneActive && !caps.graphics && passthrough === null) {
+    // Can't ask, and tmux won't say: go ahead (the pictures show once the pane is active).
+    caps.graphics = true;
+  }
+  /** Called when our pane becomes the active one (tmux answers us again). */
+  let onPaneActive: (() => void) | null = null;
+  if (inTmux) {
+    const timer = setInterval(() => {
+      const was = paneActive;
+      paneActive = tmuxPaneActive();
+      if (paneActive && !was) onPaneActive?.();
+    }, 1000);
+    timer.unref?.();
+  }
   if (inTmux && placeholders && caps.graphics && process.env.TERMIUM_TMUX_FILES !== "0") {
-    // Can the terminal read our files? (Not when it runs on another machine.)
-    const path = graphicsFiles.write(new Uint8Array([0, 0, 0]));
-    const answer = new Promise<boolean>((r) => (onFileProbe = r));
-    out(`\x1b_Gi=32,s=1,v=1,a=q,t=t,f=24;${Buffer.from(path).toString("base64")}\x1b\\`);
-    fileTransport = await Promise.race([answer, Bun.sleep(1000).then(() => false)]);
-    onFileProbe = null;
-    rmSync(path, { force: true });
+    fileProbe = unanswered || !paneActive ? "unknown" : await probeFiles();
+    fileTransport = fileProbe === "yes";
   }
   // From here on ESC _ is a legacy Alt+_ keypress, not a reply we're waiting for.
   parser.expectApc = false;
@@ -285,13 +376,17 @@ export async function runClient(o: ClientOptions): Promise<void> {
     }
   };
 
-  /** Connects once the server we started listens; null if it exited first. */
+  /**
+   * Connects once the server we started listens; null if it exited first.
+   * If it exited because another server won the session's lock (two
+   * termiums starting it at once), waits for that one instead.
+   */
   async function waitForServer(timeoutMs = 30_000): Promise<Socket | null> {
     const end = Date.now() + timeoutMs;
     while (Date.now() < end) {
       const s = await dial(paths.sock).catch(() => null);
       if (s) return s;
-      if (childExit !== null) return null;
+      if (childExit !== null && (childExit !== 3 || lockHolder(paths.lock) === null)) return null;
       await Bun.sleep(30);
     }
     return null;
@@ -316,7 +411,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
       if (!sock) {
         let why = "";
         try {
-          why = readFileSync(paths.err, "utf8").trim();
+          why = readFileSync(errPath, "utf8").trim();
         } catch {}
         await leave(childExit || 1, why || `the session server exited (see ${join(stateDir(), "termium.log")})`);
         return;
@@ -342,6 +437,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
 
   conn = sock;
   let quitting = false;
+  let welcomed = false;
 
   // Pictures through tmux. tmux discards output, passthrough included, once
   // more than about cols x rows x 8 bytes wait for the outer terminal; it
@@ -361,6 +457,11 @@ export async function runClient(o: ClientOptions): Promise<void> {
   let flowOk = true;
   const budget = () => Math.max(8192, (process.stdout.columns || 80) * (process.stdout.rows || 24) * 2);
   const roundTrip = async (timeoutMs: number): Promise<boolean> => {
+    if (!paneActive) {
+      // Its answer would go to another pane: don't ask, just wait a little.
+      await Bun.sleep(Math.min(timeoutMs, 300));
+      return false;
+    }
     const id = 1_000_000 + (flowSeq = (flowSeq + 1) % 1_000_000);
     let answered = false;
     const reply = new Promise<void>((r) => (flowWait = { id, done: () => ((answered = true), r()) }));
@@ -371,21 +472,35 @@ export async function runClient(o: ClientOptions): Promise<void> {
     parser.expectApc = false;
     return answered;
   };
+  /** tmux answers again: send the pictures once more, and see whether files work now. */
+  let probing = false;
+  const answeredAgain = async () => {
+    if (probing) return;
+    probing = true;
+    if (fileProbe === "unknown" && paneActive && process.env.TERMIUM_TMUX_FILES !== "0") {
+      fileProbe = await probeFiles();
+      if (fileProbe === "yes") fileTransport = true;
+    }
+    probing = false;
+    send({ t: "repaint" });
+  };
+  // Pictures sent while the pane wasn't active may not have arrived, and the
+  // terminal couldn't be asked about files: do both now.
+  onPaneActive = () => void answeredAgain();
   const pump = async () => {
     if (pumping) return;
     pumping = true;
     while (outQueue.length) {
       const { data, done } = outQueue.shift()!;
+      // The pictures go first, then all the text in one write: the text
+      // holds a synchronized update (?2026h ... ?2026l), and waiting in the
+      // middle of one would leave tmux holding back a half-drawn pane. The
+      // pictures' order among themselves (deletes before a reused id is sent
+      // again) is kept.
+      const apcs = data.match(/\x1b_G[^\x1b]*\x1b\\/g) ?? [];
+      const text = data.replace(/\x1b_G[^\x1b]*\x1b\\/g, "");
       let acc = "";
-      let last = 0;
-      const pieces: string[] = [];
-      for (const m of data.matchAll(/\x1b_G[^\x1b]*\x1b\\/g)) {
-        if (m.index! > last) pieces.push(data.slice(last, m.index));
-        pieces.push(m[0]);
-        last = m.index! + m[0].length;
-      }
-      if (last < data.length) pieces.push(data.slice(last));
-      for (const piece of pieces) {
+      for (const piece of apcs) {
         if (flowOk && sent > 0 && sent + piece.length > budget()) {
           out(acc);
           acc = "";
@@ -393,18 +508,20 @@ export async function runClient(o: ClientOptions): Promise<void> {
           if (!/^\x1b_Gm=/.test(piece)) {
             // Between pictures: wait until tmux has passed everything on.
             if (!(await roundTrip(300))) {
-              // No answer: tmux isn't passing anything on (pane hidden, or
-              // redrawing). Stop waiting; once an answer comes back, ask
-              // the session to send its pictures again.
+              // No answer: tmux isn't passing anything on (pane hidden or
+              // not the active one, or tmux redrawing). Stop waiting; once
+              // an answer comes back, send the pictures again.
               flowOk = false;
               void (async () => {
                 while (!flowOk && !leaving) {
                   if (await roundTrip(1000)) {
                     flowOk = true;
-                    send({ t: "repaint" });
+                    await answeredAgain();
                   }
                 }
               })();
+            } else if (fileProbe === "unknown") {
+              void answeredAgain();
             }
           } else {
             await Bun.sleep(4); // within a picture: just slow down
@@ -413,7 +530,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
         acc += piece;
         sent += piece.length;
       }
-      out(acc, done);
+      out(acc + text, done);
     }
     pumping = false;
   };
@@ -464,7 +581,13 @@ export async function runClient(o: ClientOptions): Promise<void> {
       return;
     }
     const m = f.msg;
-    if (m?.t === "quitting") {
+    if (m?.t === "welcome") {
+      welcomed = true;
+      serverPid = Number(m.pid) || 0;
+    } else if (m?.t === "pong") {
+      if (pingTimer) clearTimeout(pingTimer);
+      pingTimer = null;
+    } else if (m?.t === "quitting") {
       // The session is ending: the terminal is ours again while it stops the browser.
       quitting = true;
       void Promise.race([drained(), Bun.sleep(500)]).then(() => {
@@ -518,6 +641,10 @@ export async function runClient(o: ClientOptions): Promise<void> {
     url: child ? null : o.url,
   } satisfies Hello);
   for (const ev of pending.splice(0)) send({ t: "input", ev });
+  // The server answers an attach at once (before it draws anything).
+  setTimeout(() => {
+    if (!welcomed) void leave(1, unresponsive().replace("; detached.", "."));
+  }, 5000);
 
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   process.stdout.on("resize", () => {
@@ -533,40 +660,41 @@ export async function runClient(o: ClientOptions): Promise<void> {
   });
 }
 
-/** Asks a session for its details; null if it isn't running (a stale socket is removed). */
+/**
+ * Asks a session for its details: null if it isn't running (a stale
+ * socket is removed), { unresponsive, pid } if it accepts the connection but
+ * never answers (hung, or stopped).
+ */
 async function sessionInfo(name: string): Promise<any | null> {
   const p = sessionPaths(name);
   const sock = await dial(p.sock, 3000).catch(() => null);
   if (!sock) {
-    const pid = readPid(name);
-    let alive = false;
-    if (pid) {
-      try {
-        process.kill(pid, 0);
-        alive = true;
-      } catch {}
-    }
-    // Nobody listening: a server that died without cleaning up. (A server
-    // still starting has no socket yet, so it's never removed here.)
-    if (!alive) removeStale(name);
+    // Nobody listening: a server that died without cleaning up. (Never
+    // removed while a live server holds the session's lock.)
+    removeStale(name);
     return null;
   }
   return new Promise((resolve) => {
     let info: any = null;
+    const finish = () => {
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(info ?? { unresponsive: true, pid: lockHolder(p.lock) ?? readPid(name) });
+    };
+    const timer = setTimeout(finish, 3000);
     const reader = new FrameReader((f) => {
-      if (f.type === 1 && f.msg?.t === "info") info = f.msg;
+      if (f.type === 1 && f.msg?.t === "info") {
+        info = f.msg;
+        finish();
+      }
     });
     sock.on("data", (c: Buffer) => {
       try {
         reader.push(c);
       } catch {}
     });
-    sock.on("close", () => resolve(info));
-    sock.on("error", () => resolve(info));
-    setTimeout(() => {
-      sock.destroy();
-      resolve(info);
-    }, 3000);
+    sock.on("close", finish);
+    sock.on("error", finish);
     sock.write(jsonFrame({ t: "hello", v: PROTOCOL, kind: "info" } satisfies Hello));
   });
 }
@@ -582,14 +710,16 @@ export async function listSessions(): Promise<void> {
   for (const name of sessionNames(dir)) {
     const info = await sessionInfo(name);
     if (!info) continue;
-    rows.push([name, String(info.pid), info.attached ? "attached" : "detached", `${info.pages} page${info.pages === 1 ? "" : "s"}`, info.profile]);
+    if (info.unresponsive) rows.push([name, String(info.pid ?? "?"), "not responding", "", ""]);
+    else rows.push([name, String(info.pid), info.attached ? "attached" : "detached", `${info.pages} page${info.pages === 1 ? "" : "s"}`, info.profile]);
   }
   if (rows.length === 0) {
     console.error("termium: no sessions");
     process.exit(1);
   }
   const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
-  for (const r of rows) console.log(r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]!))).join("  "));
+  for (const r of rows) console.log(r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]!))).join("  ").trimEnd());
+  process.exit(0);
 }
 
 export async function killSession(name: string): Promise<void> {
@@ -604,12 +734,43 @@ export async function killSession(name: string): Promise<void> {
     await sessionInfo(name); // clears a stale socket
     fail(`no session "${name}"`, 1);
   }
-  // The server answers once the browser is stopped and closes the socket.
-  await new Promise<void>((resolve) => {
-    sock.on("close", () => resolve());
-    sock.on("error", () => resolve());
-    sock.resume();
-    setTimeout(resolve, 15_000);
+  // The server says it's on it at once, then closes the socket once the
+  // browser is stopped. No word at all: it's hung, and gets SIGKILL.
+  const answered = await new Promise<boolean>((resolve) => {
+    let heard = false;
+    let timer = setTimeout(() => finish(false), 3000);
+    const finish = (ok: boolean) => {
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.on("data", () => {
+      if (heard) return;
+      heard = true;
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(true), 20_000);
+    });
+    sock.on("close", () => finish(heard));
+    sock.on("error", () => finish(heard));
     sock.write(jsonFrame({ t: "hello", v: PROTOCOL, kind: "kill" } satisfies Hello));
   });
+  if (!answered) {
+    const pid = lockHolder(p.lock) ?? readPid(name);
+    if (pid) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+      for (let i = 0; i < 40; i++) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          break;
+        }
+        await Bun.sleep(50);
+      }
+    }
+    removeStale(name);
+    console.error(`termium: session "${name}" wasn't responding; killed its server${pid ? ` (pid ${pid})` : ""}`);
+  }
+  process.exit(0);
 }

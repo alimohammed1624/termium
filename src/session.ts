@@ -16,6 +16,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { lockHolder } from "./browser";
 
 /** Bumped whenever client and server stop understanding each other. */
 export const PROTOCOL = 1;
@@ -58,10 +59,12 @@ export interface SessionPaths {
   pid: string;
   /** The server's stdout and stderr: why it failed to start. */
   err: string;
+  /** Held by the session's server for its whole life (one server per name). */
+  lock: string;
 }
 
 export function sessionPaths(name: string, dir = socketDir()): SessionPaths {
-  return { sock: join(dir, `${name}.sock`), pid: join(dir, `${name}.pid`), err: join(dir, `${name}.err`) };
+  return { sock: join(dir, `${name}.sock`), pid: join(dir, `${name}.pid`), err: join(dir, `${name}.err`), lock: join(dir, `${name}.lock`) };
 }
 
 /** Names of every session with a socket file, live or stale. */
@@ -77,11 +80,13 @@ export function sessionNames(dir = socketDir()): string[] {
   }
 }
 
-/** Removes what a dead server left behind. */
+/** Removes what a dead server left behind (never anything while a live server holds the lock). */
 export function removeStale(name: string, dir = socketDir()): void {
   const p = sessionPaths(name, dir);
+  if (lockHolder(p.lock) !== null) return;
   rmSync(p.sock, { force: true });
   rmSync(p.pid, { force: true });
+  rmSync(p.lock, { force: true });
 }
 
 export function readPid(name: string, dir = socketDir()): number | null {

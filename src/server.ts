@@ -11,7 +11,17 @@ import { createServer, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "./app";
-import { clearOwner, findBrowser, launchBrowser, lockProfile, reapOrphans, unlockProfile, type LaunchedBrowser } from "./browser";
+import {
+  clearOwner,
+  findBrowser,
+  launchBrowser,
+  lockFile,
+  lockProfile,
+  reapOrphans,
+  unlockFile,
+  unlockProfile,
+  type LaunchedBrowser,
+} from "./browser";
 import { CDP } from "./cdp";
 import type { InputEvent } from "./input";
 import { FrameReader, PROTOCOL, dial, jsonFrame, outputFrame, sessionPaths } from "./session";
@@ -143,15 +153,23 @@ class Conn {
     readonly sock: Socket,
     onMessage: (c: Conn, msg: any) => void,
     onClose: (c: Conn) => void,
+    log: (msg: string) => void,
   ) {
     this.reader = new FrameReader((f) => {
-      if (f.type === 1) onMessage(this, f.msg);
+      if (f.type !== 1) return;
+      try {
+        onMessage(this, f.msg);
+      } catch (e) {
+        // A bug handling one message (a key, say) mustn't cost the terminal.
+        log(`handling ${JSON.stringify(f.msg?.t)}: ${e instanceof Error ? e.stack : e}`);
+      }
     });
     sock.on("data", (chunk: Buffer) => {
       try {
         this.reader.push(chunk);
-      } catch {
-        sock.destroy(); // garbage on the socket: drop that client
+      } catch (e) {
+        log(`dropping a client: ${e instanceof Error ? e.message : e}`);
+        sock.destroy(); // garbage on the socket (bad framing): drop that client
       }
     });
     sock.on("error", () => {});
@@ -223,7 +241,20 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   } catch (e: any) {
     die(e?.message ?? String(e));
   }
+  // One server per session name, for its whole life. A second one started
+  // at the same moment loses here, before it has touched anything; its
+  // client then attaches to the winner.
+  const holder = lockFile(paths.lock);
+  if (holder !== null) die(`session "${name}" is already running${holder === "failed" ? "" : ` (pid ${holder})`}`, 3);
+  let listening = false;
+  process.on("exit", () => {
+    // Last of all: whatever we leave, no other server can be using it.
+    if (listening) rmSync(paths.sock, { force: true });
+    if ((readPidSafe(paths.pid) ?? process.pid) === process.pid) rmSync(paths.pid, { force: true });
+    unlockFile(paths.lock);
+  });
   if (await dial(paths.sock).then((s) => (s?.destroy(), !!s)).catch(() => true)) {
+    // An older termium (without the lock) serving this name.
     die(`session "${name}" is already running`, 3);
   }
   writeFileSync(paths.pid, `${process.pid}\n`);
@@ -240,7 +271,6 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     profile = realpathSync(chosen);
     lockProfile(profile);
   } catch (e: any) {
-    rmSync(paths.pid, { force: true });
     die(/in use|can't lock/.test(e?.message ?? "") ? e.message : `can't use that profile directory: ${e?.message ?? e}`);
   }
 
@@ -250,7 +280,6 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   } catch (e: any) {
     unlockProfile(profile);
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
-    rmSync(paths.pid, { force: true });
     die(e?.message ?? String(e));
   }
 
@@ -274,11 +303,10 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
 
   const removeSocket = () => {
     server.close();
-    // Only our own: a socket file replaced by a newer server stays.
-    if ((readPidSafe(paths.pid) ?? process.pid) === process.pid) {
-      rmSync(paths.sock, { force: true });
-      rmSync(paths.pid, { force: true });
-    }
+    // Ours: we hold the session's lock. (The lock itself goes on exit.)
+    if (listening) rmSync(paths.sock, { force: true });
+    listening = false;
+    rmSync(paths.pid, { force: true });
   };
 
   const shutdown = async (code: number, err?: unknown, requester?: Conn) => {
@@ -413,6 +441,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       }
       if (h.kind === "kill") {
         log("killed by request");
+        c.send({ t: "killing" });
         void shutdown(0, undefined, c);
         return;
       }
@@ -430,13 +459,14 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       client = c;
       everAttached = true;
       lastHello = h;
+      c.send({ t: "welcome", pid: process.pid });
       setSink((data, done) => c.output(data, done));
       log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders} via=${h.via}`);
       if (!app) {
         void startApp(h);
       } else {
         app.attach(terminalOf(h));
-        if (h.url) app.newTab(h.url);
+        if (h.url) app.openTab(h.url);
       }
       return;
     }
@@ -461,6 +491,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       case "repaint":
         app?.repaintVisible();
         return;
+      case "ping":
+        c.send({ t: "pong" });
+        return;
     }
   };
 
@@ -473,19 +506,21 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     log("client disconnected");
   };
 
-  server.on("connection", (sock) => new Conn(sock, onMessage, onClose));
+  server.on("connection", (sock) => new Conn(sock, onMessage, onClose, log));
   server.on("error", (e) => void shutdown(1, e));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    // A socket file nobody answers on is what a dead server left behind.
+    // We hold the session's lock: a socket file here is a dead server's.
     rmSync(paths.sock, { force: true });
     server.listen(paths.sock, () => {
       server.off("error", reject);
+      listening = true;
       resolve();
     });
   }).catch((e) => {
     unlockProfile(profile);
-    rmSync(paths.pid, { force: true });
+    rmSync(browserTmp, { recursive: true, force: true });
+    if (args.incognito) rmSync(profile, { recursive: true, force: true });
     die(`can't listen on ${paths.sock}: ${e?.message ?? e}`);
   });
   chmodSync(paths.sock, 0o600);

@@ -32,7 +32,29 @@ export function wrapGraphics(data: string): string {
   return data.replace(/\x1b_G[^\x1b]*\x1b\\/g, (m) => `${ESC}Ptmux;${m.replaceAll(ESC, ESC + ESC)}${ST}`);
 }
 
+/**
+ * Ids of the pictures this terminal holds from us. Leaving, we delete just
+ * these: a delete-all would also wipe other programs' pictures (another
+ * tmux pane's, say).
+ */
+const ownImages = new Set<number>();
+
+function trackImages(data: string): void {
+  if (!data.includes(`${ESC}_G`)) return;
+  for (const m of data.matchAll(/\x1b_G([^;\x1b]*)/g)) {
+    const kv = Object.fromEntries(m[1]!.split(",").map((p) => p.split("=")));
+    const id = Number(kv.i);
+    if (kv.a === "T" || kv.a === "t") {
+      if (id) ownImages.add(id);
+    } else if (kv.a === "d") {
+      if (kv.d === "I" || kv.d === "i") ownImages.delete(id);
+      else if (kv.d === "A" || kv.d === "a") ownImages.clear();
+    }
+  }
+}
+
 const stdoutSink: Sink = (data, done) => {
+  trackImages(data);
   data = wrapGraphics(data);
   if (done) process.stdout.write(data, () => done());
   else process.stdout.write(data);
@@ -93,23 +115,25 @@ export function restoreTerminal(): void {
   entered = false;
   sink = null;
   try {
+    // (ownImages is cleared below, once the deletes are written.)
     outSync(
-      wrapGraphics(`${ESC}_Ga=d,d=A,q=2${ST}`) + // delete all images
+      wrapGraphics([...ownImages].map(deleteImage).join("")) + // delete our pictures
         `${ESC}[<u` + // pop kitty keyboard flags
         `${ESC}[?2004l${ESC}[?1016l${ESC}[?1006l${ESC}[?1003l` +
         `${ESC}[0m${ESC}[0 q${ESC}[?25h` + // default cursor shape, visible
         `${ESC}[?1049l`,
     );
   } catch {}
+  ownImages.clear();
 }
 
 /**
  * Queries whose replies the input parser understands. Device attributes go
  * last: every terminal answers it, so its reply means the others are done.
  */
-export function queryCapabilities(): void {
+export function queryCapabilities(graphics = true): void {
   out(
-    `${ESC}_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA${ST}` + // kitty graphics support
+    (graphics ? `${ESC}_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA${ST}` : "") + // kitty graphics support
       `${ESC}[?u` + // kitty keyboard flags
       `${ESC}[?1016$p` + // is SGR-pixel mouse supported?
       `${ESC}[16t` + // cell size in pixels
@@ -163,9 +187,6 @@ export function deleteImage(id: number): string {
   return `${ESC}_Ga=d,d=I,i=${id},q=2${ST}`;
 }
 
-export function deleteAllImages(): string {
-  return `${ESC}_Ga=d,d=A,q=2${ST}`;
-}
 
 /** OSC 52: put text on the system clipboard. */
 export function setClipboard(text: string): string {
