@@ -38,6 +38,8 @@ export interface Hello {
   cellH?: number;
   pixelMouse?: boolean;
   placeholders?: boolean;
+  /** How pictures reach the terminal (for the log): "direct", "tmux-files" or "tmux-paced". */
+  via?: string;
   /** Open this in a new tab (attaching to a session that's already running). */
   url?: string | null;
 }
@@ -429,7 +431,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       everAttached = true;
       lastHello = h;
       setSink((data, done) => c.output(data, done));
-      log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders}`);
+      log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders} via=${h.via}`);
       if (!app) {
         void startApp(h);
       } else {
@@ -455,6 +457,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       }
       case "detach":
         detachClient("detached");
+        return;
+      case "repaint":
+        app?.repaintVisible();
         return;
     }
   };

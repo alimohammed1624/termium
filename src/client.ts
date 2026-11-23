@@ -3,8 +3,9 @@
 // one first if needed. It draws what the server sends and forwards input.
 
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InputParser, type InputEvent } from "./input";
 import type { Hello } from "./server";
@@ -61,6 +62,43 @@ const TMUX_HINT =
   "in ~/.tmux.conf (or run: tmux set -g allow-passthrough on). The terminal running tmux\n" +
   "must support kitty graphics too (Ghostty, kitty, WezTerm).";
 
+/**
+ * Temporary files for pictures (kitty graphics t=t: the terminal reads the
+ * file and deletes it). The name must contain "tty-graphics-protocol" and
+ * live in a temp directory for terminals to accept it. Files the terminal
+ * never read (tmux dropped the escape) are removed after a while.
+ */
+const graphicsFiles = (() => {
+  const dir = existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
+  const made = new Map<string, number>();
+  let n = 0;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const sweep = () => {
+    const now = Date.now();
+    for (const [path, at] of made) {
+      if (now - at > 10_000) rmSync(path, { force: true });
+      if (now - at > 10_000 || !existsSync(path)) made.delete(path);
+    }
+  };
+  return {
+    write(data: Uint8Array): string {
+      const path = join(dir, `termium-tty-graphics-protocol-${process.pid}-${++n}`);
+      writeFileSync(path, data, { mode: 0o600 });
+      made.set(path, Date.now());
+      if (!timer) {
+        timer = setInterval(sweep, 2000);
+        timer.unref?.();
+      }
+      return path;
+    },
+    clear(): void {
+      for (const path of made.keys()) rmSync(path, { force: true });
+      made.clear();
+    },
+  };
+})();
+process.on("exit", () => graphicsFiles.clear());
+
 export async function runClient(o: ClientOptions): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail("needs an interactive terminal");
   let paths: ReturnType<typeof sessionPaths>;
@@ -115,6 +153,11 @@ export async function runClient(o: ClientOptions): Promise<void> {
   };
   let onCapsDone: (() => void) | null = null;
   let onGraphics: (() => void) | null = null;
+  /** The tmux flow-control query being waited for (see pump). */
+  let flowWait: { id: number; done: () => void } | null = null;
+  let onFileProbe: ((ok: boolean) => void) | null = null;
+  /** Pictures go to the terminal as temporary files (tmux, terminal on this machine). */
+  let fileTransport = false;
   let onSizes: (() => void) | null = null;
   let conn: Socket | null = null;
   const pending: InputEvent[] = [];
@@ -128,6 +171,10 @@ export async function runClient(o: ClientOptions): Promise<void> {
         if (ev.id === 31) {
           caps.graphics = ev.message === "OK";
           onGraphics?.();
+        } else if (ev.id === 32) {
+          onFileProbe?.(ev.message === "OK");
+        } else if (flowWait && ev.id === flowWait.id) {
+          flowWait.done();
         }
         return;
       case "kittyKeyboard":
@@ -164,6 +211,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     } catch {}
     if (message) (code === 0 ? console.log : console.error)(message);
     conn?.destroy();
+    graphicsFiles.clear();
     process.exit(code);
   };
 
@@ -205,6 +253,15 @@ export async function runClient(o: ClientOptions): Promise<void> {
   // round trip through the outer terminal, so its reply can come last.
   if (inTmux && !caps.graphics) await Promise.race([graphicsReply, Bun.sleep(1500)]);
   onGraphics = null;
+  if (inTmux && placeholders && caps.graphics && process.env.TERMIUM_TMUX_FILES !== "0") {
+    // Can the terminal read our files? (Not when it runs on another machine.)
+    const path = graphicsFiles.write(new Uint8Array([0, 0, 0]));
+    const answer = new Promise<boolean>((r) => (onFileProbe = r));
+    out(`\x1b_Gi=32,s=1,v=1,a=q,t=t,f=24;${Buffer.from(path).toString("base64")}\x1b\\`);
+    fileTransport = await Promise.race([answer, Bun.sleep(1000).then(() => false)]);
+    onFileProbe = null;
+    rmSync(path, { force: true });
+  }
   // From here on ESC _ is a legacy Alt+_ keypress, not a reply we're waiting for.
   parser.expectApc = false;
 
@@ -285,6 +342,116 @@ export async function runClient(o: ClientOptions): Promise<void> {
 
   conn = sock;
   let quitting = false;
+
+  // Pictures through tmux. tmux discards output, passthrough included, once
+  // more than about cols x rows x 8 bytes wait for the outer terminal; it
+  // redraws text from its own copy afterwards, but a picture cut short is
+  // lost. So when the terminal can read our files (checked at startup),
+  // each picture goes as a temporary file and the escape that names it is
+  // tiny. Otherwise the data is paced: before each picture a graphics query
+  // makes a round trip through tmux (its answer means everything before it
+  // was delivered), and within a picture slices are spaced out in time. A
+  // query must never land between the chunks of one picture: the terminal
+  // would take it as the end of that transfer.
+  const outQueue: { data: string; done?: () => void }[] = [];
+  let pumping = false;
+  let sent = 0;
+  let flowSeq = 0;
+  /** Round trips work (they don't while tmux has the pane hidden). */
+  let flowOk = true;
+  const budget = () => Math.max(8192, (process.stdout.columns || 80) * (process.stdout.rows || 24) * 2);
+  const roundTrip = async (timeoutMs: number): Promise<boolean> => {
+    const id = 1_000_000 + (flowSeq = (flowSeq + 1) % 1_000_000);
+    let answered = false;
+    const reply = new Promise<void>((r) => (flowWait = { id, done: () => ((answered = true), r()) }));
+    parser.expectApc = true; // the answer is an APC, not an Alt+_ keypress
+    out(`\x1b_Gi=${id},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\`);
+    await Promise.race([reply, Bun.sleep(timeoutMs)]);
+    if (flowWait?.id === id) flowWait = null;
+    parser.expectApc = false;
+    return answered;
+  };
+  const pump = async () => {
+    if (pumping) return;
+    pumping = true;
+    while (outQueue.length) {
+      const { data, done } = outQueue.shift()!;
+      let acc = "";
+      let last = 0;
+      const pieces: string[] = [];
+      for (const m of data.matchAll(/\x1b_G[^\x1b]*\x1b\\/g)) {
+        if (m.index! > last) pieces.push(data.slice(last, m.index));
+        pieces.push(m[0]);
+        last = m.index! + m[0].length;
+      }
+      if (last < data.length) pieces.push(data.slice(last));
+      for (const piece of pieces) {
+        if (flowOk && sent > 0 && sent + piece.length > budget()) {
+          out(acc);
+          acc = "";
+          sent = 0;
+          if (!/^\x1b_Gm=/.test(piece)) {
+            // Between pictures: wait until tmux has passed everything on.
+            if (!(await roundTrip(300))) {
+              // No answer: tmux isn't passing anything on (pane hidden, or
+              // redrawing). Stop waiting; once an answer comes back, ask
+              // the session to send its pictures again.
+              flowOk = false;
+              void (async () => {
+                while (!flowOk && !leaving) {
+                  if (await roundTrip(1000)) {
+                    flowOk = true;
+                    send({ t: "repaint" });
+                  }
+                }
+              })();
+            }
+          } else {
+            await Bun.sleep(4); // within a picture: just slow down
+          }
+        }
+        acc += piece;
+        sent += piece.length;
+      }
+      out(acc, done);
+    }
+    pumping = false;
+  };
+
+  /** Rewrites each picture's chunks as one escape naming a temporary file with the PNG. */
+  let loading: { ctrl: string; parts: string[] } | null = null;
+  const viaFiles = (data: string): string => {
+    let res = "";
+    let last = 0;
+    for (const m of data.matchAll(/\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\/g)) {
+      res += data.slice(last, m.index);
+      last = m.index! + m[0].length;
+      const ctrl = m[1]!;
+      const payload = m[2] ?? "";
+      if (/(^|,)a=T(,|$)/.test(ctrl)) {
+        loading = { ctrl, parts: [payload] };
+      } else if (loading && /^m=[01]$/.test(ctrl)) {
+        loading.parts.push(payload);
+      } else {
+        res += m[0];
+        continue;
+      }
+      if (/(^|,)m=1(,|$)/.test(ctrl)) continue; // more to come
+      const { ctrl: first, parts } = loading;
+      loading = null;
+      const path = graphicsFiles.write(Buffer.from(parts.join(""), "base64"));
+      res += `\x1b_G${first.replace(/(^|,)m=\d/, "")},t=t;${Buffer.from(path).toString("base64")}\x1b\\`;
+    }
+    return res + data.slice(last);
+  };
+
+  /** Terminal output from the session. */
+  const emit = (data: string, done?: () => void) => {
+    if (!inTmux || !placeholders) return out(data, done);
+    if (fileTransport) return out(viaFiles(data), done);
+    outQueue.push({ data, done });
+    void pump();
+  };
   let said = false;
   const reader = new FrameReader((f) => {
     if (f.type === MSG_OUTPUT) {
@@ -293,7 +460,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
         return;
       }
       const seq = f.seq;
-      out(f.data, seq ? () => send({ t: "ack", seq }) : undefined);
+      emit(f.data, seq ? () => send({ t: "ack", seq }) : undefined);
       return;
     }
     const m = f.msg;
@@ -346,6 +513,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     ...g,
     pixelMouse: caps.pixelMouse,
     placeholders,
+    via: !inTmux ? "direct" : fileTransport ? "tmux-files" : "tmux-paced",
     // A session we just started opens the URL itself.
     url: child ? null : o.url,
   } satisfies Hello);

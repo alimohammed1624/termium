@@ -1,0 +1,14 @@
+<!doctype html>
+<title>noise</title>
+<style>html, body { margin: 0; overflow: hidden; } canvas { display: block; }</style>
+<canvas id="c"></canvas>
+<script>
+// Random pixels: a PNG of this barely compresses, so every frame is large
+// (what makes tmux drop output it can't pass on fast enough).
+const c = document.getElementById("c");
+c.width = innerWidth; c.height = innerHeight;
+const ctx = c.getContext("2d");
+const img = ctx.createImageData(c.width, c.height);
+for (let i = 0; i < img.data.length; i++) img.data[i] = (i % 4 === 3) ? 255 : Math.random() * 256;
+ctx.putImageData(img, 0, 0);
+</script>

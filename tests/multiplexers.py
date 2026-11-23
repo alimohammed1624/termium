@@ -117,6 +117,9 @@ try:
     ok, px = shows_page(t, want, f"{OUT}/tmux-split.png")
     check("tmux: the placeholders show the page's picture", ok, px)
     check("tmux: no image is placed at a cell (only virtual placements)", not t.placements, t.placements)
+    import re as _re
+    check("tmux: pictures go as temporary files (the terminal is on this machine)",
+          _re.search(rb"\x1b_Ga=T[^;\x1b]*,t=t;", bytes(t.raw)) is not None and not _re.search(rb"\x1b_Gm=1;", bytes(t.raw)))
 
     # keyboard through tmux: address bar, then a page with state
     t.write("\x0c"); time.sleep(0.4)  # Ctrl+L
@@ -148,8 +151,23 @@ try:
     check("tmux: the viewport follows the zoomed pane", t.wait_for(zoomed, 10, 0.5), state(prof) and (state(prof)["w"], state(prof)["h"]))
     t.shot(f"{OUT}/tmux-zoomed.png")
 
+    # large pictures (random pixels barely compress), both ways of sending them
+    tmux("resize-pane", "-Z", "-t", "main.1")
+    t.write("\x0c"); time.sleep(0.4); t.write(f"{BASE}/noise.html\r")
+    big = lambda: any(len(t.images.get(i, b"")) > 1_000_000 for i in t.virtual)
+    check("tmux: a large picture arrives whole as a file", t.wait_for(big, 25), {i: len(t.images.get(i, b"")) for i in t.virtual})
     r = cli("kill")
     check("tmux: kill ends the session", r.returncode == 0 and server_pid() is None, r.stderr)
+    tmux("send-keys", "-t", "main.1", "clear", "Enter")
+    time.sleep(0.5)
+    before = len(t.raw)
+    tmux("send-keys", "-t", "main.1", f"TERMIUM_TMUX_FILES=0 bun src/main.ts --profile {prof} {BASE}/noise.html", "Enter")
+    big_now = lambda: any(len(t.images.get(i, b"")) > 1_000_000 for i in t.virtual) and b"\x1b_Gm=1;" in bytes(t.raw[before:])
+    check("tmux: without files, a large picture arrives whole in paced chunks", t.wait_for(big_now, 40),
+          {i: len(t.images.get(i, b"")) for i in t.virtual})
+    check("tmux: no graphics command ever lands inside a chunked transfer", t.violations == 0, t.violations)
+    r = cli("kill")
+    check("tmux: kill ends the second session", r.returncode == 0 and server_pid() is None, r.stderr)
     tmux("kill-server")
     t.close()
 
