@@ -120,11 +120,13 @@ try:
     code = exit_code(a)
     check("Ctrl+B d detaches: the client exits 0", code == 0, code)
     check("detaching restores the terminal and says so", restored(a) and "[detached (from session default)]" in output(a), output(a)[-200:])
+    check("only its own pictures are ever deleted (no delete-all)", b"a=d,d=A" not in bytes(a.raw))
     time.sleep(1)
     check("the server survives the detach", server_pid() == spid)
     check("the browser survives the detach", helium_on(prof) > 0)
     check("page state is kept while detached", (state() or {}).get("inp") == "kept text", state() and state().get("inp"))
-    r = cli("ls")
+    t0 = time.time(); r = cli("ls"); took = time.time() - t0
+    check("ls returns as soon as the session answered", took < 2, round(took, 2))
     check("ls shows the detached session", r.returncode == 0 and "default" in r.stdout and "detached" in r.stdout and str(spid) in r.stdout,
           (r.returncode, r.stdout, r.stderr))
 
@@ -132,7 +134,8 @@ try:
     b = termium("attach", cols=100, rows=30, cell_w=12, cell_h=24)
     check("re-attach draws the page", b.wait_frames(1, 15))
     b.wait_idle(0.8, 10); time.sleep(1.5)
-    check("re-attach starts from a clean screen", b"\x1b_Ga=d,d=A" in bytes(b.raw) and b"\x1b[2J" in bytes(b.raw))
+    check("re-attach starts from a clean screen (without deleting anyone else's pictures)",
+          b"\x1b[2J" in bytes(b.raw) and b"\x1b_Ga=d,d=A" not in bytes(b.raw))
     check("re-attach redraws the chrome", "termium test page" in b.line(1) and "SPACES" in b.text(), b.line(1))
     pl, size = newest_image(b)
     check("re-attach places the page in the new pane", pl == (3, 23, 78, 28), pl)
@@ -207,13 +210,18 @@ try:
     check("launch options can't change a running session", exit_code(g, 15) == 2 and "already running" in output(g), output(g)[-300:])
     h = termium("attach", "nope")
     check("attaching to a missing session is an error", exit_code(h, 15) == 1 and 'no session "nope"' in output(h), output(h)[-300:])
-    u = termium(f"{BASE}/page.html?second=1")
+    u = termium(f"127.0.0.1:{PORT}/page.html?second=1")  # a bare host, as typed
     check("a URL given to a running session opens in a new tab", u.wait_for(lambda: "2 pages" in cli("ls").stdout, 20), (u.line(1), cli("ls").stdout))
+    def second_loaded():
+        r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), prof, "document.title"], capture_output=True, text=True, timeout=20)
+        return any("second=1" in p["url"] and p["value"] == "termium test page" for p in json.loads(r.stdout or "[]"))
+    check("...and a bare host:port/path loads (as on a fresh start)", u.wait_for(second_loaded, 20, 0.5))
     check("...and took over the earlier client", exit_code(f) == 0)
 
     # --- kill
-    r = cli("kill")
+    t0 = time.time(); r = cli("kill"); took = time.time() - t0
     check("kill ends the session", r.returncode == 0, (r.returncode, r.stderr))
+    check("kill returns once the session has ended (no idle wait)", took < 10, round(took, 2))
     code = exit_code(u)
     check("the attached client exits when its session is killed", code == 0 and restored(u), code)
     check("kill stops the browser", helium_on(prof) == 0)
@@ -234,6 +242,78 @@ try:
     two.close()
     check("Ctrl+Q ends the session", server_pid("two") is None and not os.path.exists(os.path.join(sockdir, "two.sock")), os.listdir(sockdir))
 
+    # --- several termiums starting the same session at once: one server, the others attach to it
+    import glob
+    leftovers = lambda: set(glob.glob("/tmp/tmb-*") + glob.glob("/tmp/termium-incognito-*"))
+    before_tmp = leftovers()
+    RACE = f"race{os.getpid()}"  # unique: the pgrep below can only match this run's server
+    racers = [termium("-s", RACE, "--incognito") for _ in range(3)]
+    time.sleep(12)
+    servers = subprocess.run(["pgrep", "-f", "--", f"__server --session {RACE} "], capture_output=True, text=True).stdout.split()
+    check("racing starts: exactly one server", len(servers) == 1, servers)
+    check("racing starts: its socket, pid file and lock are in place", all(os.path.exists(os.path.join(sockdir, f"{RACE}.{x}")) for x in ("sock", "pid", "lock"))
+          and server_pid(RACE) == (int(servers[0]) if servers else None))
+    check("racing starts: ls lists it", RACE in cli("ls").stdout)
+    errs = [output(x)[-300:] for x in racers if "termium:" in output(x)]
+    check("racing starts: no client failed", not errs, errs)
+    live = [x for x in racers if exit_code(x, 0.5) is None]
+    check("racing starts: one client is attached and draws, the others were taken over", len(live) == 1 and live[0].frames > 0,
+          [(exit_code(x, 0.1), x.frames) for x in racers])
+    check("kill race", cli("kill", RACE).returncode == 0 and server_pid(RACE) is None)
+    time.sleep(1)
+    check("racing starts: no temp dirs left behind", not (leftovers() - before_tmp), leftovers() - before_tmp)
+
+    # --- a hung (stopped) server never traps a terminal, and ls/kill say so
+    hz = termium("-s", "hung", "--incognito")
+    check("hung: session starts", at_address_bar(hz))
+    hpid = server_pid("hung")
+    os.kill(hpid, signal.SIGSTOP)
+    try:
+        t0 = time.time(); r = cli("ls"); took = time.time() - t0
+        check("hung: ls reports it as not responding", "hung" in r.stdout and "not responding" in r.stdout and took < 6, (r.stdout, r.stderr, took))
+        hz.key("ctrl+b"); hz.key("d")
+        code = exit_code(hz, 8)
+        check("hung: Ctrl+B d still lets the terminal go", code == 1 and restored(hz) and "isn't responding" in output(hz), (code, output(hz)[-200:]))
+        h2 = termium("attach", "hung")
+        code = exit_code(h2, 12)
+        check("hung: attach gives up with a clear error", code == 1 and restored(h2) and "isn't responding" in output(h2), (code, output(h2)[-200:]))
+        t0 = time.time(); r = cli("kill", "hung"); took = time.time() - t0
+        check("hung: kill ends it anyway", r.returncode == 0 and "wasn't responding" in r.stderr and took < 10, (r.returncode, r.stderr, took))
+        time.sleep(0.5)
+        check("hung: its server is gone and its files removed", server_pid("hung") is None
+              and not any(os.path.exists(os.path.join(sockdir, f"hung.{x}")) for x in ("sock", "pid", "lock")), os.listdir(sockdir))
+    finally:
+        try:
+            os.kill(hpid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    # --- a message the session can't handle is logged, not a reason to drop the terminal
+    hv = termium("-s", "handler", "--incognito")
+    check("handler: session starts", at_address_bar(hv))
+    import struct as _struct
+    def frame(msg):
+        b = json.dumps(msg).encode()
+        return bytes([1]) + _struct.pack(">I", len(b)) + b
+    so = socket.socket(socket.AF_UNIX); so.connect(os.path.join(sockdir, "handler.sock")); so.settimeout(5)
+    so.sendall(frame({"t": "hello", "v": 1, "kind": "attach", "cols": 100, "rows": 30, "cellW": 10, "cellH": 20}))
+    so.sendall(frame({"t": "input", "ev": {"type": "key"}}))  # no mods, no key: the handler throws
+    so.sendall(frame({"t": "input", "ev": {"type": "mouse"}}))
+    so.sendall(frame({"t": "ping"}))
+    got = b""
+    end = time.time() + 5
+    while b'"pong"' not in got and time.time() < end:
+        try:
+            chunk = so.recv(1 << 20)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        got += chunk
+    check("handler: a bad input event doesn't drop the client", b'"pong"' in got)
+    so.close()
+    check("kill handler", cli("kill", "handler").returncode == 0)
+
     # --- a stale socket from a server that never cleaned up
     stale = os.path.join(sockdir, "stale.sock")
     so = socket.socket(socket.AF_UNIX); so.bind(stale); so.close()
@@ -249,7 +329,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("default", "one", "two", "stale"):
+    for name in ("default", "one", "two", "stale", "hung", "handler", f"race{os.getpid()}"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)

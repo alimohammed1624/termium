@@ -96,6 +96,8 @@ class Term:
         # (a real terminal takes them as the end of that picture).
         self.violations = 0
         self._loading = False
+        # Temporary files pictures came in: (name, permission bits, symlink?)
+        self.graphics_files: list[tuple[str, int, bool]] = []
         self.frames = 0
         self.last_output = time.time()
         self.lock = threading.Lock()
@@ -288,6 +290,8 @@ class Term:
             if kv.get("t") in ("t", "f"):
                 # The picture is in a file (named by the payload); a temporary one is removed once read.
                 path = base64.b64decode(payload).decode()
+                st = os.lstat(path)
+                self.graphics_files.append((os.path.basename(path), st.st_mode & 0o777, os.path.islink(path)))
                 with open(path, "rb") as f:
                     payload = base64.b64encode(f.read())
                 if kv.get("t") == "t":

@@ -105,11 +105,21 @@ try:
 
     tmux("set", "-g", "allow-passthrough", "on")
     tmux("split-window", "-h", "-t", "main")
-    tmux("select-pane", "-t", "main.0")
+    tmux("select-pane", "-t", "main.1")  # termium starts in pane 0 while pane 1 is the active one
     panes = tmux("list-panes", "-t", "main", "-F", "#{pane_left} #{pane_width} #{pane_height}").stdout.split("\n")
     (l0, w0, h0), (l1, w1, h1) = [tuple(map(int, p.split())) for p in panes[:2]]
     tmux("send-keys", "-t", "main.0", f"bun src/main.ts --profile {prof} '{PAGE}'", "Enter")
-    check("tmux: frames arrive through passthrough", t.wait_frames(1, 40))
+    check("tmux: starting in a pane that isn't the active one works (no hint)", t.wait_frames(1, 40)
+          and "allow-passthrough" not in tmux("capture-pane", "-p", "-t", "main.0").stdout,
+          tmux("capture-pane", "-p", "-t", "main.0").stdout[-300:])
+    time.sleep(2)
+    check("tmux: ...without typing terminal answers into the active pane's shell",
+          "Gi=" not in tmux("capture-pane", "-p", "-t", "main.1").stdout, tmux("capture-pane", "-p", "-t", "main.1").stdout[-300:])
+    mark = len(t.raw)
+    tmux("select-pane", "-t", "main.0")
+    import re as _re
+    check("tmux: once its pane is active, pictures switch to temporary files",
+          t.wait_for(lambda: _re.search(rb"\x1b_Ga=T[^;\x1b]*,t=t;", bytes(t.raw[mark:])) is not None, 15))
     want = (3, l0 + 1 + 22, w0 - 22, h0 - 2)
     check("tmux: the page is drawn through placeholders in its pane", t.wait_for(lambda: want in t.placeholder_images().values(), 15),
           (t.placeholder_images(), want))
@@ -117,9 +127,9 @@ try:
     ok, px = shows_page(t, want, f"{OUT}/tmux-split.png")
     check("tmux: the placeholders show the page's picture", ok, px)
     check("tmux: no image is placed at a cell (only virtual placements)", not t.placements, t.placements)
-    import re as _re
-    check("tmux: pictures go as temporary files (the terminal is on this machine)",
-          _re.search(rb"\x1b_Ga=T[^;\x1b]*,t=t;", bytes(t.raw)) is not None and not _re.search(rb"\x1b_Gm=1;", bytes(t.raw)))
+    check("tmux: temporary files have unguessable names, mode 0600, and are no symlinks",
+          t.graphics_files and all(_re.fullmatch(r"termium-tty-graphics-protocol-[0-9a-f]{32}", n) and m == 0o600 and not l
+                                   for n, m, l in t.graphics_files), t.graphics_files[:3])
 
     # keyboard through tmux: address bar, then a page with state
     t.write("\x0c"); time.sleep(0.4)  # Ctrl+L
@@ -151,11 +161,43 @@ try:
     check("tmux: the viewport follows the zoomed pane", t.wait_for(zoomed, 10, 0.5), state(prof) and (state(prof)["w"], state(prof)["h"]))
     t.shot(f"{OUT}/tmux-zoomed.png")
 
-    # large pictures (random pixels barely compress), both ways of sending them
-    tmux("resize-pane", "-Z", "-t", "main.1")
+    # a pane wider than placeholders can address (297 cells) is cut into tiles
+    t.resize(360, 45)
+    tiles = lambda: sorted(r for r in t.placeholder_images().values() if r[0] == 3)
+    want_tiles = [(3, 23, 169, 43), (3, 192, 169, 43)]
+    check("tmux: a 338-cell-wide page is drawn as two tiles", t.wait_for(lambda: tiles() == want_tiles, 20), (tiles(), want_tiles))
+    time.sleep(1)
+    from PIL import Image as _Image
+    import io as _io
+    def tile_sizes():
+        shown = [i for i, r in t.placeholder_images().items() if r[0] == 3]  # (takes the lock itself)
+        with t.lock:
+            return sorted(_Image.open(_io.BytesIO(t.images[i])).size for i in shown if i in t.images)
+    check("tmux: ...each tile holds its half of the page at full resolution", tile_sizes() == [(1690, 860), (1690, 860)], tile_sizes())
+    t.shot(f"{OUT}/tmux-wide.png")
+    t.resize(160, 45)
+    check("tmux: back to one image when it fits again", t.wait_for(lambda: tiles() == [(3, 23, 138, 43)], 20), tiles())
+
+    # large pictures (random pixels barely compress), both ways of sending them (pane still zoomed)
     t.write("\x0c"); time.sleep(0.4); t.write(f"{BASE}/noise.html\r")
     big = lambda: any(len(t.images.get(i, b"")) > 1_000_000 for i in t.virtual)
     check("tmux: a large picture arrives whole as a file", t.wait_for(big, 25), {i: len(t.images.get(i, b"")) for i in t.virtual})
+    # a second session in the other pane: its attach, detach and quit leave this picture alone
+    if tmux("display-message", "-p", "-t", "main", "#{window_zoomed_flag}").stdout.strip() == "1":
+        tmux("resize-pane", "-Z", "-t", "main.1")  # unzoom: both panes visible (-Z toggles)
+    time.sleep(1.5)
+    mine = lambda: [i for i, r in t.placeholder_images().items() if r[1] > l1]
+    check("tmux: (precondition) this session's picture is in pane 1", t.wait_for(lambda: len(mine()) == 1, 15), t.placeholder_images())
+    a_id = mine()[0] if mine() else None
+    tmux("send-keys", "-t", "main.0", "clear", "Enter")
+    tmux("send-keys", "-t", "main.0", f"bun src/main.ts -s other --incognito '{PAGE}'", "Enter")
+    t.wait_for(lambda: len(t.placeholder_images()) >= 2, 30)
+    tmux("send-keys", "-t", "main.0", "C-b", "d"); time.sleep(2)
+    tmux("send-keys", "-t", "main.0", "bun src/main.ts attach other", "Enter"); time.sleep(5)
+    tmux("send-keys", "-t", "main.0", "C-q"); time.sleep(4)
+    check("tmux: another session's attach, detach and quit leave this pane's picture",
+          a_id in t.images and a_id in t.virtual and a_id in t.placeholder_images(), (a_id, list(t.virtual)))
+    check("tmux: the other session ended", server_pid("other") is None)
     r = cli("kill")
     check("tmux: kill ends the session", r.returncode == 0 and server_pid() is None, r.stderr)
     tmux("send-keys", "-t", "main.1", "clear", "Enter")
@@ -177,8 +219,22 @@ try:
     else:
         hprof = os.path.join(tmp, "herdr-profile")
         h = Term([HERDR, "--session", HERDR_SESSION], cols=160, rows=45, env=ENV)
-        time.sleep(4)
-        run_in(h, f"cd {ROOT} && bun src/main.ts --profile {hprof} '{PAGE}'")
+        hc = lambda *a: subprocess.run([HERDR, "--session", HERDR_SESSION, *a], capture_output=True, text=True)
+        def shell_ready(pane_id, timeout=30):
+            """The pane's shell has drawn its prompt and gone quiet (typing earlier can be mangled)."""
+            last, since, end = None, time.time(), time.time() + timeout
+            while time.time() < end:
+                text = hc("pane", "read", pane_id, "--source", "visible").stdout.strip()
+                if text != last:
+                    last, since = text, time.time()
+                elif text and time.time() - since > 1.5:
+                    return True
+                time.sleep(0.3)
+            return False
+        h.wait_for(lambda: hc("pane", "list").returncode == 0 and '"panes"' in hc("pane", "list").stdout, 20)
+        first = next((p["pane_id"] for p in json.loads(hc("pane", "list").stdout).get("result", {}).get("panes", []) if p.get("focused")), None)
+        check("herdr: its shell is ready", first is not None and shell_ready(first))
+        hc("pane", "run", first, f"cd {ROOT} && bun src/main.ts --profile {hprof} '{PAGE}'")
         check("herdr: frames reach the outer terminal", h.wait_frames(1, 40))
         time.sleep(1.5)
         pl = newest_placement(h)
@@ -188,13 +244,10 @@ try:
         h.write("\x02"); time.sleep(0.3); h.write("\x02"); time.sleep(0.3); h.write("d")
         check("herdr: Ctrl+B Ctrl+B d detaches termium", h.wait_text("[detached (from session default)]", 10), h.text()[:600])
         check("herdr: the session survives", server_pid() == spid and "detached" in cli("ls").stdout)
-        hc = lambda *a: subprocess.run([HERDR, "--session", HERDR_SESSION, *a], capture_output=True, text=True)
         import re as _re
-        panes = json.loads(hc("pane", "list").stdout or "{}").get("result", {}).get("panes", [])
-        first = next((p["pane_id"] for p in panes if p.get("focused")), panes[0]["pane_id"] if panes else "")
         r = hc("pane", "split", first, "--direction", "down", "--cwd", ROOT)
         new = [x for x in _re.findall(r'"pane_id":"([^"]+)"', r.stdout) if x != first]
-        time.sleep(2)
+        check("herdr: the new pane's shell is ready", bool(new) and shell_ready(new[0]))
         before = h.frames
         hc("pane", "run", new[0] if new else first, "bun src/main.ts attach")
         check("herdr: re-attach from a new, smaller pane draws", h.wait_for(lambda: h.frames > before, 25), r.stdout[-300:] + r.stderr[-300:])
@@ -217,10 +270,11 @@ finally:
                 x.close()
             except Exception:
                 pass
-    pid = server_pid()
-    if pid:
-        os.kill(pid, signal.SIGTERM)
-        time.sleep(3)
+    for name in ("default", "other"):
+        pid = server_pid(name)
+        if pid:
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(3)
     srv.terminate()
     shutil.rmtree(tmp, ignore_errors=True)
 
