@@ -1,3 +1,4 @@
+import { frameFits } from "../src/app";
 import { expect, test } from "bun:test";
 import { deflateSync } from "node:zlib";
 import { decodePng, encodeRegion } from "../src/png";
@@ -57,4 +58,22 @@ for (const channels of [3, 4] as const) {
 
 test("unsupported PNGs are refused, not misread", () => {
   expect(decodePng(Buffer.from("not a png"))).toBeNull();
+});
+
+test("a screencast frame must have its viewport's shape", () => {
+  const png = (w: number, h: number) => {
+    const b = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+    b.writeUInt32BE(13, 8);
+    b.write("IHDR", 12, "latin1");
+    b.writeUInt32BE(w, 16);
+    b.writeUInt32BE(h, 20);
+    return b.toString("base64");
+  };
+  expect(frameFits(png(780, 560), { w: 780, h: 560 })).toBe(true);
+  expect(frameFits(png(390, 280), { w: 780, h: 560 })).toBe(true); // scaled down to fit the screencast
+  expect(frameFits(png(780, 561), { w: 780, h: 560 })).toBe(true); // rounding
+  // The old viewport's picture, scaled to the new screencast (seen after a re-attach at a smaller size).
+  expect(frameFits(png(780, 486), { w: 780, h: 560 })).toBe(false);
+  expect(frameFits("not a png", { w: 780, h: 560 })).toBe(true);
 });

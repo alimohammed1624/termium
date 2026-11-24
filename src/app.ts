@@ -1625,10 +1625,12 @@ export class App {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page) return;
     const m = p.metadata;
-    if (page.css && m && Date.now() - (page.viewportAt ?? 0) < 2000 &&
-        (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1)) {
+    if (page.css && ((m && Date.now() - (page.viewportAt ?? 0) < 2000 &&
+        (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1)) ||
+        !frameFits(p.data, page.css))) {
       // A frame of the viewport as it was (the first after a resize or a
-      // restarted screencast can be): the right one follows.
+      // restarted screencast can be, sometimes with metadata that already
+      // gives the new size but a picture of the old shape): the right one follows.
       this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
       return;
     }
@@ -3423,6 +3425,20 @@ export function freeName(dir: string, name: string): string {
       if (e?.code !== "EEXIST") throw e;
     }
   }
+}
+
+/**
+ * Whether a screencast frame (base64 PNG) has the shape of a viewport of
+ * `css` size (frames are that viewport scaled down to fit the screencast;
+ * within a couple of pixels of rounding). Not a PNG: no opinion.
+ */
+export function frameFits(base64Png: string, css: { w: number; h: number }): boolean {
+  const head = Buffer.from(base64Png.slice(0, 44), "base64");
+  if (head.length < 24 || head.readUInt32BE(12) !== 0x49484452) return true; // "IHDR"
+  const w = head.readUInt32BE(16);
+  const h = head.readUInt32BE(20);
+  if (!w || !h || !css.w || !css.h) return true;
+  return Math.abs(h - (w * css.h) / css.w) <= 2 && Math.abs(w - (h * css.w) / css.h) <= 2;
 }
 
 function sameSize<T extends { w: number; h: number; dsf?: number }>(a: T | null, b: T | null): boolean {
