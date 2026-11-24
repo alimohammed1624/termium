@@ -12,7 +12,7 @@ stayed attached, exit statuses, the endpoint being on loopback only,
 
 Usage: python3 tests/agent.py
 """
-import json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
+import json, os, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -313,6 +313,40 @@ try:
           r.returncode == 1 and page_value("[document.getElementById('jumpnow').value, document.getElementById('city').value]") == ["", ""],
           (r.returncode, r.stderr, page_value("[document.getElementById('jumpnow').value, document.getElementById('city').value]")))
 
+    # --- type succeeds only with exactly the text asked for; --submit only the target's own form, only if all's well
+    snap = ctl("snapshot").stdout
+    short_id, mover_id, alerter_id = ref(snap, "textbox", "Short field"), ref(snap, "textbox", "Mover field"), ref(snap, "button", "Alert me")
+    r = ctl("type", short_id, "London", "--submit")
+    check("type into a maxlength=4 field: exit 1 saying it was cut, not submitted",
+          r.returncode == 1 and "cut it to 4 of 6" in r.stderr and page_value("window.f2sub === undefined") is True, (r.returncode, r.stderr))
+    ctl("type", short_id, "same")
+    r = ctl("type", short_id, "same")
+    check("type the value a field already holds: success", r.returncode == 0, (r.returncode, r.stderr))
+    r = ctl("type", mover_id, "x", "--submit")
+    check("--submit after the page moved focus to another form: not submitted (either form), exit 1",
+          r.returncode == 1 and "moved focus" in r.stderr and page_value("[window.f3sub, window.f4sub]") == [None, None], (r.returncode, r.stderr, page_value("[window.f3sub, window.f4sub]")))
+    ctl("type", short_id, "ok")
+    r = ctl("type", short_id, "ok", "--submit")
+    check("--submit with the text right and focus kept: its own form is submitted", r.returncode == 0 and page_value("window.f2sub") == "ok", (r.returncode, r.stderr))
+    # A click that opens an alert: back at once with the dialog; the queue isn't held.
+    t0 = time.time()
+    r = ctl_json("click", alerter_id, "--timeout", "5")
+    took = time.time() - t0
+    r2 = ctl("open", f"{BASE}/page.html?after-alert=1", "--new-tab", "--background", "--timeout", "10")
+    check(f"a click that opens alert() returns at once reporting it ({took:.1f}s), and the next command runs",
+          took < 3 and (r.get("dialog") or {}).get("message") == "clicked" and r2.returncode == 0, (took, r, r2.returncode, r2.stderr))
+    ctl("dialog", "accept")
+    for t in ctl_json("tabs"):
+        if "after-alert" in t["url"]:
+            ctl("close", str(t["id"]), "--force")
+    # scroll waits while the person is busy (help open here) on their tab.
+    ctl("eval", "scrollTo(0, 0)")
+    h.key("ctrl+b"); h.key("question"); time.sleep(0.5)
+    r = ctl("scroll", "down", "260", "--timeout", "1")
+    check("scroll while the person reads help on that tab: waits, then exit 4, not scrolled",
+          r.returncode == 4 and page_value("scrollY") == 0, (r.returncode, r.stderr, page_value("scrollY")))
+    h.key("escape"); time.sleep(1.6)
+
     # --- a queued command whose time runs out is answered at once, and never runs
     hang = socket.socket(); hang.bind(("127.0.0.1", 0)); hang.listen(8)  # accepts nothing: a page that never loads
     HANG = f"http://127.0.0.1:{hang.getsockname()[1]}/never"
@@ -346,6 +380,45 @@ try:
     check("close --force discards them, still without asking the person", r.returncode == 0 and len(ctl_json("tabs")) == 1
           and "my draft" in h.line(2) and "Leave this page" not in h.text(), (r.returncode, r.stderr, h.line(2)))
     h.key("escape"); time.sleep(1.6)
+
+    # --- a tab another DevTools client opens while the person edits the address: behind, draft intact
+    h.key("ctrl+l"); h.key("ctrl+a"); h.type("ext draft"); time.sleep(0.3)
+    r = ext("create", f"http://127.0.0.1:{port}", f"{BASE}/page.html?extbusy=1")
+    time.sleep(1.5)
+    tabs_now = ctl_json("tabs")
+    check("a tab another client opens while the person is busy: in the background, their draft intact",
+          any("extbusy=1" in t["url"] and not t["active"] for t in tabs_now) and "ext draft" in h.line(2), (h.line(2), [(t["url"][-20:], t["active"]) for t in tabs_now]))
+    h.key("escape"); time.sleep(1.6)
+    for t in ctl_json("tabs"):
+        if "extbusy" in t["url"]:
+            ctl("close", str(t["id"]), "--force")
+
+    # --- a background tab that was shown keeps its size after another client's override on it goes away
+    hid = ctl_json("open", f"{BASE}/page.html?hid=1", "--new-tab", "--background").get("id")
+    ctl("select", str(hid)); time.sleep(1.5); ctl("select", str(first)); time.sleep(1)
+    want = page_value("[innerWidth, innerHeight]")
+    r = ext("viewport", f"http://127.0.0.1:{port}", "hid=1", "500", "400", "1")
+    hid_size = lambda: ctl_json("eval", "[innerWidth, innerHeight]", "--tab", str(hid)).get("value")
+    check("a hidden tab gets its size back once another client lets go of it",
+          json.loads(r.stdout or "[]") == [500, 400] and wait_until(lambda: hid_size() == want, 10), (r.stdout, hid_size(), want))
+    ctl("close", str(hid), "--force")
+
+    # --- screenshots: private files; tall pages whole (in tiles), or said to be cut
+    sp = os.path.join(tmp, "private.png")
+    old_umask = os.umask(0o022)
+    r = ctl("shot", "-o", sp)
+    os.umask(old_umask)
+    check("shot files are readable only by you (0600, whatever the umask)", r.returncode == 0 and stat.S_IMODE(os.stat(sp).st_mode) == 0o600, oct(os.stat(sp).st_mode))
+    tall = ctl_json("open", "data:text/html,<body style='margin:0'><div style='height:18000px;background:linear-gradient(red,blue)'></div>", "--new-tab", "--background")
+    tp = os.path.join(tmp, "tall.png")
+    r = ctl("shot", str(tall.get("id")), "--full", "-o", tp)
+    from PIL import Image as _I
+    check("shot --full of an 18000 px page: all of it (tiled)", r.returncode == 0 and _I.open(tp).size[1] == 18000, (r.returncode, r.stderr, _I.open(tp).size if os.path.exists(tp) else None))
+    ctl("open", "data:text/html,<body style='margin:0'><div style='height:60000px'></div>", "--tab", str(tall.get("id")))
+    r = ctl("shot", str(tall.get("id")), "--full", "-o", tp)
+    check("shot --full of a page over the limit: the top part saved, exit 5, said on stderr",
+          r.returncode == 5 and "captured the top" in r.stderr and 0 < _I.open(tp).size[1] < 60000, (r.returncode, r.stderr))
+    ctl("close", str(tall.get("id")), "--force")
 
     # --- a page that shows a dialog while it loads: open returns at once, and dialog answers it
     t0 = time.time()

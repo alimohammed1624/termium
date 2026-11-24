@@ -13,6 +13,10 @@
 <button id=go type=submit>Greet</button>
 </form>
 <p id=out>nobody yet</p>
+<form id=f2 onsubmit="event.preventDefault(); window.f2sub = document.getElementById('short').value"><input id=short maxlength=4 aria-label="Short field"></form>
+<form id=f3 onsubmit="event.preventDefault(); window.f3sub = 1"><input id=mover aria-label="Mover field" oninput="queueMicrotask(() => document.getElementById('other').focus())"></form>
+<form id=f4 onsubmit="event.preventDefault(); window.f4sub = 1"><input id=other aria-label="Other field"></form>
+<button id=alerter onclick="alert('clicked')">Alert me</button>
 <p id=notes-label>Notes</p><div id=ed contenteditable role=textbox aria-labelledby=notes-label style="min-height:2em;border:1px solid"></div>
 <div id=host></div>
 <script>document.getElementById('host').attachShadow({mode: 'open'}).innerHTML = '<label>Shadow field <input id=sin></label>';</script>
