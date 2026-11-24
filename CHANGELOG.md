@@ -7,6 +7,23 @@ All notable changes to termium are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Agent control: `termium ctl` drives a session from a script or coding
+  agent without a terminal and without attaching (the attached terminal
+  keeps its screen and keyboard and shows every action live): `tabs`,
+  `open`, `select`, `close`, `snapshot` (accessibility tree with stable
+  `TAB:NODE` element ids), `text`, `click`, `type`, `key`, `scroll`,
+  `shot`, `eval`, `wait`, `dialog`; `--json` output, exit status 0/1/2/3/4
+  (done, failed, usage, no session, timeout).
+- `termium start [-s NAME] [URL]` starts a session in the background with
+  no terminal (pages are 1280x800 until a terminal attaches).
+- Every session's browser has a DevTools endpoint on `127.0.0.1` (any free
+  port); `termium devtools [NAME] [--json]` prints it, for Puppeteer,
+  Playwright `connectOverCDP` and chrome-devtools-mcp. Tabs they open or
+  close show in termium; a viewport they hold is shown stretched (with the
+  mouse mapped to match) and termium's comes back when they disconnect.
+  This replaces the tests' `TERMIUM_TEST_DEVTOOLS_PORT`.
+- `termium --skill` prints a SKILL.md that teaches an agent to use all of
+  the above.
 - Update check: when a terminal attaches, the session asks GitHub for
   termium's latest release in the background (never delaying anything;
   silent when offline; one 3 s deadline; stopped on detach) and caches the

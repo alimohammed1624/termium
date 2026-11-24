@@ -19,6 +19,11 @@ not character art, so text is sharp and video, canvas and WebGL work.
   session; detach with `Ctrl+B d` and attach again from any terminal, at
   any size, with every page as you left it.
 - **Works inside tmux and herdr** (see [tmux and herdr](#tmux-and-herdr)).
+- **Agents can drive it while you watch** (see [Agents](#agents)):
+  `termium ctl` gives scripts and coding agents (Claude Code, Codex...)
+  snapshots, clicks, typing and screenshots without a terminal, and every
+  session has a DevTools endpoint for Puppeteer, Playwright and
+  chrome-devtools-mcp. `termium --skill` prints a skill that teaches them.
 - **Spaces, tabs and split panes**, arranged like
   [herdr](https://herdr.dev): spaces (think browser windows) in a sidebar,
   tabs along the top, and any tab split into panes, each a live page.
@@ -123,6 +128,58 @@ dismiss it: Enter, then Esc.)
 tmux and herdr both use `Ctrl+B` as their prefix too: press it twice to
 reach termium (`Ctrl+B Ctrl+B d` detaches termium), or change one of the
 prefixes.
+
+### Agents
+
+An agent (Claude Code, Codex, a script) can drive a session while you
+watch it in your terminal, a tmux or herdr pane say: everything it does
+shows as it happens (and is named in the status line as `agent: ...`),
+and it never takes over your terminal or keyboard.
+
+```sh
+termium start -s agent [url]   # start a session without a terminal (returns once it's up)
+termium attach agent           # watch it (in a pane of your own)
+termium ctl -s agent open https://example.com --new-tab
+termium ctl -s agent snapshot  # accessibility tree, elements with ids like [3:142]
+termium ctl -s agent click 3:142
+termium ctl -s agent type 3:57 "hello" --submit
+termium ctl -s agent wait text "Thanks"
+termium ctl -s agent text      # the page's text; also: shot, eval, key, scroll, tabs...
+termium devtools agent         # http://127.0.0.1:PORT for Puppeteer, Playwright, MCP
+termium --skill                # a SKILL.md that teaches an agent all this
+```
+
+- **`termium ctl`** speaks to the session over its socket (no terminal
+  needed) and acts through the session's own DevTools connection:
+  `tabs`, `open`, `select`, `close`, `snapshot`, `text`, `click`, `type`,
+  `key`, `scroll`, `shot`, `eval`, `wait`, `dialog` (`termium ctl --help`).
+  Tabs are numbered (one per pane); element ids are `TAB:NODE`, stable
+  while the element exists. `--json` for machine-readable output; exit
+  status 0 done, 1 failed, 2 usage, 3 no such session, 4 timed out.
+- **`termium start`** starts a session in the background with no
+  terminal (pages are 1280x800 until a terminal attaches and sizes them
+  to its panes). On a running session it says so and exits 0.
+- **The DevTools endpoint.** Every session's browser listens for DevTools
+  clients on `127.0.0.1` (a free port, new each start; `termium devtools
+  [NAME] [--json]` prints it), besides termium's own private pipe:
+  `npx chrome-devtools-mcp --browser-url=http://127.0.0.1:PORT`,
+  Playwright's `chromium.connectOverCDP(url)`, Puppeteer's
+  `puppeteer.connect({browserURL: url, defaultViewport: null})` (finish
+  with `disconnect()`: `close()` quits the session's browser). Tabs they
+  open show in termium's current space and tabs they close go away. A
+  viewport they set (Puppeteer's default 800x600, `setViewport`) holds
+  while they're connected (termium shows the page stretched to the pane,
+  says so once, and maps the mouse to match) and termium's own comes back
+  when they disconnect.
+- The endpoint has no authentication: while a session runs, any program
+  on this machine that can reach `127.0.0.1` (another user's included) can
+  drive its browser and read its pages and cookies. Use a separate
+  session (`-s NAME`, its own profile) or `--incognito` for anything an
+  agent does if that matters to you.
+- `termium --skill` prints a `SKILL.md` (with `name` and `description`
+  frontmatter) covering all of this for an agent: save it as
+  `~/.claude/skills/termium/SKILL.md` for Claude Code, or point any agent
+  at it.
 
 ### Keys
 
@@ -316,9 +373,10 @@ terminal shows them. While no terminal is attached nothing is drawn and
 the screencasts stop.
 
 The server starts Helium with `--headless=new` and speaks the DevTools
-protocol over a private pipe (`--remote-debugging-pipe`, so no port is open
-for other local programs), auto-attaching to every page, cross-site iframe
-and worker. Each visible pane gets a
+protocol over a private pipe (`--remote-debugging-pipe`), auto-attaching
+to every page, cross-site iframe and worker; a page another DevTools
+client opens on the session's loopback endpoint (`--remote-debugging-port=0`,
+see [Agents](#agents)) is attached the same way and becomes a tab. Each visible pane gets a
 viewport matching its size in device pixels (cell size × cells) and a PNG
 screencast; frames are sent to the terminal as kitty graphics images,
 placed and scaled to the pane's cells, and acknowledged only once the
@@ -456,6 +514,7 @@ page state through DevTools. Needs Helium and Python 3 with `pyte` and
 python3 tests/e2e.py /tmp/termium-e2e    # screenshots land there
 python3 tests/lifecycle.py               # second instances, kill -9 recovery, bad terminals
 python3 tests/sessions.py                # detach, re-attach, takeover, ls/kill, dead servers
+python3 tests/agent.py                   # termium ctl / start / devtools / --skill, another DevTools client
 python3 tests/multiplexers.py /tmp/mux   # inside a private tmux server and herdr session
 python3 tests/update.py                  # update check and self-update, with a fake GitHub
 ```

@@ -9,6 +9,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { killSession, listSessions, runClient, runningSessions } from "./client";
 import { runCtl, runDevtools, startSession } from "./ctl";
+import { SKILL } from "./skill";
 import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
@@ -61,6 +62,7 @@ Options:
                         (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help
   -V, --version         show the version
+  --skill               print a SKILL.md that teaches an agent to use termium
 
 --browser, --profile, --incognito, --scale and --search apply when a session starts.
 Ctrl+B d detaches (the browser keeps running); Ctrl+Q ends the session.
@@ -121,6 +123,9 @@ function parseArgs(argv: string[]): Args {
       case "-V":
       case "--version":
         console.log(`termium ${VERSION}`);
+        process.exit(0);
+      case "--skill":
+        process.stdout.write(SKILL);
         process.exit(0);
       case "-s":
       case "--session":
