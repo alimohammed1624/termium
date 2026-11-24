@@ -240,6 +240,12 @@ try:
     took = time.time() - t0
     check(f"check-update: both sources hanging, one 3 s deadline ({took:.2f}s)", r.returncode == 1 and "no answer within 3 s" in r.stderr and took < 3.8, (took, r.stderr))
     LATEST["tag"] = f"v{NEXT}"
+    before_cache = cache("cli")
+    LATEST["tag"] = "v9.9.9+%2F..%2F.."
+    r = cli(cur_bin, "check-update")
+    check("check-update: a tag that isn't a plain version (+build, an encoded path) is refused, nothing cached",
+          r.returncode == 1 and "no release found" in r.stderr and cache("cli")["latest"] == before_cache["latest"], (r.returncode, r.stdout, r.stderr, cache("cli")))
+    LATEST["tag"] = f"v{NEXT}"
     r = cli(cur_bin, "check-update", TERMIUM_NO_UPDATE_CHECK="1", CI="true")
     check("check-update ignores the opt-outs", r.returncode == 100, (r.returncode, r.stdout))
     n = len(HITS)
@@ -707,6 +713,27 @@ try:
           "skipped" not in sb.line(2) and not update_ui(sb) and (cache("st-sk2") or {}).get("skipped") == f"v{NEXT}", (sb.line(2), cache("st-sk2")))
     stop("sk2")
 
+    # ------------------------------------------------ a restart keeps the session's browser, profile and data dirs, not the restarting shell's
+    helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
+    edir = os.path.join(tmp, "envb"); os.makedirs(edir)
+    os.symlink(helium, os.path.join(edir, "env-browser"))
+    data_a = os.path.join(tmp, "data-a")
+    e1 = term(os.path.join(inst_o, "termium"), "-s", "renv", PAGE, state="st-renv",
+              env={"TERMIUM_BROWSER": os.path.join(edir, "env-browser"), "XDG_DATA_HOME": data_a})
+    e1.wait_text("termium test page", 40); e1.key("ctrl+b"); e1.key("d"); exit_code(e1)
+    e2 = term(os.path.join(inst_n, "termium"), "attach", "renv", state="st-renv", env={"XDG_DATA_HOME": os.path.join(tmp, "data-b")})
+    e2.wait_for(lambda: f"termium {NEXT} is installed" in e2.line(2), 20)
+    old_pid = server_pid("renv")
+    open_box(e2); e2.key("r")
+    check("restart from a shell with another environment: the session restarts", e2.wait_for(lambda: server_pid("renv") not in (None, old_pid), 30)
+          and e2.wait_for(lambda: "Restarted:" in e2.text(), 40), output(e2)[-300:])
+    rlog = open(os.path.join(tmp, "st-renv", "termium", "termium.log")).read()
+    starts = [l for l in rlog.splitlines() if " start " in l]
+    check("...with the session's own browser and profile (not the shell's)",
+          starts and "env-browser" in starts[-1] and os.path.realpath(os.path.join(data_a, "termium", "profiles", "renv")) in ls_row("renv", "st-renv")
+          and not os.path.exists(os.path.join(tmp, "data-b", "termium", "profiles", "renv")), (starts[-1:], ls_row("renv", "st-renv")))
+    stop("renv")
+
     # ------------------------------------------------ a relative --browser survives a restart from another directory
     helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
     bdir = os.path.join(tmp, "bdir"); os.makedirs(bdir)
@@ -903,6 +930,14 @@ try:
         check("0.2.0: a question about a session replaced meanwhile expires, and the new one is left alone",
               exit_code(g1, 15) == 1 and "changed while you answered" in output(g1) and server_pid("lgx") == new_pid, (output(g1)[-300:], new_pid, server_pid("lgx")))
         stop("lgx")
+        # Ctrl+D (end of input) at the question is a no, not a hang.
+        os.remove(os.path.join(sockdir, "legacy.asked")) if os.path.exists(os.path.join(sockdir, "legacy.asked")) else None
+        le = term(cur_bin, "attach", "legacy", state="st-legacy")
+        le.wait_for(lambda: "[y/N]" in output(le), 10)
+        le.write("\x04")
+        check("0.2.0: Ctrl+D at the question means no: it attaches", le.wait_text("termium test page", 20) and server_pid("legacy") == old_pid, output(le)[-300:])
+        le.key("ctrl+b"); le.key("d"); exit_code(le)
+        os.remove(os.path.join(sockdir, "legacy.asked"))
         l1 = term(cur_bin, "attach", "legacy", state="st-legacy")
         check(f"0.2.0: attaching from {CUR} says the session runs 0.2.0 and asks to restart it",
               l1.wait_for(lambda: f"runs termium 0.2.0, older than this termium ({CUR})" in output(l1) and "[y/N]" in output(l1), 10), output(l1)[-400:])
@@ -930,7 +965,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

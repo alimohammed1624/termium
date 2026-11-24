@@ -45,7 +45,11 @@ afterAll(() => {
 test("versions compare numerically; pre-releases never count", () => {
   expect(parseVersion("v0.2.0")).toEqual([0, 2, 0]);
   expect(parseVersion("0.2.0")).toEqual([0, 2, 0]);
-  expect(parseVersion(" V1.2.3+build.5 ")).toEqual([1, 2, 3]);
+  expect(parseVersion(" v1.2.3 ")).toEqual([1, 2, 3]);
+  // Nothing but X.Y.Z: no +build, no pre-release, no capital V.
+  expect(parseVersion("v1.2.3+build.5")).toBeNull();
+  expect(parseVersion("v9.9.9+%2F..%2F..")).toBeNull();
+  expect(parseVersion("V1.2.3")).toBeNull();
   expect(parseVersion("v1.2")).toBeNull();
   expect(parseVersion("v1.2.3.4")).toBeNull();
   expect(parseVersion("latest")).toBeNull();
@@ -74,6 +78,11 @@ test("the tag comes from the release redirect", () => {
   expect(tagFromLocation("https://github.com/alimohammed1624/termium/releases")).toBeNull();
   expect(tagFromLocation("https://github.com/o/r/releases/tag/")).toBeNull();
   expect(tagFromLocation("")).toBeNull();
+  // Decoded, then held to a version's shape: no paths or build metadata get through.
+  expect(tagFromLocation("https://github.com/o/r/releases/tag/v9.9.9+%2F..%2F..")).toBeNull();
+  expect(tagFromLocation("https://github.com/o/r/releases/tag/v9.9.9%2F..")).toBeNull();
+  expect(tagFromLocation("https://github.com/o/r/releases/tag/v1.0.0-rc.1")).toBe("v1.0.0-rc.1");
+  expect(tagFromLocation("https://github.com/o/r/releases/tag/latest")).toBeNull();
 });
 
 test("opt-outs: the flag, TERMIUM_NO_UPDATE_CHECK and CI; empty, 0 and false don't count", () => {

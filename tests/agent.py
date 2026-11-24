@@ -283,6 +283,69 @@ try:
     check("type into an input inside a shadow root works", r.returncode == 0 and
           page_value("document.getElementById('host').shadowRoot.getElementById('sin').value") == "in the shadow", (r.returncode, r.stderr))
 
+    # --- a queued command whose time runs out is answered at once, and never runs
+    hang = socket.socket(); hang.bind(("127.0.0.1", 0)); hang.listen(8)  # accepts nothing: a page that never loads
+    HANG = f"http://127.0.0.1:{hang.getsockname()[1]}/never"
+    victim = ctl_json("open", f"{BASE}/page.html?victim=1", "--new-tab", "--background").get("id")
+    staller = subprocess.Popen(["bun", main, "ctl", "-s", "watch", "open", HANG, "--new-tab", "--background", "--timeout", "8"], cwd=ROOT,
+                               env=dict(os.environ, **ENV), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(1.5)
+    t0 = time.time()
+    r = ctl("close", str(victim), "--timeout", "0.3")
+    took = time.time() - t0
+    staller.communicate(timeout=60)
+    time.sleep(1.5)
+    check(f"a close queued behind a stalled open times out at once ({took:.1f}s, exit 4) and never runs later",
+          r.returncode == 4 and took < 3 and any(t["id"] == victim for t in ctl_json("tabs")), (r.returncode, r.stderr, took))
+    for t in ctl_json("tabs"):
+        if t["id"] != first:
+            ctl("close", str(t["id"]), "--force")
+    hang.close()
+
+    # --- close never asks the person: unsaved changes go back to the agent
+    bgt = ctl_json("open", f"{BASE}/page.html?unsaved=1", "--new-tab", "--background").get("id")
+    ctl("eval", "window.onbeforeunload = (e) => { e.preventDefault(); return ''; }; 1", "--tab", str(bgt))
+    h.key("ctrl+l"); h.key("ctrl+a"); h.type("my draft"); time.sleep(0.3)
+    r = ctl("close", str(bgt))
+    time.sleep(1)
+    check("close of a background tab with unsaved changes: not closed (exit 1, says --force), the person's tab and draft untouched",
+          r.returncode == 1 and "--force" in r.stderr and "my draft" in h.line(2) and "Leave this page" not in h.text()
+          and any(t["id"] == bgt for t in ctl_json("tabs")) and [t["active"] for t in ctl_json("tabs")][0], (r.returncode, r.stderr, h.line(2)))
+    r = ctl("close", str(bgt), "--force")
+    time.sleep(0.5)
+    check("close --force discards them, still without asking the person", r.returncode == 0 and len(ctl_json("tabs")) == 1
+          and "my draft" in h.line(2) and "Leave this page" not in h.text(), (r.returncode, r.stderr, h.line(2)))
+    h.key("escape"); time.sleep(1.6)
+
+    # --- a page that shows a dialog while it loads: open returns at once, and dialog answers it
+    t0 = time.time()
+    r = ctl_json("open", "data:text/html,<title>alerting</title><script>alert('loaded')</script>", "--new-tab", "--background", "--timeout", "20")
+    took = time.time() - t0
+    check(f"open of a page that alerts while loading returns at once, reporting the dialog ({took:.1f}s)",
+          took < 6 and (r.get("dialog") or {}).get("message") == "loaded", (took, r))
+    rd = ctl("dialog", "accept", "--tab", str(r.get("id")))
+    check("...and dialog answers it", rd.returncode == 0, (rd.returncode, rd.stderr))
+    ctl("close", str(r.get("id")), "--force")
+
+    # --- a hello and no request: the session lets go of the connection
+    import struct
+    so = socket.socket(socket.AF_UNIX); so.connect(os.path.join(sockdir, "watch.sock"))
+    hello = json.dumps({"t": "hello", "v": 1, "kind": "ctl"}).encode()
+    so.sendall(bytes([1]) + struct.pack(">I", len(hello)) + hello)
+    so.settimeout(15)
+    got = b""
+    t0 = time.time()
+    try:
+        while True:
+            chunk = so.recv(4096)
+            if not chunk:
+                break
+            got += chunk
+    except socket.timeout:
+        pass
+    so.close()
+    check(f"an agent connection that sends no request is let go ({time.time() - t0:.0f}s)", b"no request came" in got and time.time() - t0 < 14, got[:200])
+
     # --- errors and exit statuses
     r = ctl("click", f"{first}:999999")
     check("an element that's gone: exit 1, says to snapshot again", r.returncode == 1 and "snapshot" in r.stderr, (r.returncode, r.stderr))
@@ -357,6 +420,34 @@ try:
     check("ls shows it detached", re.search(r"^bg\s+\d+\s+detached", r.stdout, re.M), r.stdout)
     time.sleep(31)
     check("it isn't ended for want of a terminal", server_pid("bg") is not None)
+    # Typed and pasted text never reaches the debug log (TERMIUM_DEBUG traces DevTools traffic).
+    dbg = Term(["bun", main, "-s", "dbg", "--incognito", f"{BASE}/agent.html"], cwd=ROOT, env=dict(ENV, TERMIUM_DEBUG="1"))
+    dbg.wait_text("Agent fixture", 30); dbg.wait_idle(0.8, 10)
+    dsnap = ctl("snapshot", session="dbg").stdout
+    ctl("type", ref(dsnap, "textbox", "Secret"), "AGENT-SECRET-77", session="dbg")
+    ctl("type", ref(dsnap, "textbox", "City"), "AGENT-CITY-77", session="dbg")
+    dbox = page_value("(() => { const r = document.getElementById('name').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()", session="dbg")
+    dbg.click(220 + int(dbox[0]), 40 + int(dbox[1])); time.sleep(0.3)
+    dbg.type("humansecret"); dbg.paste("PASTED-SECRET-77"); time.sleep(1)
+    # (Read the log first: an agent's own eval reading the fields back is traced, as evals are.)
+    dlog = open(os.path.join(tmp, "state", "termium", "termium.log")).read()
+    typed = page_value("[document.getElementById('pw').value, document.getElementById('name').value]", session="dbg")
+    check("TERMIUM_DEBUG: what agents and the person type or paste is never logged (but the log traces DevTools)",
+          typed == ["AGENT-SECRET-77", "humansecretPASTED-SECRET-77"] and "-> {" in dlog
+          and not any(x in dlog for x in ("AGENT-SECRET", "AGENT-CITY", "humansecret", "PASTED-SECRET")), typed)
+    dbg.close()
+
+    # Another browser holds the profile: start says why.
+    helium = shutil.which("helium-browser") or shutil.which("helium")
+    held = os.path.join(tmp, "held-profile"); os.makedirs(held)
+    hb = subprocess.Popen([helium, "--headless=new", f"--user-data-dir={held}", "--no-first-run", "about:blank"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    time.sleep(3)
+    r = cli("start", "-s", "heldp", "--profile", held)
+    os.killpg(hb.pid, signal.SIGTERM); hb.wait(timeout=20)
+    check("start on a profile another browser holds: fails saying why (not 'without answering')",
+          r.returncode != 0 and "without answering" not in r.stderr and len(r.stderr.strip()) > 20, (r.returncode, r.stderr))
+
     # A detached page that another client resized, then let go: back to its size (1280x800 here).
     bg_url = json.loads(cli("devtools", "bg", "--json").stdout or "{}").get("browserURL", "")
     r = ext("viewport", bg_url, "agent.html", "500", "400", "2")
@@ -406,7 +497,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("watch", "bg", "race", "blank", "rest"):
+    for name in ("watch", "bg", "race", "blank", "rest", "dbg", "heldp"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)

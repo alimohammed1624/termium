@@ -329,8 +329,19 @@ try:
                     return True
                 time.sleep(0.3)
             return False
-        h.wait_for(lambda: hc("pane", "list").returncode == 0 and '"panes"' in hc("pane", "list").stdout, 20)
-        first = next((p["pane_id"] for p in json.loads(hc("pane", "list").stdout).get("result", {}).get("panes", []) if p.get("focused")), None)
+        def first_pane():
+            """The focused pane (else the only one), once herdr's API lists it; None until then."""
+            r = hc("pane", "list")
+            try:
+                panes = json.loads(r.stdout).get("result", {}).get("panes", []) if r.returncode == 0 else []
+            except ValueError:
+                return None
+            focused = [p["pane_id"] for p in panes if p.get("focused")]
+            return focused[0] if focused else (panes[0]["pane_id"] if len(panes) == 1 else None)
+        # herdr's server and API come up a moment after its UI (longer on a busy machine): ask until it answers.
+        found = []
+        h.wait_for(lambda: bool(found.append(first_pane()) or found[-1]), 60, 0.5)
+        first = found[-1] if found else None
         # A first run shows an introduction that takes every key: continue (Enter), then close it (Esc).
         onboarding = lambda: "continue" in h.text() or "integration" in h.text().lower()
         for _ in range(6):
