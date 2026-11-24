@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { wrapWords } from "../src/app";
+import { lockFile, unlockFile } from "../src/browser";
 import { readRestore, takeRestore, writeRestore, type Restore } from "../src/session";
 import {
   UPGRADE_CMD,
@@ -12,8 +13,10 @@ import {
   checkEnabled,
   displayVersion,
   envOn,
+  binaryVersion,
   extractBinary,
   installBinary,
+  installRelease,
   isNewer,
   loadCache,
   parseVersion,
@@ -265,3 +268,91 @@ test("box text wraps at words", () => {
   expect(wrapWords("abcdefghij", 4)).toEqual(["abcd", "efgh", "ij"]);
   expect(wrapWords("", 10)).toEqual([]);
 });
+
+/** A stand-in termium: a script that answers --version. */
+function fakeTermium(version: string): Uint8Array {
+  return new TextEncoder().encode(`#!/bin/sh\necho "termium ${version}"\n`);
+}
+
+test("one 3 s deadline covers every source; a stopped check records nothing", async () => {
+  const srv = Bun.serve({ port: 0, idleTimeout: 30, fetch: () => new Promise<Response>((r) => setTimeout(() => r(new Response("late")), 8000)) });
+  const old = process.env.TERMIUM_UPDATE_URL;
+  process.env.TERMIUM_UPDATE_URL = `http://127.0.0.1:${srv.port}/a http://127.0.0.1:${srv.port}/b`;
+  try {
+    const p = join(tempDir(), "update-check.json");
+    const t0 = performance.now();
+    expect(await checkAndCache(p, "0.3.0")).toEqual({ ok: false, error: "no answer within 3 s" });
+    const took = performance.now() - t0;
+    expect(took).toBeLessThan(3500);
+    expect(took).toBeGreaterThan(2900);
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 200);
+    const p2 = join(tempDir(), "update-check.json");
+    const t1 = performance.now();
+    expect(await checkAndCache(p2, "0.3.0", stop.signal)).toEqual({ ok: false, error: "stopped" });
+    expect(performance.now() - t1).toBeLessThan(1000);
+    expect(existsSync(p2)).toBe(false);
+  } finally {
+    if (old === undefined) delete process.env.TERMIUM_UPDATE_URL;
+    else process.env.TERMIUM_UPDATE_URL = old;
+    srv.stop(true);
+  }
+}, 15_000);
+
+test("an install never replaces the same release or a newer one", async () => {
+  const dir = tempDir();
+  const exe = join(dir, "termium");
+  writeFileSync(exe, fakeTermium("0.3.2"));
+  chmodSync(exe, 0o755);
+  expect(binaryVersion(exe)).toBe("0.3.2");
+  expect(await installRelease(fakeTermium("0.3.1"), exe, "v0.3.1", () => {})).toBe("0.3.2");
+  expect(binaryVersion(exe)).toBe("0.3.2");
+  expect(await installRelease(fakeTermium("0.3.2"), exe, "v0.3.2", () => {})).toBe("0.3.2");
+  expect(await installRelease(fakeTermium("0.3.3"), exe, "v0.3.3", () => {})).toBe("0.3.3");
+  expect(binaryVersion(exe)).toBe("0.3.3");
+  expect(readdirSync(dir).sort()).toEqual(["termium"]);
+});
+
+test("installs wait for the update lock beside the binary", async () => {
+  const dir = tempDir();
+  const exe = join(dir, "termium");
+  writeFileSync(exe, fakeTermium("0.3.0"));
+  chmodSync(exe, 0o755);
+  const lock = join(dir, ".termium-update.lock");
+  expect(lockFile(lock)).toBeNull();
+  setTimeout(() => unlockFile(lock), 400);
+  const t0 = performance.now();
+  expect(await installRelease(fakeTermium("0.3.1"), exe, "v0.3.1", () => {})).toBe("0.3.1");
+  expect(performance.now() - t0).toBeGreaterThan(350);
+  expect(binaryVersion(exe)).toBe("0.3.1");
+  expect(existsSync(lock)).toBe(false);
+});
+
+test("two updaters in separate processes: the newer release wins", async () => {
+  const dir = tempDir();
+  const exe = join(dir, "termium");
+  writeFileSync(exe, fakeTermium("0.3.0"));
+  chmodSync(exe, 0o755);
+  const mod = join(import.meta.dir, "..", "src", "update.ts");
+  const run = (version: string, slowMs: number) =>
+    Bun.spawn(
+      [
+        "bun",
+        "-e",
+        `const u = await import(${JSON.stringify(mod)});
+         const bin = new TextEncoder().encode('#!/bin/sh\\necho "termium ${version}"\\n');
+         console.log(await u.installRelease(bin, ${JSON.stringify(exe)}, "v${version}", () => Bun.sleepSync(${slowMs})));`,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+  // The slow, older one starts first; the newer one finishes first without the lock.
+  const slow = run("0.3.1", 1500);
+  await Bun.sleep(300);
+  const fast = run("0.3.2", 0);
+  const [a, b] = await Promise.all([new Response(slow.stdout).text(), new Response(fast.stdout).text()]);
+  expect(await slow.exited).toBe(0);
+  expect(await fast.exited).toBe(0);
+  expect(b.trim()).toBe("0.3.2");
+  expect(["0.3.1", "0.3.2"]).toContain(a.trim());
+  expect(binaryVersion(exe)).toBe("0.3.2");
+}, 20_000);

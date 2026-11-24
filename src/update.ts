@@ -28,6 +28,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { lockFile, unlockFile } from "./browser";
 
 const REPO = "alimohammed1624/termium";
 /** Redirects to `…/releases/tag/<latest tag>`. */
@@ -176,14 +177,15 @@ export function skipVersion(path: string, tag: string): void {
 
 // ------------------------------------------------------------ the check
 
-/** Where to ask: the override (alone), or GitHub with its API as fallback. */
+/** Where to ask: the override (one or more URLs, space-separated), or GitHub with its API as fallback. */
 export function sources(env: Record<string, string | undefined> = process.env): string[] {
   const o = env[URL_ENV]?.trim();
-  return o ? [o] : [LATEST_URL, API_URL];
+  return o ? o.split(/\s+/) : [LATEST_URL, API_URL];
 }
 
 function describe(e: any, what = "GitHub"): string {
-  if (e?.name === "TimeoutError" || e?.name === "AbortError") return `no answer within ${TIMEOUT_MS / 1000} s`;
+  if (e?.name === "TimeoutError") return `no answer within ${TIMEOUT_MS / 1000} s`;
+  if (e?.name === "AbortError") return "stopped";
   const code = String(e?.code ?? "");
   if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNRESET|ConnectionRefused|FailedToOpenSocket/i.test(code)) {
     return `cannot connect to ${what}`;
@@ -196,12 +198,12 @@ function headers(version: string): Record<string, string> {
 }
 
 /** Asks one source: a redirect's `Location` tag, else JSON `tag_name`. */
-async function ask(url: string, version: string): Promise<string> {
+async function ask(url: string, version: string, signal: AbortSignal): Promise<string> {
   let resp: Response;
   try {
-    resp = await fetch(url, { redirect: "manual", headers: headers(version), signal: AbortSignal.timeout(TIMEOUT_MS) });
+    resp = await fetch(url, { redirect: "manual", headers: headers(version), signal });
   } catch (e) {
-    throw new Error(describe(e));
+    throw new Error(describe(signal.aborted ? signal.reason : e));
   }
   if (resp.status >= 300 && resp.status < 400) {
     void resp.body?.cancel().catch(() => {});
@@ -217,22 +219,29 @@ async function ask(url: string, version: string): Promise<string> {
   try {
     j = await resp.json();
   } catch (e: any) {
-    throw new Error(e?.name === "TimeoutError" ? describe(e) : "unexpected response");
+    throw new Error(signal.aborted ? describe(signal.reason) : "unexpected response");
   }
   if (typeof j?.tag_name !== "string" || !j.tag_name) throw new Error("unexpected response");
   return j.tag_name;
 }
 
-/** The latest release tag, trying each source in turn. */
-export async function fetchLatest(version: string): Promise<string> {
+/**
+ * The latest release tag, trying each source in turn, all within one 3 s
+ * deadline. `stop` aborts it early (the terminal went away).
+ */
+export async function fetchLatest(version: string, stop?: AbortSignal): Promise<string> {
+  const deadline = AbortSignal.timeout(TIMEOUT_MS);
+  const signal = stop ? AbortSignal.any([deadline, stop]) : deadline;
   let err = "no source";
   for (const url of sources()) {
+    if (signal.aborted) break;
     try {
-      return await ask(url, version);
+      return await ask(url, version, signal);
     } catch (e: any) {
       err = e?.message ?? String(e);
     }
   }
+  if (signal.aborted) err = describe(signal.reason);
   throw new Error(err);
 }
 
@@ -242,13 +251,15 @@ export type CheckResult = { ok: true; tag: string } | { ok: false; error: string
  * Checks now and records the answer (and the time) in the cache. A failed
  * check keeps the previously seen tag; a pre-release is never recorded.
  */
-export async function checkAndCache(path: string | null, version: string): Promise<CheckResult> {
+export async function checkAndCache(path: string | null, version: string, stop?: AbortSignal): Promise<CheckResult> {
   let r: CheckResult;
   try {
-    r = { ok: true, tag: await fetchLatest(version) };
+    r = { ok: true, tag: await fetchLatest(version, stop) };
   } catch (e: any) {
     r = { ok: false, error: e?.message ?? String(e) };
   }
+  // Stopped (nobody to tell any more): nothing is recorded.
+  if (stop?.aborted) return { ok: false, error: "stopped" };
   if (path) {
     const prev = loadCache(path);
     const latest = r.ok && parseVersion(r.tag) ? r.tag : (prev?.latest ?? null);
@@ -438,7 +449,8 @@ export function installBinary(bin: Uint8Array, exe: string, check?: (staged: str
     renameSync(tmp, exe);
   } catch (e: any) {
     rmSync(tmp, { force: true });
-    throw new Error(e?.code ? `cannot replace the termium binary: ${e.message}` : (e?.message ?? String(e)));
+    if (!e?.code) throw e;
+    throw new Error(`cannot replace the termium binary: ${e.message}`);
   }
   // The rename itself, durably (best effort).
   try {
@@ -480,11 +492,63 @@ function checkRuns(staged: string, tag: string): void {
   if (got !== `termium ${displayVersion(tag)}`) throw new Error(`the downloaded termium says "${got}", not termium ${displayVersion(tag)}; nothing was changed`);
 }
 
+/** The version a termium binary reports (`termium X.Y.Z`), or null. */
+export function binaryVersion(exe: string): string | null {
+  try {
+    const r = Bun.spawnSync([exe, "--version"], { stdout: "pipe", stderr: "ignore", timeout: 20_000 });
+    const m = r.stdout.toString().trim().match(/^termium (\S+)$/);
+    return r.exitCode === 0 && m ? m[1]! : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Takes lock file `path`, waiting for another holder up to `timeoutMs`; returns the release. */
+export async function waitLock(path: string, timeoutMs = 180_000): Promise<() => void> {
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    if (lockFile(path) === null) return () => unlockFile(path);
+    if (Date.now() > end) throw new Error("another termium update is still running; nothing was changed");
+    await Bun.sleep(100);
+  }
+}
+
+class AlreadyInstalled extends Error {
+  constructor(readonly version: string) {
+    super(`termium ${version} is already installed`);
+  }
+}
+
+/**
+ * Puts `bin` (release `tag`) in place of `exe`: under a lock next to it,
+ * so updaters never interleave, and never over a binary that is already
+ * that release or newer (another updater got there first). Returns the
+ * version installed afterwards.
+ */
+export async function installRelease(bin: Uint8Array, exe: string, tag: string, check = checkRuns): Promise<string> {
+  const release = await waitLock(join(dirname(exe), ".termium-update.lock"));
+  try {
+    installBinary(bin, exe, (staged) => {
+      check(staged, tag);
+      // Just before the rename: what's there now?
+      const now = binaryVersion(exe);
+      if (now && !isNewer(tag, now)) throw new AlreadyInstalled(now);
+    });
+    return displayVersion(tag);
+  } catch (e) {
+    if (e instanceof AlreadyInstalled) return e.version;
+    throw e;
+  } finally {
+    release();
+  }
+}
+
 /**
  * Downloads release `tag` for this platform, verifies it and replaces the
- * running binary. `step` is told each step as it starts.
+ * running binary (unless that's already that release or newer). `step` is
+ * told each step as it starts. Returns the version installed afterwards.
  */
-export async function selfUpdate(tag: string, version: string, step: (s: Step) => void = () => {}): Promise<void> {
+export async function selfUpdate(tag: string, version: string, step: (s: Step) => void = () => {}): Promise<string> {
   const blocker = selfUpdateBlocker();
   if (blocker) throw new Error(blocker);
   const target = assetTarget()!;
@@ -501,7 +565,7 @@ export async function selfUpdate(tag: string, version: string, step: (s: Step) =
   const bin = extractBinary(archive, target);
   if (bin.length === 0) throw new Error(`${asset} holds an empty termium binary`);
   step("installing");
-  installBinary(bin, exe, (staged) => checkRuns(staged, tag));
+  return installRelease(bin, exe, tag);
 }
 
 export function stepLabel(s: Step): string {

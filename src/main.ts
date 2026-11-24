@@ -203,6 +203,7 @@ async function update(): Promise<never> {
   const r = await checkAndCache(cachePath(stateDir()), VERSION);
   if (!r.ok) {
     console.error(`termium: could not check for updates: ${r.error}`);
+    console.error(`Update by hand:\n  ${UPGRADE_CMD}`);
     process.exit(1);
   }
   if (!isNewer(r.tag, VERSION)) {
@@ -217,15 +218,17 @@ async function update(): Promise<never> {
     process.exit(1);
   }
   console.log(`Updating termium ${VERSION} → ${next}`);
+  let installed: string;
   try {
-    await selfUpdate(r.tag, VERSION, (step) => console.log(`  ${stepLabel(step)}`));
+    installed = await selfUpdate(r.tag, VERSION, (step) => console.log(`  ${stepLabel(step)}`));
   } catch (e: any) {
     console.error(`termium: update failed: ${e?.message ?? e}`);
     console.error(`Update by hand:\n  ${UPGRADE_CMD}`);
     process.exit(1);
   }
-  console.log(`Updated to termium ${next}.`);
-  const old = (await runningSessions()).filter((s) => s.version !== next);
+  // Another update may have got there first (with this release or a newer one).
+  console.log(installed === next ? `Updated to termium ${next}.` : `termium ${installed} is already installed; nothing was changed.`);
+  const old = (await runningSessions()).filter((s) => s.version !== installed);
   if (old.length) {
     const names = old.map((s) => s.name).join(", ");
     console.log(
@@ -273,6 +276,7 @@ async function main(): Promise<void> {
         version: VERSION,
         updateCheck: checkEnabled(args.noUpdateCheck),
         restartArgv,
+        selfArgv: selfArgv(),
       });
     }
   }
