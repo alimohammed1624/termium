@@ -4,7 +4,7 @@
 // (The server side is src/agent.ts.)
 
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { EXIT, type CtlRequest } from "./agent";
@@ -340,12 +340,19 @@ export async function runCtl(argv: string[]): Promise<never> {
   if (p.req.cmd === "shot") {
     const path = resolve(p.out ?? join(tmpdir(), `termium-shot-${r.tab}-${Date.now()}.png`));
     try {
-      writeFileSync(path, Buffer.from(String(r.png), "base64"));
+      // Readable only by you (a page can show anything), whatever the umask; an existing file too.
+      writeFileSync(path, Buffer.from(String(r.png), "base64"), { mode: 0o600 });
+      chmodSync(path, 0o600);
     } catch (e: any) {
       fail(`can't write ${path}: ${e?.message ?? e}`, EXIT.failed);
     }
-    if (p.json) console.log(JSON.stringify({ tab: r.tab, path }));
+    const cut = r.truncated ? `page is ${r.truncated.height}px tall; captured the top ${r.truncated.captured}px` : "";
+    if (p.json) console.log(JSON.stringify({ tab: r.tab, path, ...(r.truncated ? { truncated: r.truncated } : {}) }));
     else console.log(path);
+    if (cut) {
+      console.error(`termium: ${cut}`);
+      process.exit(EXIT.partial);
+    }
     process.exit(0);
   }
   if (p.json) {

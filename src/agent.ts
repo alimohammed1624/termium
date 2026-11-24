@@ -11,6 +11,7 @@
 import type { AgentTab, App, Page } from "./app";
 import type { DevToolsEndpoint } from "./browser";
 import type { CDP } from "./cdp";
+import { decodePng, encodeRegion, type Raster } from "./png";
 
 /** A failure to report to the agent as is; `code` becomes the exit status. */
 export class CtlError extends Error {
@@ -23,7 +24,7 @@ export class CtlError extends Error {
 }
 
 /** Exit statuses of `termium ctl` (also in the skill). */
-export const EXIT = { ok: 0, failed: 1, usage: 2, noSession: 3, timeout: 4 } as const;
+export const EXIT = { ok: 0, failed: 1, usage: 2, noSession: 3, timeout: 4, partial: 5 } as const;
 
 /** Commands that act on pages or tabs: a session runs these one at a time (see onCtl in server.ts). */
 // (Not `dialog`: answering one must work while an `open` waits on the page it blocks.)
@@ -101,6 +102,30 @@ class Agent {
     private deadline: number,
   ) {}
 
+  /**
+   * Waits for an input action, unless the page opens a dialog meanwhile (an
+   * alert from a click, say): the browser then holds the action until the
+   * dialog is answered, so this returns at once with the dialog (the action
+   * completes in the browser once it's answered).
+   */
+  private async untilDialog(page: Page, action: Promise<unknown>): Promise<{ type: string; message: string } | null> {
+    let stop = false;
+    const dialog = (async () => {
+      while (!stop) {
+        if (page.dialog) return { type: page.dialog.type, message: page.dialog.message };
+        await Bun.sleep(30);
+      }
+      return null;
+    })();
+    try {
+      const done = action.then(() => null);
+      done.catch(() => {}); // (settled after a dialog: nobody waits on it then)
+      return await Promise.race([done, dialog]);
+    } finally {
+      stop = true;
+    }
+  }
+
   /** Before a step that changes something: past the deadline, stop here, saying what was (not) done. */
   private step(soFar = "nothing was done"): void {
     if (Date.now() >= this.deadline) throw new CtlError(`timed out; ${soFar}`, EXIT.timeout);
@@ -167,10 +192,10 @@ class Agent {
    * exit 4, nothing done). With `page`, only if that's the page they're on.
    * Returns how long it waited.
    */
-  private async personFree(page: Page | null, timeoutMs: number, what: string): Promise<number> {
+  private async personFree(page: Page | null, timeoutMs: number, what: string, dialogOf?: Page): Promise<number> {
     const t0 = Date.now();
     const deadline = Math.min(this.deadline, t0 + timeoutMs);
-    while (this.app.humanBusy() && (!page || page === this.app.activePage())) {
+    while (this.app.humanBusy(dialogOf) && (!page || page === this.app.activePage())) {
       if (Date.now() > deadline) {
         throw new CtlError(
           `the person at the terminal is busy (typing, or editing the address, a prompt or help); ${what}. ` +
@@ -287,7 +312,10 @@ class Agent {
     if (req.tab !== undefined) page = this.page(req.tab, true);
     else page = this.app.activePage()?.dialog ? this.app.activePage() : [...this.app.pages.values()].find((p) => p.dialog);
     if (!page?.dialog) throw new CtlError(req.tab !== undefined ? `tab ${req.tab} has no dialog open` : "no page has a dialog open");
+    // The person may be answering it themselves (typing into a prompt()): wait for them.
+    await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not answered", page);
     const d = page.dialog;
+    if (!d) return { tab: page.num, answered: "already (by the person)" };
     this.app.agentDialog(page, !!req.accept, req.text ?? d.defaultPrompt);
     this.note(`${req.accept ? "accepted" : "dismissed"} a ${d.type} dialog`);
     return { tab: page.num, type: d.type, message: d.message, accepted: !!req.accept };
@@ -474,9 +502,9 @@ class Agent {
       await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
       const [x, y] = req.xy;
       this.step("not clicked");
-      await this.mouseClick(page, x, y, button, count);
+      const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count));
       this.note(`clicked at ${Math.round(x)},${Math.round(y)}`);
-      return { tab: page.num, x, y };
+      return { tab: page.num, x, y, ...(dialog ? { dialog } : {}) };
     }
     const { page, node } = this.element(req.ref);
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
@@ -494,10 +522,11 @@ class Agent {
       [x, y],
     ).catch(() => true);
     this.step("not clicked");
-    await this.mouseClick(page, x, y, button, count);
-    const label = await this.label(page, objectId);
+    const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count));
+    // (The page is held by its dialog: it can't be asked for the element's name.)
+    const label = dialog ? "an element" : await this.label(page, objectId);
     this.note(`clicked ${label}`);
-    const out: Record<string, unknown> = { tab: page.num, ref: req.ref, x: Math.round(x), y: Math.round(y) };
+    const out: Record<string, unknown> = { tab: page.num, ref: req.ref, x: Math.round(x), y: Math.round(y), ...(dialog ? { dialog } : {}) };
     if (!hit) out.warning = "another element covers its centre; the click went to that element";
     return out;
   }
@@ -580,9 +609,18 @@ class Agent {
         const describe = (e) => !e ? "nowhere" : e.tagName.toLowerCase() +
           (e.id ? "#" + e.id : "") + (e.getAttribute && (e.getAttribute("aria-label") || e.getAttribute("name")) ? ' "' + (e.getAttribute("aria-label") || e.getAttribute("name")).slice(0, 40) + '"' : "");
         const after = read();
-        const landed = !text || after !== before;
-        if (!ok && text) return { field: true, secret, fallback: true };
-        if (!landed || !(now === this || this.contains(now))) return { field: true, secret, missed: describe(now), landed };
+        if (!ok && text && after === before) return { field: true, secret, fallback: true };
+        if (!(now === this || this.contains(now)) && after === before) return { field: true, secret, missed: describe(now), landed: false };
+        // What it holds now must be what was asked for (a maxlength, a mask or a
+        // handler may have cut or changed it): said exactly (never echoing a secret).
+        const want = append ? before + text : text;
+        const norm = (v) => (field ? v : v.replace(/\s+$/, ""));
+        if (norm(after) !== norm(want)) {
+          const how = after === before ? "rejected it (unchanged)"
+            : want.startsWith(after) ? \`cut it to \${after.length} of \${want.length} characters\${field && this.maxLength > 0 ? " (maxlength " + this.maxLength + ")" : ""}\`
+            : \`changed it (\${after.length} characters\${secret ? "" : ': "' + after.slice(0, 60) + '"'})\`;
+          return { field: true, secret, mismatch: how };
+        }
         return { field: true, secret, done: true };
       }`,
       [!!req.append, text],
@@ -595,6 +633,7 @@ class Agent {
     if (kind?.field === false) throw new CtlError(`element ${req.ref} isn't a text field (click it, then use key)`);
     if (kind?.refused) throw new CtlError(`element ${req.ref} can't be typed into: ${kind.refused}; nothing was typed`);
     if (!kind?.field) throw new CtlError(`element ${req.ref} can't be typed into; nothing was typed`);
+    if (kind.mismatch) throw new CtlError(`element ${req.ref}: the page ${kind.mismatch}; not submitted`);
     if (kind.missed !== undefined) {
       throw new CtlError(
         kind.landed
@@ -622,7 +661,29 @@ class Agent {
     }
     if (req.submit) {
       this.step(`typed ${text.length} characters into ${req.ref}, not submitted`);
-      await this.pressKey(page, "Enter");
+      // Only the target's own form, and only while it still has focus (the
+      // page may have moved it after the text went in): checked and done in one go.
+      const how = await this.callOn(
+        page,
+        objectId,
+        `function () {
+          const doc = this.ownerDocument;
+          let now = doc.activeElement;
+          while (now && now.shadowRoot && now.shadowRoot.activeElement) now = now.shadowRoot.activeElement;
+          if (!(now === this || this.contains(now))) {
+            return { moved: !now ? "nowhere" : now.tagName.toLowerCase() + (now.id ? "#" + now.id : "") };
+          }
+          const form = this.form || (this.closest && this.closest("form"));
+          if (form) {
+            form.requestSubmit();
+            return { form: true };
+          }
+          return { enter: true };
+        }`,
+      );
+      if (how?.moved) throw new CtlError(`typed into ${req.ref}, but the page moved focus to ${how.moved}; not submitted`);
+      // No form: Enter, as a person would press it (focus was just checked).
+      if (how?.enter) await this.untilDialog(page, this.pressKey(page, "Enter"));
     }
     // What was typed is never shown (nor is a password field's name worth the risk).
     this.note(kind.secret ? "typed into a password field" : `typed into ${label}`);
@@ -650,7 +711,12 @@ class Agent {
     // Key by key, stopping (and saying so) when the time is up: never typing on after the reply.
     for (const [i, k] of keys.entries()) {
       this.step(i ? `pressed ${i} of ${keys.length} keys${i <= 10 ? ` (${keys.slice(0, i).join(" ")})` : ""}` : "no keys pressed");
-      await this.pressKey(page, k);
+      const dialog = await this.untilDialog(page, this.pressKey(page, k));
+      if (dialog) {
+        // A dialog came up: the rest of the keys aren't pressed (they'd wait on it).
+        this.note(`tab ${page.num} shows a ${dialog.type} dialog`);
+        return { tab: page.num, keys: keys.slice(0, i + 1), pressed: i + 1, of: keys.length, dialog };
+      }
     }
     this.note(`pressed ${keys.join(" ")}`);
     return { tab: page.num, keys };
@@ -673,6 +739,7 @@ class Agent {
     const amount = req.amount && req.amount > 0 ? req.amount : Math.round(viewport * 0.8);
     const dx = dir === "left" ? -amount : dir === "right" ? amount : 0;
     const dy = dir === "up" ? -amount : dir === "down" ? amount : 0;
+    await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not scrolled");
     this.step("not scrolled");
     await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: at.x, y: at.y, deltaX: dx, deltaY: dy }, page.sessionId);
     await Bun.sleep(250); // smooth scrolling
@@ -683,15 +750,43 @@ class Agent {
 
   private async shot(page: Page, full: boolean): Promise<unknown> {
     const sid = page.sessionId;
+    let truncated: { height: number; captured: number } | undefined;
     const data = await this.app.withPage(page, async () => {
       if (!full) return (await this.cdp.send("Page.captureScreenshot", { format: "png" }, sid)).data as string;
       const m = await this.cdp.send("Page.getLayoutMetrics", {}, sid);
       const size = m.cssContentSize ?? m.contentSize;
-      const clip = { x: 0, y: 0, width: Math.ceil(size.width), height: Math.min(Math.ceil(size.height), 16384), scale: 1 };
-      return (await this.cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip }, sid)).data as string;
+      const width = Math.ceil(size.width);
+      const height = Math.ceil(size.height);
+      // Up to FULL_PIXELS device pixels in all (the picture is put together in memory).
+      const dpr = Number((await this.cdp.send("Runtime.evaluate", { expression: "devicePixelRatio", returnByValue: true }, sid))?.result?.value) || 1;
+      const captured = Math.min(height, Math.max(1, Math.floor(FULL_PIXELS / (width * dpr * dpr))));
+      if (captured < height) truncated = { height, captured };
+      const capture = async (y: number, h: number) =>
+        (await this.cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y, width, height: h, scale: 1 } }, sid))
+          .data as string;
+      if (captured <= TILE) return capture(0, captured);
+      // Taller than a browser can capture in one picture: in tiles, put together.
+      const tiles: Raster[] = [];
+      for (let y = 0; y < captured; y += TILE) {
+        const r = decodePng(Buffer.from(await capture(y, Math.min(TILE, captured - y)), "base64"));
+        if (!r) throw new CtlError("couldn't read a screenshot tile");
+        tiles.push(r);
+      }
+      const w = tiles[0]!.width;
+      const ch = tiles[0]!.channels;
+      if (tiles.some((t) => t.width !== w || t.channels !== ch)) throw new CtlError("screenshot tiles differ in size; try again");
+      const all = new Uint8Array(tiles.reduce((n, t) => n + t.data.length, 0));
+      let off = 0;
+      for (const t of tiles) {
+        all.set(t.data, off);
+        off += t.data.length;
+      }
+      const h = tiles.reduce((n, t) => n + t.height, 0);
+      return encodeRegion({ width: w, height: h, channels: ch, data: all }, 0, 0, w, h).toString("base64");
     });
-    return { tab: page.num, png: data };
+    return { tab: page.num, png: data, ...(truncated ? { truncated } : {}) };
   }
+
 
   // ------------------------------------------------------------ waiting
 
@@ -757,6 +852,9 @@ class Agent {
 }
 
 const MAX_LINES = 3000;
+/** A full-page shot is taken in tiles this tall (CSS px), up to FULL_PIXELS device pixels in all. */
+const TILE = 8192;
+const FULL_PIXELS = 40_000_000;
 const SKIP_ROLES = new Set(["generic", "none", "presentation", "LineBreak", "group", "Section", "paragraph", "LayoutTable", "LayoutTableRow", "LayoutTableCell", "div", "LabelText"]);
 const VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider", "textField", "TextField", "ComboBoxMenuButton", "progressbar", "meter"]);
 const FLAG_PROPS = new Set(["focused", "disabled", "required", "selected", "readonly", "multiselectable", "modal"]);

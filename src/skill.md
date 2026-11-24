@@ -65,7 +65,8 @@ a big change, take a new snapshot (a stale id fails with exit 1).
 Options: `--tab N` (`-t N`) for commands that act on a tab, `--json` for
 machine-readable output, `--timeout SEC` (default 30). Exit status: 0 done,
 1 failed (stale id, no such tab, page error, dialog in the way), 2 usage,
-3 no such session, 4 timed out. Errors go to stderr in one line.
+3 no such session, 4 timed out, 5 partly done (a `shot --full` of a page
+over 40 megapixels: the top part saved). Errors go to stderr in one line.
 
 ## The DevTools endpoint (Puppeteer, Playwright, chrome-devtools-mcp)
 
@@ -124,21 +125,30 @@ The port changes each time the session starts: ask `termium devtools`.
 - The person at the terminal comes first. While they're busy (editing
   the address, answering a prompt or dialog, reading help, or typing: for
   a moment after each key), `select` waits, and `open` (navigating),
-  `click`, `type`, `key` and `close` wait if they'd act on the tab they're
-  on; past `--timeout` that's exit 4 and nothing was done. `open
-  --new-tab` then opens the tab in the background and says so
-  (`background` in `--json`). Every command takes `--tab N` to act on
-  another tab without showing it.
+  `click`, `type`, `key`, `scroll`, `close` and `dialog` wait if they'd
+  act on the tab they're on; past `--timeout` that's exit 4 and nothing
+  was done. `open --new-tab` then opens the tab in the background and says
+  so (`background` in `--json`); so do tabs other DevTools clients open.
+  Every command takes `--tab N` to act on another tab without showing it.
+  `eval` isn't held back: it runs in the page as is, so don't use it to
+  act on the person's tab while they're busy.
 - Commands that act (open, select, close, click, type, key, scroll) run
   one at a time per session, in order: several agents (or parallel calls)
   never interleave their typing. `--timeout` counts from when the session
   gets the command, waiting included; one whose time runs out while it
   waits its turn exits 4 at once and is never run. One that has started
   stops itself at its timeout and says how far it got ("pressed 23 of 50
-  keys"); `type` either types all its text or none, and checks the text
-  went into the element (exit 1 naming where focus went if not). `dialog` doesn't wait
-  its turn: it can answer a dialog an `open` is stopped on (`open` returns
-  as soon as the page shows one, with `dialog` in its reply).
+  keys"). `type` succeeds only if the element ends up holding exactly the
+  text asked for (or, with `--append`, its old text plus that); a field
+  that cuts it (`maxlength`), changes or rejects it is exit 1, saying
+  what it holds. `--submit` submits only that element's own form (or
+  presses Enter in it), only if the text is right and the element still
+  has focus; otherwise exit 1, not submitted. `dialog` doesn't wait its
+  turn: it can answer a dialog an `open`, `click` or `key` is stopped on
+  (they return as soon as the page shows one, with `dialog` in the reply).
+- `shot` files are readable only by you. `shot --full` captures the whole
+  page, in tiles if it's tall, up to 40 megapixels (about 29000 px of a
+  1380 px wide page; exit 5 beyond: the top part, said on stderr).
 - `close` never asks the person anything: a tab that may have unsaved
   changes isn't closed (exit 1, says so); `close --force` discards them.
 - A session still starting (opening its tabs after a restart) makes a

@@ -600,8 +600,10 @@ export class App {
   }
 
   /** The person at the terminal is in the middle of something (address bar, a prompt, help, a key prefix...). */
-  humanBusy(): boolean {
-    return this.attached && (this.mode !== "normal" || !!this.prompt || Date.now() - this.lastKeyAt < 1500);
+  /** With `dialogOf`, that page's own dialog on screen doesn't count (an agent answering it), the person typing does. */
+  humanBusy(dialogOf?: Page): boolean {
+    const prompt = this.prompt && !(dialogOf && this.prompt.kind === "dialog" && this.prompt.page === dialogOf);
+    return this.attached && (this.mode !== "normal" || !!prompt || Date.now() - this.lastKeyAt < 1500);
   }
 
   /** When the person last pressed a key (typing into a page counts: it's busy for a moment after). */
@@ -872,7 +874,9 @@ export class App {
       const middle = Date.now() - this.lastMiddlePress < 1500;
       if (middle) this.lastMiddlePress = 0; // one middle click, one background tab
       // A popup from a page you aren't looking at doesn't take focus either.
-      const background = middle || (!!opener && opener !== this.focused);
+      // Nor does any new page (another DevTools client's, a popup) while the
+      // person is busy: their draft and keys stay where they are.
+      const background = middle || (!!opener && opener !== this.focused) || this.humanBusy();
       placement = { kind: "tab", space, index, editUrl: false, background };
     }
 
@@ -1686,7 +1690,8 @@ export class App {
     if (page.sizeCheck) return;
     page.sizeCheck = setTimeout(async () => {
       page.sizeCheck = undefined;
-      if (!this.attached && this.pages.has(page.sessionId)) return void this.keepDetachedSize(page);
+      // Not shown (no terminal, or another tab): it keeps the size it had.
+      if ((!this.attached || !this.geom.has(page)) && this.pages.has(page.sessionId)) return void this.keepDetachedSize(page);
       const css = page.css;
       if (!css || !this.geom.has(page) || !this.pages.has(page.sessionId)) return;
       if (page.actual) return void this.checkForeign(page);
@@ -1701,15 +1706,17 @@ export class App {
   }
 
   /**
-   * No terminal attached: a page keeps the size it had (its last pane's, or
-   * 1280x800 if it never had one). Another DevTools client letting go of its
+   * A page not shown (no terminal attached, or a tab in the background)
+   * keeps the size it had (its last pane's, or 1280x800 if it never had one). Another DevTools client letting go of its
    * own size leaves it at the headless window's: that size is put back.
    */
   private async keepDetachedSize(page: Page): Promise<void> {
     const css = page.css;
+    // (A background tab never shown yet has no size of its own: it gets one when shown.)
+    if (!css && this.attached) return;
     const want = css ? { width: css.w, height: css.h, deviceScaleFactor: css.dsf } : DETACHED_VIEWPORT;
     const size = await this.pageSize(page);
-    if (!size || this.attached || (Math.abs(size.w - want.width) <= 1 && Math.abs(size.h - want.height) <= 1)) return;
+    if (!size || (this.attached && this.geom.has(page)) || (Math.abs(size.w - want.width) <= 1 && Math.abs(size.h - want.height) <= 1)) return;
     // Put back at most once a second; a change meanwhile (a client letting go
     // just after setting its size) is checked again then, never dropped.
     const since = Date.now() - (page.reassertedAt ?? 0);
