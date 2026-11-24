@@ -115,8 +115,16 @@ The port changes each time the session starts: ask `termium devtools`.
   `dialog accept` or `dismiss`.
 - No file uploads or downloads in ctl (downloads land in the person's
   download directory); use the DevTools endpoint for uploads.
-- A session with no terminal attached keeps pages at 1280x800; when a
-  person attaches, pages take their pane sizes.
+- Pages opened while no terminal is attached (after `termium start`, say)
+  are 1280x800. A page that was shown in a terminal keeps that pane's size
+  and pixel ratio after the terminal detaches (on a HiDPI terminal, a
+  small viewport at 2x, say): check `eval "[innerWidth, innerHeight,
+  devicePixelRatio]"` rather than assuming. When a person attaches, pages
+  take their pane sizes.
+- While the person at the terminal is editing the address, answering a
+  prompt or reading help, `select` waits until they're done (it never
+  throws their edit away); every command also takes `--tab N` to act on a
+  tab without showing it.
 - In a session's first seconds, Helium's content blocker may abort a
   DevTools client's first navigation (`net::ERR_ABORTED`): retry it
   (`termium ctl open` retries by itself).

@@ -254,6 +254,8 @@ export interface SavedLayout {
   activeSpace: number;
   sidebar: boolean;
   zoom: number;
+  /** Pages left out (other browser contexts' tabs). */
+  notKept?: number;
 }
 
 export interface Restore {

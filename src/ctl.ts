@@ -476,7 +476,13 @@ export async function startSession(o: { name: string; url: string | null; launch
   const r = await request(o.name, { cmd: "ready", timeoutMs: 60_000 });
   rmSync(errPath, { force: true });
   if (!r.ok) fail(`session "${o.name}" didn't start: ${r.error}`, EXIT.failed);
+  // Another `termium start` of this name won the race (ours exited, taking
+  // no part): the URL goes to that session, as to one already running.
   const info = await sessionInfo(o.name).catch(() => null);
+  if (o.url && info?.pid && info.pid !== child.pid) {
+    const opened = await request(o.name, { cmd: "open", url: o.url, newTab: true });
+    if (!opened.ok) fail(String(opened.error), Number(opened.code) || EXIT.failed);
+  }
   console.log(`started session "${o.name}" (pid ${info?.pid ?? "?"})${await devtoolsLine()}`);
   process.exit(0);
 }

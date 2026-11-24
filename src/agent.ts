@@ -104,9 +104,26 @@ class Agent {
         return this.open(req, timeoutMs);
       case "select": {
         const page = this.page(req.tab, true);
+        // The person at the terminal is editing the address, answering a
+        // prompt or reading help: the switch waits until they're done, so
+        // their edit isn't thrown away nor their keys sent to another page.
+        const deadline = Date.now() + timeoutMs - 300;
+        const t0 = Date.now();
+        while (this.app.humanBusy()) {
+          if (Date.now() > deadline) {
+            throw new CtlError(
+              "the person at the terminal is busy (editing the address, a prompt or help); tab not switched. " +
+                "Commands take --tab N to act on a tab without showing it",
+              EXIT.timeout,
+            );
+          }
+          await Bun.sleep(100);
+          if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
+        }
         this.app.agentSelect(page);
         this.note(`showing tab ${page.num}`);
-        return this.describe(page);
+        const waited = Date.now() - t0;
+        return waited > 150 ? { ...this.describe(page), waitedForPerson: waited } : this.describe(page);
       }
       case "close":
         return this.close(req);
@@ -434,8 +451,9 @@ class Agent {
       page,
       objectId,
       `function () {
+        // Never the field's value (it may be a password): its names only.
         const t = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("placeholder") || this.getAttribute("name"))) ||
-          (this.innerText || this.value || "").trim();
+          (this.tagName === "INPUT" || this.tagName === "TEXTAREA" || this.tagName === "SELECT" ? "" : (this.innerText || "").trim());
         return this.tagName ? this.tagName.toLowerCase() + (t ? ' "' + String(t).replace(/\\s+/g, " ").slice(0, 40) + '"' : "") : "element";
       }`,
     ).catch(() => "element");
@@ -460,10 +478,19 @@ class Agent {
           this.dispatchEvent(new Event("change", { bubbles: true }));
           return { select: true };
         }
-        this.focus();
         const doc = this.ownerDocument, win = doc.defaultView;
         const field = this.tagName === "INPUT" || this.tagName === "TEXTAREA";
         if (!field && !this.isContentEditable) return { field: false };
+        const ac = String(this.getAttribute("autocomplete") || "").toLowerCase();
+        const secret = this.type === "password" || /(^|\\s)(cc-|one-time-code|current-password|new-password)/.test(ac);
+        if (this.disabled || this.closest("fieldset:disabled")) return { field: true, refused: "it's disabled", secret };
+        if (field && this.readOnly) return { field: true, refused: "it's read-only", secret };
+        if (field && this.tagName === "INPUT" && !/^(|text|search|url|tel|email|password|number)$/i.test(this.type)) {
+          return { field: true, refused: \`it's an input of type \${this.type}\`, secret };
+        }
+        this.focus();
+        // Typing goes wherever focus is: it must be this field (or inside it).
+        if (!(doc.activeElement === this || this.contains(doc.activeElement))) return { field: true, refused: "it won't take focus", secret };
         if (field) {
           const end = this.value.length;
           try { append ? this.setSelectionRange(end, end) : this.select(); } catch { if (!append) this.select && this.select(); }
@@ -475,7 +502,7 @@ class Agent {
           s.removeAllRanges();
           s.addRange(r);
         }
-        return { field: true, focused: doc.activeElement === this || this.contains(doc.activeElement) };
+        return { field: true, secret };
       }`,
       [!!req.append, text],
     );
@@ -485,10 +512,13 @@ class Agent {
       return { tab: page.num, ref: req.ref, selected: text };
     }
     if (kind?.field === false) throw new CtlError(`element ${req.ref} isn't a text field (click it, then use key)`);
+    if (kind?.refused) throw new CtlError(`element ${req.ref} can't be typed into: ${kind.refused}; nothing was typed`);
+    if (!kind?.field) throw new CtlError(`element ${req.ref} can't be typed into; nothing was typed`);
     if (text) await this.cdp.send("Input.insertText", { text }, sid);
     else if (!req.append) await this.pressKey(page, "Delete");
     if (req.submit) await this.pressKey(page, "Enter");
-    this.note(`typed into ${await this.label(page, objectId)}`);
+    // What was typed is never shown (nor is a password field's name worth the risk).
+    this.note(kind.secret ? "typed into a password field" : `typed into ${await this.label(page, objectId)}`);
     return { tab: page.num, ref: req.ref, typed: text.length };
   }
 
@@ -555,12 +585,14 @@ class Agent {
   private async waitLoad(page: Page, deadline: number, navigation: boolean): Promise<void> {
     const started = Date.now();
     let settledAt = 0;
-    while (Date.now() < deadline) {
+    // At least one look, however short the timeout.
+    for (let first = true; first || Date.now() < deadline; first = false) {
       if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
       if (page.dialog) return; // the page waits on its dialog: nothing more will load
       const fresh = !navigation || page.navStarted === 0;
       const state = fresh ? await this.evalValue(page, "[document.readyState, location.href]").catch(() => null) : null;
-      const complete = state?.[0] === "complete" && !String(state?.[1] ?? "").includes("#termium-");
+      // (termium's own blank page isn't loaded yet; a page's real #termium-... fragment is.)
+      const complete = state?.[0] === "complete" && !this.app.isPlaceholder(String(state?.[1] ?? ""));
       if (complete && !page.loading) return;
       // A same-document navigation (only the #fragment changed) never says it stopped loading.
       if (complete) {
@@ -599,7 +631,7 @@ class Agent {
       });
     }
     const want = !req.gone;
-    while (Date.now() < deadline) {
+    for (let first = true; first || Date.now() < deadline; first = false) {
       if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
       if (page.dialog) throw new CtlError(`tab ${page.num} is showing a ${page.dialog.type} dialog; answer it with termium ctl dialog`);
       const got = await this.evalValue(page, probe).catch(() => null);

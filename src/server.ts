@@ -467,7 +467,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         return;
       }
       cdp = browser.cdp;
-      if (process.env.TERMIUM_DEBUG) cdp.trace = (dir, msg) => log(`${dir} ${msg}`);
+      // (What's typed, by a person or an agent, is never written to the log: it may be a password.)
+      if (process.env.TERMIUM_DEBUG) {
+        cdp.trace = (dir, msg) =>
+          log(`${dir} ${/"Input\./.test(msg) ? msg.replace(/"(text|unmodifiedText)":"(?:[^"\\]|\\.)*"/g, '"$1":"(not logged)"') : msg}`);
+      }
       cdp.onClose = () => {
         if (!shuttingDown) void shutdown(1, new Error(`the browser went away (see ${join(logDir, "browser.log")})`));
       };
@@ -504,7 +508,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
             ? `Restarted: termium ${restore.from} → ${version}`
             : `Restarted: termium ${version}`
           : undefined;
-        const reopened = await app.start(args.url, restore?.layout, notice);
+        const notKept = Number(restore?.layout.notKept) || 0;
+        const noticeAll = notice && notKept ? `${notice} (${notKept} tab${notKept === 1 ? "" : "s"} of other browser contexts not reopened)` : notice;
+        const reopened = await app.start(args.url, restore?.layout, noticeAll);
         // Removed only once everything in it reopened; otherwise kept, and the user told.
         if (reopened === "all") rmSync(restorePath(name), { force: true });
         else if (reopened === "some") {

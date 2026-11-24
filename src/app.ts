@@ -46,6 +46,8 @@ import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Ste
 export interface Page {
   /** A short number for the page, unique in the session (what `termium ctl` calls a tab). */
   num: number;
+  /** Its browser context (another DevTools client's newContext() makes others). */
+  contextId?: string;
   targetId: string;
   sessionId: string;
   url: string;
@@ -555,21 +557,52 @@ export class App {
   }
 
   /** Spaces, tabs and splits with their pages' addresses, for a restart. */
+  /** The browser's default context (termium's own pages are in it). */
+  private defaultContext: string | undefined;
+
+  /**
+   * Spaces, tabs and splits with their pages' addresses, for a restart.
+   * Pages of other browser contexts (a DevTools client's isolated
+   * newContext()) aren't kept: reopened, they'd lose that isolation.
+   */
   layoutSnapshot(): SavedLayout {
-    const node = (n: Node<Page>): SavedNode =>
-      n.kind === "leaf"
-        ? { url: n.item.url.includes(MARKER) || n.item.url === "about:blank" ? "" : n.item.url }
-        : { dir: n.dir, ratio: n.ratio, a: node(n.a), b: node(n.b) };
-    return {
-      spaces: this.spaces.map((s) => ({
-        name: s.name,
-        active: s.active,
-        tabs: s.tabs.map((t) => ({ root: node(t.root), focus: Math.max(0, leaves(t.root).indexOf(t.focused)), zoomed: t.zoomed })),
-      })),
-      activeSpace: this.activeSpace,
-      sidebar: this.sidebar,
-      zoom: this.zoom,
+    let notKept = 0;
+    const keep = (p: Page) => !p.contextId || !this.defaultContext || p.contextId === this.defaultContext;
+    const node = (n: Node<Page>): SavedNode | null => {
+      if (n.kind === "leaf") {
+        if (!keep(n.item)) {
+          notKept++;
+          return null;
+        }
+        return { url: n.item.url.includes(MARKER) || n.item.url === "about:blank" ? "" : n.item.url };
+      }
+      const a = node(n.a);
+      const b = node(n.b);
+      return a && b ? { dir: n.dir, ratio: n.ratio, a, b } : (a ?? b);
     };
+    const spaces = this.spaces.map((s) => {
+      const tabs: SavedLayout["spaces"][number]["tabs"] = [];
+      let active = 0;
+      s.tabs.forEach((t, i) => {
+        const root = node(t.root);
+        if (!root) return;
+        if (i <= s.active) active = tabs.length;
+        const kept = leaves(t.root).filter(keep);
+        tabs.push({ root, focus: Math.max(0, kept.indexOf(t.focused)), zoomed: t.zoomed });
+      });
+      return { name: s.name, active, tabs };
+    });
+    return { spaces, activeSpace: this.activeSpace, sidebar: this.sidebar, zoom: this.zoom, notKept };
+  }
+
+  /** The person at the terminal is in the middle of something (address bar, a prompt, help, a key prefix...). */
+  humanBusy(): boolean {
+    return this.attached && (this.mode !== "normal" || !!this.prompt);
+  }
+
+  /** A page address is termium's own placeholder for a blank page (not a real #termium-... fragment). */
+  isPlaceholder(url: string): boolean {
+    return url.includes(MARKER);
   }
 
   /** Opens a saved layout (pages load from their addresses): "all" of its pages came up, "some", or "none". */
@@ -783,6 +816,7 @@ export class App {
 
     const page: Page = {
       num: 0, // numbered below, once it's known to stay
+      contextId: targetInfo.browserContextId,
       targetId: targetInfo.targetId,
       sessionId,
       url: targetInfo.url,
@@ -812,6 +846,8 @@ export class App {
     const marker = markerIdx >= 0 ? targetInfo.url.slice(markerIdx) : null;
     let placement = marker ? this.placements.get(marker) : undefined;
     if (marker) this.placements.delete(marker);
+    // termium's own pages are in the browser's default context.
+    if (placement && targetInfo.browserContextId) this.defaultContext ??= targetInfo.browserContextId;
 
     if (!placement) {
       // Not ours: the startup about:blank, or a popup / target=_blank link.
