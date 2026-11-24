@@ -85,6 +85,8 @@ export interface Page {
   restartCast?: boolean;
   /** When its viewport or screencast last changed: frames of another size just after are stale. */
   viewportAt?: number;
+  /** Screencast starts that failed in a row (retried a while). */
+  castRetries?: number;
 }
 
 interface Tab {
@@ -220,6 +222,8 @@ const HELP: [string, string][] = [
 // ---------------------------------------------------------------- app
 
 export class App {
+  /** Screencast starts failed on purpose so far (TERMIUM_TEST_FAIL_CASTS, tests only). */
+  static failedCasts = 0;
   spaces: Space[] = [];
   activeSpace = 0;
   pages = new Map<string, Page>(); // by sessionId
@@ -1271,6 +1275,20 @@ export class App {
     page.queuedKey = key;
     const seq = page.frameSeq;
     void this.serial(page, () => this.applyViewport(page)).then(() => {
+      if (page.casting && !sameSize(page.appliedCast, page.casting) && page.queuedKey === key && this.geom.has(page)) {
+        // The screencast didn't start (the page was between documents, just
+        // after a crash or replacement: "not attached to an active page").
+        // Without a retry it never would, and the pane would never update.
+        if ((page.castRetries = (page.castRetries ?? 0) + 1) <= 20) {
+          page.queuedKey = null;
+          setTimeout(() => {
+            if (this.geom.has(page) && this.pages.has(page.sessionId) && page.queuedKey === null) this.showPage(page);
+          }, 300);
+          return;
+        }
+      } else {
+        page.castRetries = 0;
+      }
       // Static pages may not produce a frame on their own; grab one.
       setTimeout(() => {
         if (page.frameSeq === seq && this.geom.has(page)) void this.snapshot(page);
@@ -1323,6 +1341,9 @@ export class App {
       page.restartCast = false;
       page.viewportAt = Date.now();
       if (page.appliedCast) await this.cdp.send("Page.stopScreencast", {}, sid).catch(() => {});
+      page.appliedCast = null; // until it has started (a failed start is retried: see showPage)
+      // Tests make the first few starts fail, as Chrome's do mid-replacement.
+      if (Number(process.env.TERMIUM_TEST_FAIL_CASTS) > App.failedCasts++) throw new Error("Page.startScreencast: test failure");
       await this.cdp.send("Page.startScreencast", { format: "png", maxWidth: cast.w, maxHeight: cast.h, everyNthFrame: 1 }, sid);
       page.appliedCast = cast;
     }

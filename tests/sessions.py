@@ -505,6 +505,15 @@ try:
     check("r3: ...and the session still answers", "r3f" in cli("ls").stdout and exit_code(bf, 0.5) is None)
     bf.close()
 
+    # --- a screencast that fails to start (Chrome: "not attached to an active page", mid-replacement)
+    # is started again: the pane still shows the page and its changes
+    page_turns_blue = "data:text/html,<body style='background:rgb(0,200,0)'><script>setTimeout(() => document.body.style.background = 'rgb(0,0,200)', 4000)</script>"
+    fc = Term(["bun", main, "-s", "castfail", "--incognito", page_turns_blue], cwd=ROOT, env=dict(ENV, TERMIUM_TEST_FAIL_CASTS="3"))
+    centre = lambda: (lambda im: im.getpixel((im.width // 2, im.height // 2)) if im else None)(fc.latest_image())
+    check("cast retry: the page shows although the first screencast starts failed", fc.wait_for(lambda: (centre() or (0, 0, 0))[1] > 150, 30), centre())
+    check("cast retry: ...and its later changes show (the screencast runs)", fc.wait_for(lambda: (centre() or (0, 0, 0))[2] > 150, 15), centre())
+    fc.close()
+
     # --- a stale socket from a server that never cleaned up (and an error file of a client killed outright)
     open(os.path.join(sockdir, "gone.999999.err"), "w").write("x")
     cli("ls")
@@ -523,7 +532,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("default", "one", "two", "stale", "hung", "handler", "work", "shared", "urlrace", "prefix", "r3", "r3b", "r3k", "r3f", f"race{os.getpid()}"):
+    for name in ("default", "one", "two", "stale", "hung", "handler", "work", "shared", "urlrace", "prefix", "r3", "r3b", "r3k", "r3f", "castfail", f"race{os.getpid()}"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)
