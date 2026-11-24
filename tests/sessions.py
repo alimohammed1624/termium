@@ -24,7 +24,9 @@ main = os.path.join(ROOT, "src", "main.ts")
 tmp = tempfile.mkdtemp(prefix="tss-")
 rt = os.path.join(tmp, "run"); os.makedirs(rt)
 prof = os.path.join(tmp, "profile")
-ENV = {"XDG_RUNTIME_DIR": rt, "TERMIUM_TEST_DEVTOOLS_PORT": "1"}
+TMPD = os.path.join(tmp, "t"); os.makedirs(TMPD)  # the servers' temp dir: leftovers are looked for only here
+ENV = {"XDG_RUNTIME_DIR": rt, "TERMIUM_TEST_DEVTOOLS_PORT": "1", "TMPDIR": TMPD,
+       "XDG_DATA_HOME": os.path.join(tmp, "data"), "XDG_STATE_HOME": os.path.join(tmp, "state")}
 sockdir = os.path.join(rt, "termium")
 
 with socket.socket() as so:
@@ -244,7 +246,7 @@ try:
 
     # --- several termiums starting the same session at once: one server, the others attach to it
     import glob
-    leftovers = lambda: set(glob.glob("/tmp/tmb-*") + glob.glob("/tmp/termium-incognito-*"))
+    leftovers = lambda: set(glob.glob(os.path.join(TMPD, "tmb-*")) + glob.glob(os.path.join(TMPD, "termium-incognito-*")))
     before_tmp = leftovers()
     RACE = f"race{os.getpid()}"  # unique: the pgrep below can only match this run's server
     racers = [termium("-s", RACE, "--incognito") for _ in range(3)]
@@ -299,6 +301,8 @@ try:
     so.sendall(frame({"t": "hello", "v": 1, "kind": "attach", "cols": 100, "rows": 30, "cellW": 10, "cellH": 20}))
     so.sendall(frame({"t": "input", "ev": {"type": "key"}}))  # no mods, no key: the handler throws
     so.sendall(frame({"t": "input", "ev": {"type": "mouse"}}))
+    # an attach this big (4096 x 4096 cells of 256 px) is drawn for at a capped size, not tried
+    so.sendall(frame({"t": "hello", "v": 1, "kind": "attach", "cols": 4096, "rows": 4096, "cellW": 256, "cellH": 256}))
     so.sendall(frame({"t": "ping"}))
     got = b""
     end = time.time() + 5
@@ -312,9 +316,61 @@ try:
         got += chunk
     check("handler: a bad input event doesn't drop the client", b'"pong"' in got)
     so.close()
+    t0 = time.time(); r = cli("ls")
+    check("handler: a huge attach doesn't stall the session", "handler" in r.stdout and "not responding" not in r.stdout and time.time() - t0 < 5, r.stdout)
     check("kill handler", cli("kill", "handler").returncode == 0)
 
-    # --- a stale socket from a server that never cleaned up
+    # --- named sessions have their own profiles: `termium -s NAME` runs next to the default one
+    d0 = termium()
+    check("profiles: the default session starts", at_address_bar(d0))
+    w1 = termium("-s", "work")
+    check("profiles: `-s work` starts while the default runs", at_address_bar(w1) and exit_code(w1, 0.5) is None, output(w1)[-300:])
+    r = cli("ls")
+    check("profiles: each session uses its own profile",
+          os.path.join(tmp, "data", "termium", "profile") in r.stdout and os.path.join(tmp, "data", "termium", "profiles", "work") in r.stdout, r.stdout)
+    w1.close(); d0.close()
+
+    # --- a terminal that can't show pictures never ends a session another terminal uses
+    class Silent(Term):
+        """A terminal that never answers (so its client gives up only after its timeout)."""
+        def _answer_queries(self, data):
+            pass
+    ng = Silent(["bun", main, "-s", "shared", "--incognito"], cwd=ROOT, env=ENV)
+    other = termium("-s", "shared", "--incognito")  # started at the same moment: attaches to the same session
+    check("abandon: another terminal attaches while the first is still checking", other.wait_frames(1, 30) or at_address_bar(other, 5))
+    code = exit_code(ng, 15)
+    check("abandon: the terminal without graphics gives up", code == 1 and "kitty graphics" in output(ng), (code, output(ng)[-200:]))
+    check("abandon: (the other terminal attached to that session)", "shared" in cli("ls").stdout and "attached" in cli("ls").stdout)
+    time.sleep(2)
+    check("abandon: ...without ending the session the other terminal uses", server_pid("shared") is not None and exit_code(other, 0.5) is None)
+    other.close()
+
+    # --- a URL from a client racing the session's start isn't lost
+    first = termium("-s", "urlrace")
+    time.sleep(0.12)
+    second = termium("-s", "urlrace", f"{BASE}/page.html?third=1")
+    check("url race: the second client's URL opens as a tab", second.wait_for(lambda: "2 pages" in cli("ls").stdout, 30), cli("ls").stdout)
+    for x in (first, second):
+        if x.alive and exit_code(x, 0.1) is None:
+            x.close()
+    cli("kill", "urlrace")
+
+    # --- takeover doesn't inherit the old terminal's half-typed prefix
+    p1 = termium("-s", "prefix", "--incognito")
+    check("prefix: session starts", at_address_bar(p1))
+    p1.key("escape"); time.sleep(0.3)
+    p1.key("ctrl+b"); time.sleep(0.5)  # prefix pending on terminal 1
+    p2 = termium("attach", "prefix")
+    check("prefix: takeover draws", p2.wait_for(lambda: "SPACES" in p2.text(), 20))
+    time.sleep(1)
+    p2.key("d"); time.sleep(2.5)
+    check("prefix: a plain d on the new terminal doesn't detach it", exit_code(p2, 0.5) is None, output(p2)[-200:])
+    p2.close()
+
+    # --- a stale socket from a server that never cleaned up (and an error file of a client killed outright)
+    open(os.path.join(sockdir, "gone.999999.err"), "w").write("x")
+    cli("ls")
+    check("ls removes error files of clients that are gone", not os.path.exists(os.path.join(sockdir, "gone.999999.err")))
     stale = os.path.join(sockdir, "stale.sock")
     so = socket.socket(socket.AF_UNIX); so.bind(stale); so.close()
     open(os.path.join(sockdir, "stale.pid"), "w").write("999999\n")
@@ -329,7 +385,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("default", "one", "two", "stale", "hung", "handler", f"race{os.getpid()}"):
+    for name in ("default", "one", "two", "stale", "hung", "handler", "work", "shared", "urlrace", "prefix", f"race{os.getpid()}"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)

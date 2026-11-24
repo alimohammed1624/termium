@@ -20,6 +20,7 @@ Usage as a library:
 
 from __future__ import annotations
 
+import atexit
 import base64
 import fcntl
 import io
@@ -75,12 +76,20 @@ class Term:
         termium runs as a client of a background session server. Unless env
         sets XDG_RUNTIME_DIR, each Term gets a private one, so its session
         can't meet any other (the user's own included), and close() makes
-        sure that session's server is gone too."""
+        sure that session's server is gone too. XDG_DATA_HOME and
+        XDG_STATE_HOME default to private ones as well (profiles, logs), all
+        under one temp dir removed on close or when Python exits."""
         self.passthrough = passthrough
         env = dict(env or {})
         self.own_runtime = "XDG_RUNTIME_DIR" not in env
-        if self.own_runtime:
-            env["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="trt-")
+        self.own_root = None
+        if self.own_runtime or "XDG_DATA_HOME" not in env or "XDG_STATE_HOME" not in env:
+            self.own_root = tempfile.mkdtemp(prefix="trt-")
+            _OWN_ROOTS.append(self)
+        for var, sub in (("XDG_RUNTIME_DIR", "run"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state")):
+            if var not in env:
+                env[var] = os.path.join(self.own_root, sub)
+                os.makedirs(env[var], mode=0o700, exist_ok=True)
         self.runtime_dir = env["XDG_RUNTIME_DIR"]
         if passthrough:
             rows, cols, xpix, ypix = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
@@ -95,6 +104,7 @@ class Term:
         # Graphics commands that arrived in the middle of a chunked transfer
         # (a real terminal takes them as the end of that picture).
         self.violations = 0
+        self.violation_log: list[str] = []
         self._loading = False
         # Temporary files pictures came in: (name, permission bits, symlink?)
         self.graphics_files: list[tuple[str, int, bool]] = []
@@ -209,6 +219,9 @@ class Term:
         self._track_cursor(bytes(text))
         # Sequences pyte can't parse (or chokes on, like tmux's CSI ? n) are dropped.
         cleaned = re.sub(rb"\x1b\[[<>=?][0-9;:]*u|\x1b\[[0-9;]*t|\x1b\[\?[0-9;]*\$p|\x1b\[\?[0-9;]*n|\x1b\[\d+ q", b"", bytes(text))
+        # REP (CSI n b: repeat the previous character n times), which pyte lacks.
+        if b"b" in cleaned:
+            cleaned = _expand_rep(cleaned)
         # Colon-separated SGR (tmux writes 38:2:r:g:b) as pyte's semicolons.
         cleaned = re.sub(rb"\x1b\[[0-9:;]*:[0-9:;]*m", lambda m: m.group(0).replace(b"::", b":").replace(b":", b";"), cleaned)
         with self.lock:
@@ -273,6 +286,7 @@ class Term:
             return
         if self._loading and not (a is None and set(kv) <= {"m", "q"}):
             self.violations += 1
+            self.violation_log.append(ctrl[:60])
             self._loading = False
         if a == "q":
             return
@@ -482,19 +496,40 @@ class Term:
         found = []
         for y in range(self.rows):
             line = self.screen.buffer[y]
+            prev = None  # (image id, row, column) of the cell to the left, if a placeholder
             for x in range(self.cols):
                 cell = line[x]
-                if not cell.data.startswith(PLACEHOLDER) or len(cell.data) < 3:
+                if not cell.data.startswith(PLACEHOLDER):
+                    prev = None
                     continue
-                i = _COLOR_INDEX.get(cell.fg)
-                pr, pc = _DIACRITIC.get(cell.data[1]), _DIACRITIC.get(cell.data[2])
-                if i is None or pr is None or pc is None:
+                # The colour is the id's low 24 bits: a 256-colour index (pyte keeps those as
+                # palette hex) or an RGB value; whichever names a known image.
+                lows = []
+                if cell.fg in _COLOR_INDEX:
+                    lows.append(_COLOR_INDEX[cell.fg])
+                if isinstance(cell.fg, str) and re.fullmatch(r"[0-9a-fA-F]{6}", cell.fg):
+                    lows.append(int(cell.fg, 16))
+                marks = cell.data[1:]
+                pr = _DIACRITIC.get(marks[0]) if len(marks) > 0 else None
+                pc = _DIACRITIC.get(marks[1]) if len(marks) > 1 else None
+                hi = _DIACRITIC.get(marks[2]) if len(marks) > 2 else None
+                if not lows:
+                    prev = None
                     continue
-                # A third mark is the id's most significant byte.
-                i += (_DIACRITIC.get(cell.data[3], 0) << 24) if len(cell.data) > 3 else 0
-                if i not in self.virtual:
-                    continue
-                found.append((y, x, i, pr, pc))
+                if pr is None:
+                    # Bare: counts on from the cell to its left (same colour), as terminals do.
+                    if not prev or (prev[0] & 0xFFFFFF) not in lows:
+                        prev = None
+                        continue
+                    i, pr, pc = prev[0], prev[1], prev[2] + 1
+                else:
+                    ids = [low + ((hi or 0) << 24) for low in lows]
+                    i = next((c for c in ids if c in self.virtual), ids[0])
+                    if pc is None:
+                        pc = prev[2] + 1 if prev and prev[1] == pr and prev[0] == i else 0
+                prev = (i, pr, pc)
+                if i in self.virtual:
+                    found.append((y, x, i, pr, pc))
         return found
 
     def placeholder_images(self):
@@ -571,9 +606,14 @@ class Term:
         try:
             self._close_client()
         finally:
-            if self.own_runtime:
-                self.stop_server()
-                shutil.rmtree(self.runtime_dir, ignore_errors=True)
+            self._cleanup()
+
+    def _cleanup(self):
+        if self.own_runtime:
+            self.stop_server()
+        if self.own_root:
+            shutil.rmtree(self.own_root, ignore_errors=True)
+            self.own_root = None
 
     def _close_client(self):
         try:
@@ -602,6 +642,40 @@ class Term:
 
     def __exit__(self, *exc):
         self.close()
+
+
+_ESCAPES = re.compile(r"\x1b\[[0-9;:?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[^\[\]]")
+
+
+_OWN_ROOTS: list = []
+
+
+@atexit.register
+def _remove_own_roots():
+    """Terms never closed (killed with kill9, say) still leave nothing behind."""
+    for t in _OWN_ROOTS:
+        try:
+            t._cleanup()
+        except Exception:
+            pass
+
+
+def _expand_rep(data: bytes) -> bytes:
+    """Replaces each CSI n b with n copies of the character printed just before it."""
+    out = bytearray()
+    pos = 0
+    last = ""
+    for m in re.finditer(rb"\x1b\[(\d*)b", data):
+        chunk = data[pos:m.start()]
+        out += chunk
+        printed = _ESCAPES.sub("", chunk.decode("utf-8", "ignore"))
+        printed = "".join(c for c in printed if c >= " " and not unicodedata.combining(c))
+        if printed:
+            last = printed[-1]
+        out += (last * int(m.group(1) or 1)).encode()
+        pos = m.end()
+    out += data[pos:]
+    return bytes(out)
 
 
 class _Screen(pyte.Screen):

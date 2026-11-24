@@ -285,14 +285,16 @@ try:
     check("ctrl+q quits from the address bar", not running(c) and helium_on(prof) == 0)
 
     # SIGKILLed incognito session: the next start removes its profile and browser
-    i1 = Term(["bun", main, "--incognito"], cwd=ROOT)
+    # (a temp dir of the test's own, so the leftovers looked for are only these)
+    itmp = os.path.join(tmp, "t"); os.makedirs(itmp)
+    i1 = Term(["bun", main, "--incognito"], cwd=ROOT, env={"TMPDIR": itmp})
     check("incognito starts", at_address_bar(i1))
-    inc = [d for d in glob.glob(f"/tmp/termium-incognito-{i1.server_pid()}-*")]
+    inc = [d for d in glob.glob(os.path.join(itmp, f"termium-incognito-{i1.server_pid()}-*"))]
     check("incognito profile is in the temp dir", len(inc) == 1, inc)
     freeze_browser(inc[0]) if inc else None
     i1.kill9()
     time.sleep(1)
-    i2 = Term(["bun", main, "--incognito"], cwd=ROOT)
+    i2 = Term(["bun", main, "--incognito"], cwd=ROOT, env={"TMPDIR": itmp})
     check("next start after a killed incognito session works", at_address_bar(i2))
     check("killed incognito session's profile removed", inc and not os.path.exists(inc[0]), inc)
     check("killed incognito session's browser stopped", inc and helium_on(inc[0]) == 0)

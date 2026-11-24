@@ -31,7 +31,12 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="termium-mux
 os.makedirs(OUT, exist_ok=True)
 tmp = tempfile.mkdtemp(prefix="tmx-")
 rt = os.path.join(tmp, "run"); os.makedirs(rt)
-ENV = {"XDG_RUNTIME_DIR": rt, "TERMIUM_TEST_DEVTOOLS_PORT": "1"}
+ENV = {"XDG_RUNTIME_DIR": rt, "TERMIUM_TEST_DEVTOOLS_PORT": "1",
+       "XDG_DATA_HOME": os.path.join(tmp, "data"), "XDG_STATE_HOME": os.path.join(tmp, "state")}
+# herdr runs from a home of its own: a fresh default config (as a new user has
+# it), and its sessions live there, never next to the user's.
+HOME = os.path.join(tmp, "home"); os.makedirs(HOME)
+HENV = dict(ENV, HOME=HOME, XDG_CONFIG_HOME=os.path.join(HOME, ".config"), SHELL="/bin/bash")
 sockdir = os.path.join(rt, "termium")
 TMUX_SOCK = f"termium-test-{os.getpid()}"
 HERDR = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
@@ -105,6 +110,10 @@ try:
 
     tmux("set", "-g", "allow-passthrough", "on")
     tmux("split-window", "-h", "-t", "main")
+    # Everything written into the two panes (by termium, before tmux), to check what termium itself sends.
+    pane_out = [os.path.join(tmp, f"pane{i}.out") for i in (0, 1)]
+    for i in (0, 1):
+        tmux("pipe-pane", "-t", f"main.{i}", f"cat >> {pane_out[i]}")
     tmux("select-pane", "-t", "main.1")  # termium starts in pane 0 while pane 1 is the active one
     panes = tmux("list-panes", "-t", "main", "-F", "#{pane_left} #{pane_width} #{pane_height}").stdout.split("\n")
     (l0, w0, h0), (l1, w1, h1) = [tuple(map(int, p.split())) for p in panes[:2]]
@@ -127,6 +136,9 @@ try:
     ok, px = shows_page(t, want, f"{OUT}/tmux-split.png")
     check("tmux: the placeholders show the page's picture", ok, px)
     check("tmux: no image is placed at a cell (only virtual placements)", not t.placements, t.placements)
+    rgb = "RGB" in tmux("display-message", "-p", "#{client_termfeatures}").stdout.split(",")
+    check("tmux: placeholder ids are 24-bit colours where the terminal shows RGB", not rgb or all((i & 0xFFFFFF) > 255 for i in t.placeholder_images()),
+          (rgb, list(t.placeholder_images())))
     check("tmux: temporary files have unguessable names, mode 0600, and are no symlinks",
           t.graphics_files and all(_re.fullmatch(r"termium-tty-graphics-protocol-[0-9a-f]{32}", n) and m == 0o600 and not l
                                    for n, m, l in t.graphics_files), t.graphics_files[:3])
@@ -135,6 +147,21 @@ try:
     t.write("\x0c"); time.sleep(0.4)  # Ctrl+L
     t.write(f"{BASE}/page.html\r")
     check("tmux: keyboard input reaches termium", t.wait_for(lambda: state(prof) is not None, 25))
+
+    # switching tabs: the old picture is deleted only after the new one and its cells are out
+    t.write("\x14"); time.sleep(1); t.write(f"{PAGE}\r")  # Ctrl+T, a second tab
+    t.wait_for(lambda: len(t.virtual) >= 2, 20); time.sleep(2)
+    mark = len(t.raw)
+    t.write("\x02"); time.sleep(0.2); t.write("\x02"); time.sleep(0.2); t.write("p")  # previous tab
+    time.sleep(3)
+    import re as _re
+    seg = bytes(t.raw[mark:])
+    sends = [(m.start(), int(m.group(1))) for m in _re.finditer(rb"\x1b_Ga=T[^;\x1b]*i=(\d+)", seg)]
+    dels = [(m.start(), int(m.group(1))) for m in _re.finditer(rb"\x1b_Ga=d,d=I,i=(\d+)", seg)]
+    first_send = sends[0][0] if sends else None
+    synced = first_send is not None and dels and all(seg.find(b"\x1b[?2026l", first_send) not in (-1,) and seg.find(b"\x1b[?2026l", first_send) < d for d, _ in dels)
+    check("tmux: on a tab switch the old picture goes after the new one and a finished redraw", bool(sends) and bool(dels) and synced,
+          (sends[:3], dels[:3]))
 
     # detach with tmux's prefix pressed twice (tmux sends one Ctrl+B through)
     spid = server_pid()
@@ -182,6 +209,23 @@ try:
     t.write("\x0c"); time.sleep(0.4); t.write(f"{BASE}/noise.html\r")
     big = lambda: any(len(t.images.get(i, b"")) > 1_000_000 for i in t.virtual)
     check("tmux: a large picture arrives whole as a file", t.wait_for(big, 25), {i: len(t.images.get(i, b"")) for i in t.virtual})
+    # hidden (another tmux window in front): no pictures, no files; shown again: drawn again
+    t.write("\x0c"); time.sleep(0.4); t.write(f"{BASE}/anim.html\r"); time.sleep(5)
+    pipe = pane_out[1]
+    time.sleep(1)
+    tmux("new-window", "-d", "-t", "main:9"); tmux("select-window", "-t", "main:9")
+    time.sleep(2)
+    hidden_from = os.path.getsize(pipe) if os.path.exists(pipe) else 0
+    time.sleep(4)
+    hidden = open(pipe, "rb").read()[hidden_from:] if os.path.exists(pipe) else b""
+    check("tmux: while its window is hidden, an animating page sends no pictures", hidden.count(b"a=T") == 0, hidden.count(b"a=T"))
+    shown_from = len(hidden) + hidden_from
+    tmux("select-window", "-t", "main:0")
+    t.wait_for(lambda: b"a=T" in open(pipe, "rb").read()[shown_from:], 8)
+    check("tmux: shown again, it draws again", b"a=T" in open(pipe, "rb").read()[shown_from:])
+    tmux("kill-window", "-t", "main:9")
+    time.sleep(1)
+
     # a second session in the other pane: its attach, detach and quit leave this picture alone
     if tmux("display-message", "-p", "-t", "main", "#{window_zoomed_flag}").stdout.strip() == "1":
         tmux("resize-pane", "-Z", "-t", "main.1")  # unzoom: both panes visible (-Z toggles)
@@ -207,7 +251,24 @@ try:
     big_now = lambda: any(len(t.images.get(i, b"")) > 1_000_000 for i in t.virtual) and b"\x1b_Gm=1;" in bytes(t.raw[before:])
     check("tmux: without files, a large picture arrives whole in paced chunks", t.wait_for(big_now, 40),
           {i: len(t.images.get(i, b"")) for i in t.virtual})
-    check("tmux: no graphics command ever lands inside a chunked transfer", t.violations == 0, t.violations)
+    def interleaved(path):
+        """Graphics commands termium wrote inside one of its own chunked transfers (not counting
+        what tmux may drop on the way: that's checked at the source, the pane's input)."""
+        raw = open(path, "rb").read() if os.path.exists(path) else b""
+        bad, loading = [], False
+        for m in _re.finditer(rb"\x1bPtmux;((?:[^\x1b]|\x1b\x1b)*)\x1b\\", raw):
+            inner = m.group(1).replace(b"\x1b\x1b", b"\x1b")
+            c = _re.match(rb"\x1b_G([^;\x1b]*)", inner)
+            if not c:
+                continue
+            ctrl = c.group(1)
+            kv = dict(p.split(b"=", 1) for p in ctrl.split(b",") if b"=" in p)
+            if loading and not (set(kv) <= {b"m", b"q"}):
+                bad.append(ctrl[:50])
+            loading = kv.get(b"m") == b"1"
+        return bad
+    bad = interleaved(pane_out[0]) + interleaved(pane_out[1])
+    check("tmux: termium never sends a graphics command inside one of its chunked transfers", not bad, bad[:5])
     r = cli("kill")
     check("tmux: kill ends the second session", r.returncode == 0 and server_pid() is None, r.stderr)
     tmux("kill-server")
@@ -218,8 +279,8 @@ try:
         print("SKIP herdr: not installed")
     else:
         hprof = os.path.join(tmp, "herdr-profile")
-        h = Term([HERDR, "--session", HERDR_SESSION], cols=160, rows=45, env=ENV)
-        hc = lambda *a: subprocess.run([HERDR, "--session", HERDR_SESSION, *a], capture_output=True, text=True)
+        h = Term([HERDR, "--session", HERDR_SESSION], cols=160, rows=45, env=HENV)
+        hc = lambda *a: subprocess.run([HERDR, "--session", HERDR_SESSION, *a], capture_output=True, text=True, env=dict(os.environ, **HENV))
         def shell_ready(pane_id, timeout=30):
             """The pane's shell has drawn its prompt and gone quiet (typing earlier can be mangled)."""
             last, since, end = None, time.time(), time.time() + timeout
@@ -233,7 +294,18 @@ try:
             return False
         h.wait_for(lambda: hc("pane", "list").returncode == 0 and '"panes"' in hc("pane", "list").stdout, 20)
         first = next((p["pane_id"] for p in json.loads(hc("pane", "list").stdout).get("result", {}).get("panes", []) if p.get("focused")), None)
+        # A first run shows an introduction that takes every key: continue (Enter), then close it (Esc).
+        onboarding = lambda: "continue" in h.text() or "integration" in h.text().lower()
+        for _ in range(6):
+            if not h.wait_for(onboarding, 3):
+                break
+            h.write("\r" if "continue" in h.text() else "\x1b"); time.sleep(1)
+        check("herdr: the first-run introduction is out of the way", not onboarding(), h.text()[-600:])
         check("herdr: its shell is ready", first is not None and shell_ready(first))
+        # Keys typed on the outer terminal reach the pane (not herdr's own UI) before any are relied on.
+        marker = f"ready{os.getpid()}"
+        h.write(f"echo {marker}x\r")
+        check("herdr: typing reaches the pane", h.wait_for(lambda: f"{marker}x" in hc("pane", "read", first, "--source", "visible").stdout, 10))
         hc("pane", "run", first, f"cd {ROOT} && bun src/main.ts --profile {hprof} '{PAGE}'")
         check("herdr: frames reach the outer terminal", h.wait_frames(1, 40))
         time.sleep(1.5)
@@ -261,9 +333,10 @@ try:
 finally:
     tmux("kill-server")
     if os.path.exists(HERDR):
-        subprocess.run([HERDR, "session", "stop", HERDR_SESSION], capture_output=True)
+        henv = dict(os.environ, **HENV)
+        subprocess.run([HERDR, "session", "stop", HERDR_SESSION], capture_output=True, env=henv)
         time.sleep(1)
-        subprocess.run([HERDR, "session", "delete", HERDR_SESSION], capture_output=True)
+        subprocess.run([HERDR, "session", "delete", HERDR_SESSION], capture_output=True, env=henv)
     for x in [x for x in globals().values() if isinstance(x, Term)]:
         if x.alive:
             try:

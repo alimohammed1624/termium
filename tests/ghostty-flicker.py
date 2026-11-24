@@ -27,7 +27,8 @@ for f in os.listdir(OUT):
         os.remove(os.path.join(OUT, f))
 tmp = tempfile.mkdtemp(prefix="termium-flicker-")
 rt = os.path.join(tmp, "run"); os.makedirs(rt, mode=0o700)
-env = dict(os.environ, XDG_RUNTIME_DIR=rt); env.pop("TMUX", None)
+XDG = {"XDG_RUNTIME_DIR": rt, "XDG_DATA_HOME": os.path.join(tmp, "data"), "XDG_STATE_HOME": os.path.join(tmp, "state")}
+env = dict(os.environ, **XDG); env.pop("TMUX", None)
 rows, cols, xpix, ypix = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
 cw, ch = xpix // cols, ypix // rows
 URL1 = "https://en.wikipedia.org/wiki/Terminal_emulator"
@@ -125,7 +126,7 @@ try:
         tm("-f", conf, "new-session", "-d", "-s", "f", "-x", str(cols), "-y", str(rows), "-c", ROOT)
         time.sleep(1.5)
         # Attach first: tmux learns the cell size from its client, and termium asks as it starts.
-        t = Term(["tmux", "-L", sock, "attach", "-t", "f"], passthrough=True, env={"XDG_RUNTIME_DIR": rt})
+        t = Term(["tmux", "-L", sock, "attach", "-t", "f"], passthrough=True, env=dict(XDG))
         time.sleep(1)
         tm("send-keys", "-t", "f", f"termium() {{ bun '{ROOT}/src/main.ts' \"$@\"; }}; clear", "Enter")
         time.sleep(0.5)
@@ -133,7 +134,7 @@ try:
     else:
         extra = {"TERMIUM_GRAPHICS": "placeholders"} if MODE == "placeholders" else {}
         t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "--profile", f"{tmp}/profile", URL1], cwd=ROOT,
-                 passthrough=True, env={"XDG_RUNTIME_DIR": rt, **extra})
+                 passthrough=True, env={**XDG, **extra})
     time.sleep(12)
     activate()
     time.sleep(0.5)
@@ -166,6 +167,24 @@ try:
     press("ctrl+b"); press("v"); time.sleep(0.6); type_(URL3); press("enter"); time.sleep(4)
     action[0] = "split"
     time.sleep(1)
+    # detach, then attach again in this same window
+    action[0] = "detach"
+    press("ctrl+b"); press("d"); time.sleep(2)
+    action[0] = "new attach"
+    if MODE == "tmux":
+        tm("send-keys", "-t", "f", "termium attach", "Enter")
+    else:
+        old = t
+        try:
+            old.close()
+        except Exception:
+            pass
+        t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "attach"], cwd=ROOT, passthrough=True,
+                 env={**XDG, **({"TERMIUM_GRAPHICS": "placeholders"} if MODE == "placeholders" else {})})
+    time.sleep(4)
+    action[0] = "re-attached tabs"
+    for _ in range(4):
+        press("ctrl+b"); press("n"); time.sleep(0.8)
     action[0] = "end"
     time.sleep(1)
 finally:
@@ -193,7 +212,7 @@ finally:
         "mode": MODE,
         "captures": len(results),
         # (a new tab or split pane is empty until its page draws: not flicker)
-        "blank": [r["file"] for r in results if r.get("blank", 0) > 0.5 and r["action"] not in ("start", "new tab", "new split")],
+        "blank": [r["file"] for r in results if r.get("blank", 0) > 0.5 and r["action"] not in ("start", "new tab", "new split", "detach", "new attach")],
         "frames": results,
     }
     with open(os.path.join(OUT, "summary.json"), "w") as f:
