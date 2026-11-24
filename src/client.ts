@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lockHolder } from "./browser";
+import { lockHolder, pidAlive } from "./browser";
 import { InputParser, type InputEvent } from "./input";
 import type { Hello } from "./server";
 import { stateDir } from "./server";
@@ -854,14 +854,7 @@ export async function killSession(name: string): Promise<void> {
   // Whatever it said, make sure it's gone, its browser too: a stopped or
   // hung server (or browser) gets SIGKILL.
   const pid = serverPid;
-  const stillAlive = (pids: number[]) => pids.filter((q) => {
-    try {
-      process.kill(q, 0);
-      return true;
-    } catch (e: any) {
-      return e?.code === "EPERM";
-    }
-  });
+  const stillAlive = (pids: number[]) => pids.filter(pidAlive);
   // (A server that ended closes its socket just before it exits.)
   if (answered) for (let i = 0; i < 40 && pid && stillAlive([pid]).length; i++) await Bun.sleep(50);
   if (pid && stillAlive([pid]).length) {

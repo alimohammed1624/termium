@@ -300,6 +300,19 @@ try:
     check("killed incognito session's browser stopped", inc and helium_on(inc[0]) == 0)
     i2.close()
 
+    # a leftover whose termium is a zombie (dead, not yet reaped: how a killed session server
+    # looks until something reaps it) is cleaned up like any other
+    zpid = os.fork()
+    if zpid == 0:
+        os._exit(0)
+    time.sleep(0.3)  # now a zombie: this process doesn't reap it yet
+    zdir = os.path.join(itmp, f"termium-incognito-{zpid}-zombie")
+    os.makedirs(os.path.join(zdir, "Default")); open(os.path.join(zdir, "Default", "x"), "w").write("x")
+    z = Term(["bun", main, "--incognito"], cwd=ROOT, env={"TMPDIR": itmp})
+    check("a session's start cleans up after a zombie termium", at_address_bar(z) and not os.path.exists(zdir), os.path.exists(zdir))
+    z.close()
+    os.waitpid(zpid, 0)
+
     # terminal without kitty graphics: refuses and leaves no browser behind
     class NoGraphics(Term):
         def _answer_queries(self, data):

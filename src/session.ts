@@ -16,7 +16,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lockFile, unlockFile } from "./browser";
+import { lockFile, pidAlive, unlockFile } from "./browser";
 
 /** Bumped whenever client and server stop understanding each other. */
 export const PROTOCOL = 1;
@@ -117,12 +117,7 @@ export function sweepGraphicsFiles(): void {
   for (const f of names) {
     const m = f.startsWith(GRAPHICS_FILE_PREFIX) && f.slice(GRAPHICS_FILE_PREFIX.length).match(/^(\d+)-[0-9a-f]{32}$/);
     if (!m) continue;
-    try {
-      process.kill(Number(m[1]), 0);
-      continue; // its client still runs
-    } catch (e: any) {
-      if (e?.code === "EPERM") continue;
-    }
+    if (pidAlive(Number(m[1]))) continue; // its client still runs (or it's someone else's)
     try {
       const st = lstatSync(join(dir, f));
       if (st.isFile() && st.uid === uid) rmSync(join(dir, f), { force: true });
@@ -141,12 +136,7 @@ export function sweepErrFiles(dir = socketDir()): void {
   for (const f of names) {
     const m = f.match(/\.(\d+)\.err$/);
     if (!m) continue;
-    try {
-      process.kill(Number(m[1]), 0);
-      continue; // its client is still running
-    } catch (e: any) {
-      if (e?.code === "EPERM") continue;
-    }
+    if (pidAlive(Number(m[1]))) continue; // its client still runs (or it's someone else's)
     rmSync(join(dir, f), { force: true });
   }
 }

@@ -17,6 +17,7 @@ import {
   launchBrowser,
   lockFile,
   lockProfile,
+  pidAlive,
   reapOrphans,
   unlockFile,
   unlockProfile,
@@ -91,27 +92,28 @@ async function sweepTemp(): Promise<void> {
   for (const name of names) {
     const m = name.match(/^(tmb|termium-incognito)-(\d+)-/);
     if (!m) continue;
-    try {
-      process.kill(Number(m[2]), 0);
-      continue; // that termium is still running
-    } catch (e: any) {
-      if (e?.code === "EPERM") continue; // alive, and someone else's
-    }
+    if (pidAlive(Number(m[2]))) continue; // that termium is still running (or it's someone else's)
     const dir = join(base, name);
+    const marker = join(dir, ".sweeping");
+    let marked = false;
     try {
       // Two termiums starting at once mustn't both clean the same leftover:
       // the first to create the marker does it, the other leaves it alone.
       if (m[1] === "termium-incognito") {
         try {
-          closeSync(openSync(join(dir, ".sweeping"), "wx"));
+          closeSync(openSync(marker, "wx"));
+          marked = true;
         } catch {
           continue;
         }
         await reapOrphans(dir).catch(() => 0);
       }
-      rmSync(dir, { recursive: true, force: true });
+      // The browser's last processes may still be writing as they exit.
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch {
-      // Not ours to remove (another user's); never a reason not to start.
+      // Not ours to remove (another user's), or still busy: never a reason
+      // not to start, and the next start tries again.
+      if (marked) rmSync(marker, { force: true });
     }
   }
 }
@@ -136,12 +138,7 @@ function rotate(path: string): void {
 }
 
 function isRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return pidAlive(pid);
 }
 
 /**

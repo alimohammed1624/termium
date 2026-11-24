@@ -272,6 +272,27 @@ export async function reapOrphans(profileDir: string): Promise<number> {
 }
 
 /** Running, not merely an exited process its parent hasn't collected yet. */
+/**
+ * Whether process `pid` is running (someone else's counts; a zombie, dead
+ * but not yet reaped, doesn't). A killed session server is reparented when
+ * its client dies too, and until something reaps it, kill(pid, 0) still
+ * succeeds; going by that, what it left behind was never cleaned up.
+ */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (e: any) {
+    if (e?.code !== "EPERM") return false;
+  }
+  if (process.platform !== "linux") return true;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
+  } catch {
+    return false;
+  }
+}
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
