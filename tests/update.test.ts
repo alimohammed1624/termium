@@ -391,33 +391,59 @@ test("only a native termium binary for this machine is accepted", () => {
   expect(nativeProblem(bun, process.platform, process.arch, bun.length)).toBeNull();
 });
 
-test("cache changes from several processes at once are never lost", async () => {
+test("cache changes from several processes at once never undo each other's", async () => {
   const p = join(tempDir(), "update-check.json");
   const mod = join(import.meta.dir, "..", "src", "update.ts");
+  // Each process prints the last value it managed to write (a write that
+  // can't get the lock in time is skipped: the cache is best effort).
   const run = (field: string, prefix: string) =>
     Bun.spawn(["bun", "-e", `const u = await import(${JSON.stringify(mod)});
-      for (let i = 0; i < 150; i++) u.updateCache(${JSON.stringify(p)}, (c) => ({ ...c, ${field}: "${prefix}" + i }));`]);
+      let last = "";
+      for (let i = 0; i < 150; i++) if (await u.updateCache(${JSON.stringify(p)}, (c) => ({ ...c, ${field}: "${prefix}" + i }))) last = "${prefix}" + i;
+      console.log(last);`], { stdout: "pipe" });
   const a = run("latest", "v1.0.");
   const b = run("skipped", "v2.0.");
+  const [la, lb] = await Promise.all([new Response(a.stdout).text(), new Response(b.stdout).text()]);
   expect(await a.exited).toBe(0);
   expect(await b.exited).toBe(0);
   const c = loadCache(p)!;
-  expect(c.latest).toBe("v1.0.149");
-  expect(c.skipped).toBe("v2.0.149");
+  expect(la.trim()).toMatch(/^v1\.0\.\d+$/);
+  expect(lb.trim()).toMatch(/^v2\.0\.\d+$/);
+  expect(c.latest).toBe(la.trim());
+  expect(c.skipped).toBe(lb.trim());
   expect(readdirSync(join(p, "..")).sort()).toEqual(["update-check.json"]);
 }, 30_000);
 
-test("a restart snapshot reopens only under the launch options it was saved with", () => {
-  const r: Restore = {
-    v: 1, at: Date.now(), from: "0.3.0",
-    launch: { profile: "/p/a", incognito: false, scale: null, search: "x%s" },
-    layout: { spaces: [], activeSpace: 0, sidebar: true, zoom: 1 },
-  };
-  expect(restoreConflict(r, { profile: "/p/a", incognito: false })).toBeNull();
-  expect(restoreConflict(r, { incognito: false })).toMatch(/--profile \/p\/a/);
-  expect(restoreConflict(r, { incognito: true })).toMatch(/wasn't --incognito/);
-  const inc = { ...r, launch: { ...r.launch, profile: undefined, incognito: true } };
-  expect(restoreConflict(inc, { incognito: true })).toBeNull();
-  expect(restoreConflict(inc, { incognito: false })).toMatch(/was --incognito/);
-  expect(restoreConflict({ ...r, launch: { ...r.launch, profile: undefined } }, { incognito: false, browser: "/b" })).toMatch(/default browser/);
+test("a busy cache lock is waited for briefly, without blocking, then the write is skipped", async () => {
+  const p = join(tempDir(), "update-check.json");
+  saveCache(p, { checked_at: 1, latest: "v0.3.1", skipped: null });
+  expect(lockFile(`${p}.lock`)).toBeNull();
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 10);
+  const t0 = performance.now();
+  expect(await updateCache(p, (c) => ({ ...c, latest: "v0.3.2" }), 300)).toBe(false);
+  const took = performance.now() - t0;
+  clearInterval(timer);
+  expect(took).toBeLessThan(600);
+  expect(ticks).toBeGreaterThan(10); // the event loop kept running meanwhile
+  expect(loadCache(p)!.latest).toBe("v0.3.1");
+  unlockFile(`${p}.lock`);
+  expect(await updateCache(p, (c) => ({ ...c, latest: "v0.3.2" }))).toBe(true);
+  expect(loadCache(p)!.latest).toBe("v0.3.2");
+});
+
+test("a restart snapshot reopens only under every launch option it was saved with", () => {
+  const launch = { profile: "/p/a", incognito: false, scale: 1, search: "https://s/?q=%s" };
+  const r: Restore = { v: 1, at: Date.now(), from: "0.3.0", launch, layout: { spaces: [], activeSpace: 0, sidebar: true, zoom: 1 } };
+  expect(restoreConflict(r, { ...launch })).toBeNull();
+  expect(restoreConflict(r, { ...launch, url: "https://x/" })).toBeNull(); // the URL isn't a launch option
+  expect(restoreConflict(r, { ...launch, profile: undefined })).toBe("it was started with --profile /p/a");
+  expect(restoreConflict(r, { ...launch, incognito: true })).toBe("it was started without --incognito");
+  expect(restoreConflict(r, { ...launch, scale: 1.5 })).toBe("it was started with --scale 1");
+  expect(restoreConflict(r, { ...launch, scale: null })).toBe("it was started with --scale 1");
+  expect(restoreConflict(r, { ...launch, search: "https://other/?q=%s" })).toBe("it was started with --search https://s/?q=%s");
+  expect(restoreConflict(r, { ...launch, browser: "/b" })).toBe("it was started without --browser");
+  const inc: Restore = { ...r, launch: { incognito: true, scale: null, search: "x%s" } };
+  expect(restoreConflict(inc, { incognito: true, scale: null, search: "x%s" })).toBeNull();
+  expect(restoreConflict(inc, { incognito: false, scale: null, search: "x%s" })).toBe("it was started with --incognito");
 });
