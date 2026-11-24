@@ -38,6 +38,13 @@ All notable changes to termium are documented here. The format follows
 - No more flicker: redraws (switching tabs, splitting, toggling the
   sidebar, resizing) are synchronized updates (DECSET 2026), and a page's
   old picture is deleted only after its new one is placed.
+- A pane no longer stops updating when the page's screen capture fails to
+  start (for example right after a page is replaced); the start is retried.
+- A page that hangs is now always replaced on the next navigation; the
+  hang watchdog could skip one whose loading had already finished.
+- After an incognito termium is killed, the next start now reliably
+  removes its profile: it stops the dead browser's helper processes first,
+  so they can't write files back into it.
 
 ## [0.1.0] - 2026-11-22
 
