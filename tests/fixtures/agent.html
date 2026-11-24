@@ -1,0 +1,12 @@
+<!doctype html><title>Agent fixture</title>
+<h1>Agent fixture</h1>
+<form id=f onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'Hello, ' + document.getElementById('name').value + ' (' + document.getElementById('color').value + ')';">
+<label for=name>Name</label> <input id=name placeholder="Your name">
+<label for=color>Colour</label> <select id=color><option value=r>Red</option><option value=g>Green</option></select>
+<label><input type=checkbox id=agree> Agree</label>
+<button id=go type=submit>Greet</button>
+</form>
+<p id=out>nobody yet</p>
+<button id=later onclick="setTimeout(()=>{const d=document.createElement('div');d.id='late';d.textContent='Arrived late';document.body.append(d)},800)">Load later</button>
+<a href="#bottom">Down</a>
+<div style="height:3000px"></div><p id=bottom>Bottom</p>
