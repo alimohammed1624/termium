@@ -1163,11 +1163,27 @@ export class App {
    * Pressed again while that very question is showing, it quits; any other
    * prompt (or the question having gone away) means it asks again.
    */
+  /**
+   * Which terminal is attached: bumped on every attach and detach. Work a
+   * key started asynchronously (an unsaved-changes probe, a skip being
+   * saved, a restart being checked) belongs to the terminal that pressed
+   * it: when it resolves for another terminal (or none), it does nothing and
+   * shows nothing.
+   */
+  private terminalGen = 0;
+  /** A ticket for async work started now; `ticket.valid()` is false once another terminal attached (or this one left). */
+  ticket(): { valid: () => boolean } {
+    const gen = this.terminalGen;
+    return { valid: () => gen === this.terminalGen && this.attached };
+  }
+
   private async requestQuit(): Promise<void> {
     const p = this.prompt;
     if (p?.kind === "confirm" && p.tag === "quit") return this.opts.quit();
     const pages = [...this.pages.values()];
+    const t = this.ticket();
     const asking = (await Promise.all(pages.map((page) => this.wouldAsk(page)))).filter(Boolean).length;
+    if (!t.valid()) return;
     const downloading = this.downloads.size;
     if (asking === 0 && downloading === 0) return this.opts.quit();
     const reasons = [
@@ -1191,7 +1207,9 @@ export class App {
    */
   private async closeGroup(pages: Page[], what: string): Promise<void> {
     const guarded: Page[] = [];
+    const t = this.ticket();
     for (const page of pages) if (await this.wouldAsk(page)) guarded.push(page);
+    if (!t.valid()) return;
     const closeAll = () => {
       for (const page of pages) {
         page.closing = true;
@@ -1258,6 +1276,8 @@ export class App {
       this.cdp.send("Runtime.releaseObjectGroup", { objectGroup: group }, sid).catch(() => {});
       return guarded && activated;
     };
+    // Tests stand in for a slow page (a busy renderer) with a delay here.
+    if (Number(process.env.TERMIUM_TEST_SLOW_PROBE_MS) > 0) await Bun.sleep(Number(process.env.TERMIUM_TEST_SLOW_PROBE_MS));
     // A page that can't be checked (it's showing a dialog, or busy) might
     // have unsaved changes: count it as one that asks.
     if (page.dialog) return true;
@@ -1281,6 +1301,7 @@ export class App {
     this.resetInput();
     if (this.mode === "update" || this.mode === "help") this.mode = "normal";
     if (this.prompt && (this.prompt.kind === "url" || this.prompt.kind === "rename" || this.prompt.kind === "confirm")) this.prompt = null;
+    this.terminalGen++;
     this.attached = true;
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
@@ -1344,6 +1365,7 @@ export class App {
 
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
   detach(): void {
+    this.terminalGen++;
     this.attached = false;
     this.resetInput();
     if (this.started) this.relayout();
@@ -2387,8 +2409,9 @@ export class App {
         } else if (combo === "s") {
           this.skippedTag = box.tag;
           this.closeUpdate(true);
+          const t = this.ticket();
           void this.opts.update?.skip(box.tag).then((saved) =>
-            this.showToast(
+            t.valid() && this.updatesShown && this.showToast(
               saved
                 ? `termium ${shown} skipped: not offered again`
                 : `termium ${shown} skipped in this session only: couldn't save it (the update cache is busy)`,
@@ -2419,7 +2442,9 @@ export class App {
   /** Restarts into the installed termium; first asks if a page may have unsaved changes (as Ctrl+Q does). */
   private async requestRestart(): Promise<void> {
     const restart = () => this.opts.update?.restart();
+    const t = this.ticket();
     const asking = (await Promise.all([...this.pages.values()].map((page) => this.wouldAsk(page)))).filter(Boolean).length;
+    if (!t.valid() || !this.updatesShown) return this.opts.log("restart: asked from a terminal that's gone; dropped");
     const downloading = this.downloads.size;
     if (asking === 0 && downloading === 0) return restart();
     const reasons = [

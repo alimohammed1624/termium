@@ -481,7 +481,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
             if (!saved) log("update: the cache stayed busy; the skipped version holds for this session only");
             return saved;
           },
-          restart: () => void restartSession(),
+          restart: () => void restartSession(app!.ticket()),
         },
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
@@ -536,7 +536,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   /** The binary that update replaced (this server's own, symlinks resolved): what a restart runs. */
   let installedExe: string | null = null;
   /** A newer termium a terminal attached with (how to run it), checked to report its version. */
-  let newerFrom: { version: string; argv: string[] } | null = null;
+  /** Newer termiums terminals attached with (how to run each), each checked to report its version; most recent first. */
+  let newerFrom: { version: string; argv: string[] }[] = [];
 
   const runCheck = async () => {
     if (checking || !client || !wantsUpdates || !appReady || shuttingDown) return;
@@ -584,13 +585,13 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     // That terminal runs a newer termium: it's installed, and this session runs the old one.
     // (Offered only once that termium is found to run and report that version.)
     const argv = Array.isArray(h.argv) && h.argv.length && h.argv.every((a) => typeof a === "string") ? h.argv : null;
-    // (The same version from another path replaces the one known: the latest attach's copy is the one checked last.)
-    if (typeof h.version === "string" && argv && isNewer(h.version, version) && (!newerFrom || !isNewer(newerFrom.version, h.version))) {
+    // Every copy that checks out is kept (a few, most recent first): a restart tries them in turn.
+    if (typeof h.version === "string" && argv && isNewer(h.version, version)) {
       const v = h.version;
       void binaryVersionAsync(argv).then((got) => {
         if (got !== v) return log(`update: ${argv.join(" ")} doesn't report termium ${v} (${got ?? "doesn't run"}); no restart into it`);
-        if (newerFrom && isNewer(newerFrom.version, v)) return;
-        newerFrom = { version: v, argv };
+        const key = JSON.stringify(argv);
+        newerFrom = [{ version: v, argv }, ...newerFrom.filter((k) => JSON.stringify(k.argv) !== key)].slice(0, 8);
         app?.newerInstalled(v);
       });
     }
@@ -629,17 +630,19 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
    * browser is closed, and the attached client starts that server.
    */
   let restarting = false;
-  const restartSession = async () => {
+  /** `t`: the attached terminal that asked; a restart checked for one terminal isn't carried out for another. */
+  const restartSession = async (t: { valid: () => boolean }) => {
     if (!app || shuttingDown || !client || restarting) return;
     // The termium to restart into: the newest known to be installed (the
     // binary this session's update replaced, or the one a newer terminal
     // runs), checked again now to still run and be that version.
     // Newest first; one that's gone (or another version now) is forgotten and the next tried.
     type Known = { version: string; argv: string[]; self: boolean };
-    const known = [
-      installed && installedExe ? { version: installed, argv: [installedExe], self: true } : null,
-      newerFrom ? { ...newerFrom, self: false } : null,
-    ].filter((c): c is Known => !!c);
+    const known: Known[] = [
+      ...(installed && installedExe ? [{ version: installed, argv: [installedExe], self: true }] : []),
+      ...newerFrom.map((k) => ({ ...k, self: false })),
+    ];
+    // Newest version first; among copies of one version, the self-updated one, then the most recently seen (stable sort).
     known.sort((a, b) => (isNewer(a.version, b.version) ? -1 : isNewer(b.version, a.version) ? 1 : 0));
     let target: Known | undefined;
     let gone: Known | undefined;
@@ -652,10 +655,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       }
       log(`restart: ${k.argv.join(" ")} is ${got ? `termium ${got}` : "gone"}, not termium ${k.version}`);
       if (k.self) installed = installedExe = null;
-      else newerFrom = null;
+      else newerFrom = newerFrom.filter((n) => JSON.stringify(n.argv) !== JSON.stringify(k.argv));
       gone ??= k;
     }
     restarting = false;
+    if (!t.valid()) return log("restart: another terminal attached meanwhile; not restarting");
     if (!target && gone) {
       app?.clearInstalled();
       app?.showToast(`Can't restart: termium ${gone.version} isn't at ${gone.argv.join(" ")} any more`, 8000);
