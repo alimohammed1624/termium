@@ -191,7 +191,7 @@ export function unlockProfile(profileDir: string): void {
 const OWNER_PREFIX = "termium.owner.";
 
 /** When a process started (ps lstart), to tell a live pid from a reused one. */
-function startTime(pid: number): string {
+export function startTime(pid: number): string {
   try {
     const r = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
     return r.exitCode === 0 ? r.stdout.toString().trim() : "";

@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lockHolder, pidAlive } from "./browser";
+import { lockHolder, pidAlive, startTime } from "./browser";
 import { VERSION } from "./version";
 import { binaryVersion, isNewer } from "./update";
 import { InputParser, type InputEvent } from "./input";
@@ -201,6 +201,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
         askedPid = readFileSync(asked, "utf8").trim();
       } catch {}
       if (askedPid !== String(info.pid)) {
+        // Which server this question is about: checked again before acting on the answer.
+        const askedAbout = { pid: Number(info.pid), start: startTime(Number(info.pid)) };
         try {
           writeFileSync(asked, `${info.pid}\n`, { mode: 0o600 });
         } catch {}
@@ -221,6 +223,13 @@ export async function runClient(o: ClientOptions): Promise<void> {
         });
         if (answer === "y" || answer === "yes") {
           sock.destroy();
+          const now = await sessionInfo(o.name).catch(() => null);
+          if (!now || now.unresponsive || Number(now.pid) !== askedAbout.pid || startTime(askedAbout.pid) !== askedAbout.start) {
+            fail(
+              `session "${o.name}" changed while you answered (it isn't that termium ${info.version} session any more); nothing was done. Run termium again.`,
+              1,
+            );
+          }
           const killed = Bun.spawnSync([...o.selfArgv, "kill", o.name], { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
           if (killed.exitCode !== 0) fail(`couldn't end session "${o.name}"`, 1);
           // Start it again, as it was started, from this termium.
