@@ -1,0 +1,234 @@
+import { afterAll, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
+import {
+  UPGRADE_CMD,
+  cachedNewer,
+  checkAndCache,
+  checkEnabled,
+  displayVersion,
+  envOn,
+  extractBinary,
+  installBinary,
+  isNewer,
+  loadCache,
+  parseVersion,
+  report,
+  saveCache,
+  sha256Hex,
+  skipVersion,
+  sources,
+  sumFor,
+  tagFromLocation,
+  targetFor,
+} from "../src/update";
+
+const dirs: string[] = [];
+const tempDir = () => {
+  const d = mkdtempSync(join(tmpdir(), "termium-upd-"));
+  dirs.push(d);
+  return d;
+};
+afterAll(() => {
+  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+});
+
+test("versions compare numerically; pre-releases never count", () => {
+  expect(parseVersion("v0.2.0")).toEqual([0, 2, 0]);
+  expect(parseVersion("0.2.0")).toEqual([0, 2, 0]);
+  expect(parseVersion(" V1.2.3+build.5 ")).toEqual([1, 2, 3]);
+  expect(parseVersion("v1.2")).toBeNull();
+  expect(parseVersion("v1.2.3.4")).toBeNull();
+  expect(parseVersion("latest")).toBeNull();
+  expect(parseVersion("v0.2.0-rc.1")).toBeNull();
+  expect(isNewer("v0.2.0", "0.1.0")).toBe(true);
+  expect(isNewer("0.1.1", "0.1.0")).toBe(true);
+  expect(isNewer("v0.10.0", "0.9.9")).toBe(true); // numeric, not lexical
+  expect(isNewer("v1.0.0", "0.99.99")).toBe(true);
+  expect(isNewer("v0.1.0", "0.1.0")).toBe(false);
+  expect(isNewer("v0.1.0+meta", "0.1.0")).toBe(false);
+  expect(isNewer("v0.0.9", "0.1.0")).toBe(false);
+  expect(isNewer("v0.2.0-rc.1", "0.1.0")).toBe(false);
+  expect(isNewer("v9.0.0-beta", "0.1.0")).toBe(false);
+  expect(isNewer("garbage", "0.1.0")).toBe(false);
+  expect(isNewer(null, "0.1.0")).toBe(false);
+  expect(displayVersion("v0.2.0")).toBe("0.2.0");
+  expect(displayVersion("0.2.0")).toBe("0.2.0");
+});
+
+test("the tag comes from the release redirect", () => {
+  expect(tagFromLocation("https://github.com/alimohammed1624/termium/releases/tag/v0.2.0")).toBe("v0.2.0");
+  expect(tagFromLocation("/alimohammed1624/termium/releases/tag/v1.0.0?x=1")).toBe("v1.0.0");
+  expect(tagFromLocation("https://github.com/o/r/releases/tag/v1.0.0/")).toBe("v1.0.0");
+  expect(tagFromLocation("https://github.com/o/r/releases/tag/v1.0.0#x")).toBe("v1.0.0");
+  // No releases yet: GitHub redirects to the release list.
+  expect(tagFromLocation("https://github.com/alimohammed1624/termium/releases")).toBeNull();
+  expect(tagFromLocation("https://github.com/o/r/releases/tag/")).toBeNull();
+  expect(tagFromLocation("")).toBeNull();
+});
+
+test("opt-outs: the flag, TERMIUM_NO_UPDATE_CHECK and CI; empty, 0 and false don't count", () => {
+  expect(checkEnabled(false, {})).toBe(true);
+  expect(checkEnabled(true, {})).toBe(false);
+  expect(checkEnabled(false, { TERMIUM_NO_UPDATE_CHECK: "1" })).toBe(false);
+  expect(checkEnabled(false, { TERMIUM_NO_UPDATE_CHECK: "yes" })).toBe(false);
+  expect(checkEnabled(false, { CI: "true" })).toBe(false);
+  expect(checkEnabled(false, { CI: "1" })).toBe(false);
+  expect(checkEnabled(false, { TERMIUM_NO_UPDATE_CHECK: "", CI: "" })).toBe(true);
+  expect(checkEnabled(false, { TERMIUM_NO_UPDATE_CHECK: "0", CI: "false" })).toBe(true);
+  expect(checkEnabled(false, { CI: "FALSE" })).toBe(true);
+  expect(envOn(undefined)).toBe(false);
+});
+
+test("the check asks the override alone, else GitHub then its API", () => {
+  expect(sources({})).toEqual([
+    "https://github.com/alimohammed1624/termium/releases/latest",
+    "https://api.github.com/repos/alimohammed1624/termium/releases/latest",
+  ]);
+  expect(sources({ TERMIUM_UPDATE_URL: " http://127.0.0.1:1/latest " })).toEqual(["http://127.0.0.1:1/latest"]);
+  expect(sources({ TERMIUM_UPDATE_URL: " " }).length).toBe(2);
+});
+
+test("the cache is private, keeps what a skip doesn't touch, and reads old or odd files", () => {
+  const dir = tempDir();
+  const p = join(dir, "state", "update-check.json");
+  saveCache(p, { checked_at: 42, latest: "v0.3.0", skipped: null });
+  expect(loadCache(p)).toEqual({ checked_at: 42, latest: "v0.3.0", skipped: null });
+  expect(statSync(p).mode & 0o777).toBe(0o600);
+  skipVersion(p, "v0.3.1");
+  expect(loadCache(p)).toEqual({ checked_at: 42, latest: "v0.3.0", skipped: "v0.3.1" });
+  expect(statSync(p).mode & 0o777).toBe(0o600);
+  // Only the cache file: no temporary files left behind.
+  expect(readdirSync(join(dir, "state"))).toEqual(["update-check.json"]);
+  writeFileSync(p, `{"checked_at":1794748031,"latest":"v0.2.1"}`);
+  expect(loadCache(p)).toEqual({ checked_at: 1794748031, latest: "v0.2.1", skipped: null });
+  writeFileSync(p, "not json");
+  expect(loadCache(p)).toBeNull();
+  expect(loadCache(join(dir, "missing.json"))).toBeNull();
+  expect(cachedNewer({ checked_at: 0, latest: "v0.3.0", skipped: null }, "0.2.0")).toBe("v0.3.0");
+  expect(cachedNewer({ checked_at: 0, latest: "v0.3.0", skipped: null }, "0.3.0")).toBeNull();
+  expect(cachedNewer(null, "0.3.0")).toBeNull();
+});
+
+test("a check against a local server: redirect, API fallback shape, failures keep the cached tag", async () => {
+  let mode = "redirect";
+  const seen: string[] = [];
+  const srv = Bun.serve({
+    port: 0,
+    fetch(req) {
+      seen.push(req.headers.get("user-agent") ?? "");
+      if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://github.com/o/r/releases/tag/v0.9.0" } });
+      if (mode === "json") return Response.json({ tag_name: "v0.9.1" });
+      if (mode === "pre") return new Response(null, { status: 302, headers: { Location: "/o/r/releases/tag/v1.0.0-rc.1" } });
+      return new Response("nope", { status: 500 });
+    },
+  });
+  const old = process.env.TERMIUM_UPDATE_URL;
+  process.env.TERMIUM_UPDATE_URL = `http://127.0.0.1:${srv.port}/latest`;
+  try {
+    const p = join(tempDir(), "update-check.json");
+    expect(await checkAndCache(p, "0.3.0")).toEqual({ ok: true, tag: "v0.9.0" });
+    expect(seen[0]).toBe("termium/0.3.0");
+    expect(loadCache(p)?.latest).toBe("v0.9.0");
+    mode = "json";
+    expect(await checkAndCache(p, "0.3.0")).toEqual({ ok: true, tag: "v0.9.1" });
+    expect(loadCache(p)?.latest).toBe("v0.9.1");
+    // A pre-release is never recorded.
+    mode = "pre";
+    expect(await checkAndCache(p, "0.3.0")).toEqual({ ok: true, tag: "v1.0.0-rc.1" });
+    expect(loadCache(p)?.latest).toBe("v0.9.1");
+    mode = "error";
+    const before = loadCache(p)!.checked_at;
+    expect(await checkAndCache(p, "0.3.0")).toEqual({ ok: false, error: "HTTP 500" });
+    expect(loadCache(p)?.latest).toBe("v0.9.1");
+    expect(loadCache(p)!.checked_at).toBeGreaterThanOrEqual(before);
+  } finally {
+    if (old === undefined) delete process.env.TERMIUM_UPDATE_URL;
+    else process.env.TERMIUM_UPDATE_URL = old;
+    srv.stop(true);
+  }
+});
+
+test("check-update's line and exit status", () => {
+  expect(report({ ok: true, tag: "v0.3.0" }, "0.3.0")).toEqual({ line: "termium 0.3.0 is up to date", code: 0 });
+  expect(report({ ok: true, tag: "v0.2.0" }, "0.3.0")).toEqual({ line: "termium 0.3.0 is up to date", code: 0 });
+  expect(report({ ok: true, tag: "v0.4.0-rc.1" }, "0.3.0").code).toBe(0);
+  expect(report({ ok: true, tag: "v0.4.0" }, "0.3.0")).toEqual({
+    line: `termium 0.4.0 is available (you have 0.3.0) — upgrade: termium update, or ${UPGRADE_CMD}`,
+    code: 100,
+  });
+  expect(report({ ok: false, error: "no answer within 3 s" }, "0.3.0")).toEqual({
+    line: "could not check for updates: no answer within 3 s",
+    code: 1,
+  });
+});
+
+test("release targets match install.sh", () => {
+  expect(targetFor("linux", "x64", "gnu")).toBe("x86_64-unknown-linux-gnu");
+  expect(targetFor("linux", "arm64", "gnu")).toBe("aarch64-unknown-linux-gnu");
+  expect(targetFor("linux", "x64", "musl")).toBe("x86_64-unknown-linux-musl");
+  expect(targetFor("linux", "arm64", "musl")).toBe("aarch64-unknown-linux-musl");
+  expect(targetFor("darwin", "x64")).toBe("x86_64-apple-darwin");
+  expect(targetFor("darwin", "arm64")).toBe("aarch64-apple-darwin");
+  expect(targetFor("win32", "x64")).toBeNull();
+  expect(targetFor("linux", "riscv64")).toBeNull();
+});
+
+test("SHA256SUMS lines", () => {
+  const h = "3264b4640f7bb0d03996b976acfbb33735db0e4af62fd76ddfa8fb4e96249d6a";
+  const sums = `${"d".repeat(64)}  termium-aarch64-apple-darwin.tar.gz\n${h.toUpperCase()}  termium-x86_64-unknown-linux-gnu.tar.gz\n`;
+  expect(sumFor(sums, "termium-x86_64-unknown-linux-gnu.tar.gz")).toBe(h);
+  expect(sumFor(`${h} *a.tar.gz`, "a.tar.gz")).toBe(h); // sha256sum -b
+  expect(sumFor(sums, "termium-x86_64-apple-darwin.tar.gz")).toBeNull();
+  expect(sumFor("nothex  a.tar.gz", "a.tar.gz")).toBeNull();
+  expect(sha256Hex(new TextEncoder().encode("abc"))).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+});
+
+/** A tar.gz made by the real tar, laid out as release.yml packages it. */
+function releaseArchive(target: string, body: string, extra: string[] = []): Uint8Array {
+  const dir = tempDir();
+  const name = `termium-${target}`;
+  mkdirSync(join(dir, "pkg", name), { recursive: true });
+  writeFileSync(join(dir, "pkg", name, "termium"), body);
+  chmodSync(join(dir, "pkg", name, "termium"), 0o755);
+  for (const f of ["README.md", "LICENSE", "CHANGELOG.md", ...extra]) writeFileSync(join(dir, "pkg", name, f), `${f}\n`);
+  const r = Bun.spawnSync(["tar", "-C", join(dir, "pkg"), "--owner=0", "--group=0", "--numeric-owner", "-czf", join(dir, "a.tar.gz"), name]);
+  expect(r.exitCode).toBe(0);
+  return readFileSync(join(dir, "a.tar.gz"));
+}
+
+test("the binary comes out of a release archive", () => {
+  const target = "x86_64-unknown-linux-gnu";
+  const big = "#!/bin/sh\n" + "x".repeat(200_000);
+  const gz = releaseArchive(target, big, ["a-file-with-a-rather-long-name-".repeat(5) + ".txt"]);
+  expect(new TextDecoder().decode(extractBinary(gz, target))).toBe(big);
+  expect(() => extractBinary(gz, "aarch64-apple-darwin")).toThrow(/termium-aarch64-apple-darwin\/termium is not in the archive/);
+  expect(() => extractBinary(new TextEncoder().encode("not gzip"), target)).toThrow(/bad archive/);
+  // Cut short, or not a tar inside.
+  expect(() => extractBinary(gz.subarray(0, Math.floor(gz.length / 2)), target)).toThrow(/bad archive/);
+  expect(() => extractBinary(gzipSync(Buffer.alloc(1024, 1)), target)).toThrow();
+});
+
+test("installing replaces the binary atomically and leaves nothing behind", () => {
+  const dir = tempDir();
+  const exe = join(dir, "termium");
+  writeFileSync(exe, "old");
+  chmodSync(exe, 0o755);
+  installBinary(new TextEncoder().encode("new binary"), exe);
+  expect(readFileSync(exe, "utf8")).toBe("new binary");
+  expect(statSync(exe).mode & 0o777).toBe(0o755);
+  expect(readdirSync(dir)).toEqual(["termium"]);
+  // A check that refuses the staged file leaves the old binary alone, and no temporary file.
+  expect(() =>
+    installBinary(new TextEncoder().encode("bad"), exe, () => {
+      throw new Error("doesn't run here");
+    }),
+  ).toThrow("doesn't run here");
+  expect(readFileSync(exe, "utf8")).toBe("new binary");
+  expect(readdirSync(dir)).toEqual(["termium"]);
+  // An unwritable place fails cleanly.
+  expect(() => installBinary(new TextEncoder().encode("x"), join(dir, "no-such-dir", "termium"))).toThrow(/cannot replace/);
+  expect(readdirSync(dir)).toEqual(["termium"]);
+});
