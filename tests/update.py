@@ -641,6 +641,56 @@ try:
     stop("nw3")
     shutil.copy(next_bin, os.path.join(inst_n, "termium"))
 
+    # Two verified copies of the newer version; the more recent one removed: r falls back to the earlier one.
+    t1 = term(os.path.join(inst_o, "termium"), "-s", "nw4", "--incognito", PAGE, state="st-nw")
+    t1.wait_text("termium test page", 40); t1.key("ctrl+b"); t1.key("d"); exit_code(t1)
+    for d in (inst_n, inst_n2):
+        t2 = term(os.path.join(d, "termium"), "attach", "nw4", state="st-nw")
+        t2.wait_text("termium test page", 20); time.sleep(2); t2.key("ctrl+b"); t2.key("d"); exit_code(t2)
+    os.remove(os.path.join(inst_n2, "termium"))
+    t3 = term(os.path.join(inst_o, "termium"), "attach", "nw4", state="st-nw")
+    old_pid = server_pid("nw4")
+    t3.wait_for(lambda: f"termium {NEXT} is installed" in t3.line(2), 20)
+    open_box(t3); t3.key("r")
+    check("nw4: the most recent copy gone, r falls back to the earlier verified one",
+          t3.wait_for(lambda: "inst-new/termium" in output(t3), 15) and t3.wait_for(lambda: server_pid("nw4") not in (None, old_pid), 30) and
+          f"(termium {NEXT})" in ls_row("nw4", "st-nw"), (output(t3)[-300:], ls_row("nw4", "st-nw")))
+    stop("nw4")
+    shutil.copy(next_bin, os.path.join(inst_n2, "termium"))
+
+    # ------------------------------------------------ async work started by one terminal does nothing for the next
+    # (The session's unsaved-changes probe is made to take 3 s, as a busy page's can.)
+    ra = term(os.path.join(inst_o, "termium"), "-s", "rc", "--incognito", PAGE, state="st-nw", env={"TERMIUM_TEST_SLOW_PROBE_MS": "3000"})
+    ra.wait_text("termium test page", 40); ra.key("ctrl+b"); ra.key("d"); exit_code(ra)
+    rn = term(os.path.join(inst_n, "termium"), "attach", "rc", state="st-nw")
+    rn.wait_text("termium test page", 20); time.sleep(2); rn.key("ctrl+b"); rn.key("d"); exit_code(rn)
+    ra = term(os.path.join(inst_o, "termium"), "attach", "rc", state="st-nw")
+    ra.wait_for(lambda: f"termium {NEXT} is installed" in ra.line(2), 20)
+    rc_pid = server_pid("rc")
+    open_box(ra); ra.key("r")
+    rb = term(os.path.join(inst_o, "termium"), "attach", "rc", "--no-update-check", state="st-nw")
+    rb.wait_text("termium test page", 20); time.sleep(4)
+    rb.key("enter"); time.sleep(2)
+    rclog = open(os.path.join(tmp, "st-nw", "termium", "termium.log")).read()
+    check("a restart confirmation started by one terminal never reaches the next, nor restarts for it",
+          "asked from a terminal that's gone; dropped" in rclog and "Restart anyway" not in rb.text() and server_pid("rc") == rc_pid and not update_ui(rb),
+          (rb.line(2), server_pid("rc"), rc_pid, rclog[-400:]))
+    stop("rc")
+    sk2_cache = os.path.join(tmp, "st-sk2", "termium", "update-check.json")
+    sa = term(cur_bin, "-s", "sk2", "--incognito", PAGE, state="st-sk2")
+    sa.wait_for(lambda: notice(sa), 40)
+    os.makedirs(os.path.dirname(sk2_cache), exist_ok=True)
+    holder = subprocess.Popen(["bun", "-e", f"const b = await import({json.dumps(os.path.join(ROOT, 'src', 'browser.ts'))}); "
+                               f"console.log(b.lockFile({json.dumps(sk2_cache + '.lock')})); await Bun.sleep(4000); b.unlockFile({json.dumps(sk2_cache + '.lock')});"],
+                              stdout=subprocess.PIPE, text=True)
+    holder.stdout.readline()
+    open_box(sa); sa.key("s")
+    sb = term(cur_bin, "attach", "sk2", "--no-update-check", state="st-sk2")
+    sb.wait_text("termium test page", 20); holder.wait(); time.sleep(2)
+    check("a skip saved after an opted-out terminal took over says nothing there (but is saved)",
+          "skipped" not in sb.line(2) and not update_ui(sb) and (cache("st-sk2") or {}).get("skipped") == f"v{NEXT}", (sb.line(2), cache("st-sk2")))
+    stop("sk2")
+
     # ------------------------------------------------ a relative --browser survives a restart from another directory
     helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
     bdir = os.path.join(tmp, "bdir"); os.makedirs(bdir)
@@ -804,7 +854,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "relb", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "sk2", "relb", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)
