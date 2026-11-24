@@ -364,6 +364,47 @@ try:
           r.returncode == 1 and "covered by div#cover" in r.stderr and page_value("[window.underClicked, window.coverClicked]") == [None, None],
           (r.returncode, r.stderr, page_value("[window.underClicked, window.coverClicked]")))
 
+    # --- ids only for the document their snapshot saw
+    st = ctl_json("open", f"{BASE}/agent.html?stale=1", "--new-tab", "--background").get("id")
+    old_greet = ref(ctl("snapshot", str(st)).stdout, "button", "Greet")
+    ctl("open", f"http://localhost:{PORT}/agent.html?stale=2", "--tab", str(st))
+    r = ctl("click", old_greet)
+    out_now = ctl_json("eval", "document.getElementById('out').textContent", "--tab", str(st)).get("value")
+    check("an id from before a navigation is stale (exit 1), and nothing on the new page is clicked",
+          r.returncode == 1 and "stale" in r.stderr and out_now != "Hello,  (r)", (r.returncode, r.stderr, out_now))
+    new_greet = ref(ctl("snapshot", str(st)).stdout, "button", "Greet")
+    check("...a new snapshot's id works", ctl("click", new_greet).returncode == 0)
+    # Frames: a cover over a frame is seen from the top; a frame's own button works.
+    fsnap = ctl("snapshot", str(st)).stdout
+    r = ctl("click", ref(fsnap, "button", "Covered frame button"))
+    fv = lambda: ctl_json("eval", "[window.frameBtn, window.frameCover, window.frameBtn2]", "--tab", str(st)).get("value")
+    check("click on a frame's button under a page overlay: exit 1 naming the cover, nothing clicked",
+          r.returncode == 1 and "div#frcover" in r.stderr and fv() == [None, None, None], (r.returncode, r.stderr, fv()))
+    r = ctl("click", ref(fsnap, "button", "Open frame button"))
+    check("...an uncovered frame's button is clicked", r.returncode == 0 and fv() == [None, None, 1], (r.returncode, r.stderr, fv()))
+    # A page slow to take the pointer: the click stops at its deadline, not clicking later.
+    r = ctl("click", ref(fsnap, "button", "Slow to hover"), "--timeout", "0.25")
+    time.sleep(2.5)
+    check("a click whose page is slow to take the pointer: exit 4 at its deadline, never clicked after",
+          r.returncode == 4 and ctl_json("eval", "window.slowClicked", "--tab", str(st)).get("value") is None, (r.returncode, r.stderr))
+    # A submit whose handler alerts: back at once with the dialog, the queue moves on.
+    t0 = time.time()
+    r = ctl_json("type", ref(fsnap, "textbox", "Validated field"), "x", "--submit", "--timeout", "5")
+    took = time.time() - t0
+    # (Another site: a page of the same site shares the renderer the alert holds, as in any Chromium.)
+    r2 = ctl("open", f"http://localhost:{PORT}/page.html?after-submit=1", "--new-tab", "--background", "--timeout", "10")
+    check(f"type --submit whose form alerts: back at once reporting it ({took:.1f}s), the next command runs",
+          took < 3 and (r.get("dialog") or {}).get("message") == "check it" and r2.returncode == 0, (took, r, r2.returncode))
+    ctl("dialog", "accept", "--tab", str(st))
+    # A disabled option isn't chosen.
+    r = ctl("type", ref(fsnap, "combobox", "Grouped list"), "Zed")
+    check("type a disabled option (disabled group): exit 1, choice unchanged",
+          r.returncode == 1 and "disabled" in r.stderr and ctl_json("eval", "document.getElementById('grp').value", "--tab", str(st)).get("value") == "a",
+          (r.returncode, r.stderr))
+    for t in ctl_json("tabs"):
+        if t["id"] != first:
+            ctl("close", str(t["id"]), "--force")
+
     # --- a queued command whose time runs out is answered at once, and never runs
     hang = socket.socket(); hang.bind(("127.0.0.1", 0)); hang.listen(8)  # accepts nothing: a page that never loads
     HANG = f"http://127.0.0.1:{hang.getsockname()[1]}/never"
@@ -419,6 +460,24 @@ try:
     check("a hidden tab gets its size back once another client lets go of it",
           json.loads(r.stdout or "[]") == [500, 400] and wait_until(lambda: hid_size() == want, 10), (r.stdout, hid_size(), want))
     ctl("close", str(hid), "--force")
+
+    # --- a tab another client opens while the person is typing into the page: behind, their keys stay put
+    ctl("eval", "scrollTo(0, 0)")
+    cb = page_value("(() => { const r = document.getElementById('city').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()")
+    ctl("type", ref(ctl("snapshot").stdout, "textbox", "City"), "")
+    h.click(220 + int(cb[0]), 40 + int(cb[1])); time.sleep(0.3)
+    h.type("a")
+    creator = subprocess.Popen(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "create", f"http://127.0.0.1:{port}", f"{BASE}/page.html?typing=1"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.4)
+    h.type("b")
+    creator.communicate(timeout=30); time.sleep(0.8)
+    check("a tab another client opens just after the person typed: behind, their next key lands where they type",
+          page_value("document.getElementById('city').value") == "ab" and [t["active"] for t in ctl_json("tabs")][0],
+          (page_value("document.getElementById('city').value"), [(t["url"][-12:], t["active"]) for t in ctl_json("tabs")]))
+    for t in ctl_json("tabs"):
+        if "typing=1" in t["url"]:
+            ctl("close", str(t["id"]), "--force")
 
     # --- screenshots: private files; tall pages whole (in tiles), or said to be cut
     sp = os.path.join(tmp, "private.png")

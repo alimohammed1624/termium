@@ -18,6 +18,11 @@
 <form id=f4 onsubmit="event.preventDefault(); window.f4sub = 1"><input id=other aria-label="Other field"></form>
 <button id=alerter onclick="alert('clicked')">Alert me</button>
 <form id=f5 onsubmit="event.preventDefault(); window.f5sub = document.getElementById('pick').value"><select id=pick aria-label="Pick one"><option value=a>Ay</option><option value=b>Bee</option></select></form>
+<form id=f6 onsubmit="event.preventDefault(); alert('check it')"><input id=validated aria-label="Validated field"></form>
+<select id=grp aria-label="Grouped list"><option value=a>Alpha</option><optgroup disabled label="Off"><option value=z>Zed</option></optgroup></select>
+<button id=slowmove onmousemove="const e = Date.now() + 1500; while (Date.now() < e);" onclick="window.slowClicked = 1">Slow to hover</button>
+<div style="position:relative;display:inline-block"><iframe id=fr srcdoc="<button onclick='parent.frameBtn = 1'>Covered frame button</button>" style="width:220px;height:50px"></iframe><div id=frcover onclick="window.frameCover = 1" style="position:absolute;inset:0"></div></div>
+<iframe id=fr2 srcdoc="<button onclick='parent.frameBtn2 = 1'>Open frame button</button>" style="width:220px;height:50px"></iframe>
 <div style="position:relative;display:inline-block"><button id=under onclick="window.underClicked = 1">Under button</button><div id=cover onclick="window.coverClicked = 1" style="position:absolute;inset:0;background:rgba(0,0,0,0.1)"></div></div>
 <p id=notes-label>Notes</p><div id=ed contenteditable role=textbox aria-labelledby=notes-label style="min-height:2em;border:1px solid"></div>
 <div id=host></div>

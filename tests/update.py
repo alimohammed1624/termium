@@ -793,6 +793,21 @@ try:
           (r.returncode, r.stdout[-200:], output(nv)[-200:], ls_row("nv", "st-nv")))
     stop("nv")
 
+    # ------------------------------------------------ the update box doesn't lose what the person typed into a page's prompt()
+    pd = term(cur_bin, "-s", "pdraft", "--incognito", PAGE, state="st-pdraft")
+    pd.wait_for(lambda: notice(pd), 40)
+    subprocess.run([cur_bin, "ctl", "-s", "pdraft", "eval", "setTimeout(() => { window.ans = prompt('Your name?'); }, 0); 1"],
+                   env=dict(os.environ, **env_for("st-pdraft")), capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+    pd.wait_for(lambda: "Your name?" in pd.line(2), 10)
+    pd.key("ctrl+a"); pd.key("backspace"); pd.type("draft"); time.sleep(0.3)
+    open_box(pd); pd.key("escape")
+    check("a prompt()'s answer typed so far comes back after the update box", pd.wait_for(lambda: "Your name?" in pd.line(2) and "draft" in pd.line(2), 5), pd.line(2))
+    pd.key("enter"); time.sleep(0.5)
+    ans = subprocess.run([cur_bin, "ctl", "-s", "pdraft", "eval", "window.ans", "--json"], env=dict(os.environ, **env_for("st-pdraft")),
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30).stdout
+    check("...and it's what the page gets", '"draft"' in ans, ans)
+    stop("pdraft")
+
     # ------------------------------------------------ a relative --browser survives a restart from another directory
     helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
     bdir = os.path.join(tmp, "bdir"); os.makedirs(bdir)
@@ -915,11 +930,17 @@ try:
     o.key("ctrl+b"); o.key("d"); exit_code(o)
     r = cli(os.path.join(inst2, "termium"), "update", state="st-shell")
     check("termium update: updates a release binary (exit 0)", r.returncode == 0 and f"Updated to termium {NEXT}" in r.stdout and "downloading" in r.stdout, (r.returncode, r.stdout, r.stderr))
-    check("termium update: says running sessions keep the old version until restarted", "shell" in r.stdout and "keep" in r.stdout and "press r" in r.stdout, r.stdout)
+    check("termium update: says running sessions keep the old version until restarted", "shell" in r.stdout and "keep" in r.stdout and "Ctrl+B U, then r" in r.stdout, r.stdout)
     r2 = subprocess.run([os.path.join(inst2, "termium"), "--version"], capture_output=True, text=True)
     check("termium update: the new binary reports the new version", r2.stdout.strip() == f"termium {NEXT}", r2.stdout)
     r = cli(os.path.join(inst2, "termium"), "update", state="st-shell")
     check("termium update again: up to date (exit 0)", r.returncode == 0 and f"termium {NEXT} is up to date" in r.stdout, (r.returncode, r.stdout))
+    # Opted out: no update news, but a restart into the termium now installed is still offered on Ctrl+B U.
+    qo = term(os.path.join(inst2, "termium"), "attach", "shell", state="st-shell", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
+    qo.wait_text("termium test page", 20); time.sleep(1)
+    qo.key("ctrl+b"); qo.key("shift+u")
+    check("opted out: Ctrl+B U still offers the restart into the installed termium", qo.wait_for(lambda: box_open(qo) and "is installed" in qo.text(), 10), qo.line(2))
+    qo.key("escape"); time.sleep(0.5); qo.key("ctrl+b"); qo.key("d"); exit_code(qo)
     q = term(os.path.join(inst2, "termium"), "attach", "shell", state="st-shell")
     check("a newer client attaching to the old session: a restart is offered", q.wait_for(lambda: notice(q) and f"↻ termium {NEXT} is installed" in q.line(2), 30), q.line(2))
     open_box(q)
@@ -1024,7 +1045,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "nv", "clock", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "nv", "clock", "pdraft", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)
