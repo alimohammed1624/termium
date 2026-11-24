@@ -233,14 +233,16 @@ const DIACRITICS = [
 export const PLACEHOLDER_MAX = DIACRITICS.length;
 
 /**
- * Image ids usable with placeholders: a 256-colour index other than 0,
- * plus a high byte (a third combining mark) that keeps two termiums in two
- * tmux panes, which share one outer terminal, from using the same ids.
+ * Placeholder ids live in a cell's foreground colour (24 bits as RGB, or a
+ * 256-colour index when the terminal under tmux can't show RGB) plus a high
+ * byte in a third combining mark. Each terminal attach picks random ones,
+ * so two termiums in two tmux panes (one outer terminal) don't meet.
+ * PLACEHOLDER_IDS is how many a session uses at once at most.
  */
 export const PLACEHOLDER_IDS = 255;
 
-export function placeholderImageId(high: number, index: number): number {
-  return ((high & 0xff) << 24 >>> 0) + index;
+export function placeholderImageId(high: number, colour: number): number {
+  return ((high & 0xff) << 24 >>> 0) + (colour & 0xffffff);
 }
 
 /**
@@ -262,16 +264,19 @@ export function transmitVirtual(base64Png: string, id: number, cols: number, row
  * Placeholder text showing image placeholderImageId(high, index) in the
  * cols x rows cells at (row, col).
  */
-export function placeholderCells(high: number, index: number, row: number, col: number, cols: number, rows: number): string {
+export function placeholderCells(high: number, colour: number, rgb: boolean, row: number, col: number, cols: number, rows: number): string {
   const c = Math.min(cols, PLACEHOLDER_MAX);
   const r = Math.min(rows, PLACEHOLDER_MAX);
   const top = DIACRITICS[high & 0xff];
-  let s = `${ESC}[0m${ESC}[38;5;${index}m`;
-  for (let y = 0; y < r; y++) {
-    s += `${ESC}[${row + y};${col}H`;
-    // Every cell carries its row, column and the id's high byte, so a
-    // multiplexer redrawing only part of a line can't shift the picture.
-    for (let x = 0; x < c; x++) s += `\u{10EEEE}${DIACRITICS[y]}${DIACRITICS[x]}${top}`;
-  }
+  const fg = rgb ? `38;2;${(colour >> 16) & 0xff};${(colour >> 8) & 0xff};${colour & 0xff}` : `38;5;${colour & 0xff}`;
+  let s = `${ESC}[0m${ESC}[${fg}m`;
+  // Only a row's first cell carries its marks (row, column, the id's high
+  // byte); the rest are bare, and the terminal counts on from the cell to
+  // their left. Marks on every cell made a full redraw of a big pane ~6x
+  // larger (tmux rewrites a cell for each combining mark), over the amount
+  // tmux lets queue for the terminal: it then discards and redraws again,
+  // dropping passthrough (our pictures) all the while.
+  const bare = "\u{10EEEE}".repeat(Math.max(0, c - 1));
+  for (let y = 0; y < r; y++) s += `${ESC}[${row + y};${col}H\u{10EEEE}${DIACRITICS[y]}${DIACRITICS[0]}${top}${bare}`;
   return s + `${ESC}[0m`;
 }

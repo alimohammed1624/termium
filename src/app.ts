@@ -234,6 +234,13 @@ export class App {
   private phNext = 1;
   /** High byte of placeholder image ids, picked per terminal (see placeholderImageId). */
   private phHigh = 1;
+  /** Placeholder colours are RGB (24-bit ids) rather than 256-colour indexes. */
+  private phRgb = false;
+  /** Random start of this terminal's RGB placeholder colours. */
+  private phBase = 0;
+  /** Placeholder indexes whose pictures still wait for their (deferred) delete. */
+  private phReleasing: number[] = [];
+  private staleTimer: ReturnType<typeof setTimeout> | null = null;
   private repaintTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Pictures of pages that went off screen, deleted with the next
@@ -1079,7 +1086,10 @@ export class App {
    * A terminal attached: draw everything for it from scratch, at its size.
    * Image ids and positions from an earlier terminal mean nothing to it.
    */
-  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean }): void {
+  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean }): void {
+    // Nothing half-typed on the previous terminal carries over (a pending
+    // Ctrl+B prefix would turn this one's first key into a command).
+    this.resetInput();
     this.attached = true;
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
@@ -1089,7 +1099,11 @@ export class App {
       page.placed = null;
     }
     this.phInUse.clear();
+    this.phReleasing = [];
     this.staleImages = [];
+    this.phRgb = !!t.rgbIds;
+    this.phBase = Math.floor(Math.random() * 0xffff00);
+    this.phNext = 1 + Math.floor(Math.random() * PLACEHOLDER_IDS);
     // Ids of our own, unlikely to meet another program's in the same
     // terminal (tmux panes share one): only these are ever deleted.
     this.phHigh = 1 + Math.floor(Math.random() * 255);
@@ -1128,14 +1142,19 @@ export class App {
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
   detach(): void {
     this.attached = false;
-    if (this.mode === "prefix" || this.mode === "resize") this.mode = "normal";
+    this.resetInput();
+    if (this.started) this.relayout();
+  }
+
+  /** Forgets input state that belongs to a terminal: pending prefix or mode, buttons, held keys. */
+  private resetInput(): void {
+    if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
     this.mouseCapture = null;
     this.mouseButtons = 0;
     this.drag = null;
     this.hoverPage = null;
     this.pageKeysDown.clear();
     this.syntheticDown.clear();
-    if (this.started) this.relayout();
   }
 
   setGeometry(cols: number, rows: number, cellW: number, cellH: number): void {
@@ -1297,10 +1316,35 @@ export class App {
     return this.takeStale();
   }
 
-  /** Deletes for pictures that went off screen; goes after what replaces them, in the same update. */
+  /**
+   * Deletes for pictures that went off screen; goes after what replaces
+   * them, in the same update. With placeholders (tmux) a delete would
+   * reach the terminal at once while tmux still shows the old cells, so
+   * there they're sent a little later instead, and the old ids stay
+   * reserved until then.
+   */
   private takeStale(): string {
+    if (this.placeholders) {
+      this.scheduleStale();
+      return "";
+    }
     const ids = this.staleImages.splice(0);
     return ids.map(deleteImage).join("");
+  }
+
+  private scheduleStale(): void {
+    if (this.staleTimer || (!this.staleImages.length && !this.phReleasing.length)) return;
+    this.staleTimer = setTimeout(() => {
+      this.staleTimer = null;
+      const ids = this.staleImages.splice(0);
+      for (const i of this.phReleasing.splice(0)) this.phInUse.delete(i);
+      if (ids.length && this.attached) out(ids.map(deleteImage).join(""));
+    }, 300);
+  }
+
+  /** The 24-bit colour standing for placeholder index i. */
+  private phColour(i: number): number {
+    return this.phRgb ? ((this.phBase + i) % 0xffffff) + 1 : i;
   }
 
   /** Wraps one update so the terminal shows it at once (unless a full redraw already does). */
@@ -1314,7 +1358,7 @@ export class App {
    * the next page's picture before they're redrawn.
    */
   private placeholderIds(page: Page, n: number): number[] | null {
-    while (page.phIds.length > n) this.phInUse.delete(page.phIds.pop()!);
+    while (page.phIds.length > n) this.phReleasing.push(page.phIds.pop()!);
     while (page.phIds.length < n) {
       let found = 0;
       for (let i = 0; i < PLACEHOLDER_IDS && !found; i++) {
@@ -1331,8 +1375,10 @@ export class App {
   }
 
   private releasePlaceholder(page: Page): void {
-    for (const id of page.phIds) this.phInUse.delete(id);
+    // Freed once their pictures are deleted (see takeStale).
+    this.phReleasing.push(...page.phIds);
     page.phIds = [];
+    this.scheduleStale();
   }
 
   private snapshot(page: Page): Promise<void> {
@@ -1446,7 +1492,7 @@ export class App {
     }
     const indexes = this.placeholderIds(page, tiles.length);
     if (!indexes) return false;
-    const ids = indexes.map((i) => placeholderImageId(this.phHigh, i));
+    const ids = indexes.map((i) => placeholderImageId(this.phHigh, this.phColour(i)));
     const p = page.placed;
     const moved =
       ids.length !== page.imageIds.length || ids.some((id, i) => id !== page.imageIds[i]) ||
@@ -1459,7 +1505,7 @@ export class App {
       const cols = Math.min(t.cols, PLACEHOLDER_MAX);
       const rows = Math.min(t.rows, PLACEHOLDER_MAX);
       s += transmitVirtual(data, ids[i]!, cols, rows);
-      if (moved) s += placeholderCells(this.phHigh, indexes[i]!, t.row, t.col, cols, rows);
+      if (moved) s += placeholderCells(this.phHigh, this.phColour(indexes[i]!), this.phRgb, t.row, t.col, cols, rows);
     });
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;

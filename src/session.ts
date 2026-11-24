@@ -16,7 +16,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lockHolder } from "./browser";
+import { lockFile, unlockFile } from "./browser";
 
 /** Bumped whenever client and server stop understanding each other. */
 export const PROTOCOL = 1;
@@ -80,13 +80,41 @@ export function sessionNames(dir = socketDir()): string[] {
   }
 }
 
-/** Removes what a dead server left behind (never anything while a live server holds the lock). */
+/**
+ * Removes what a dead server left behind. The session's lock is taken
+ * first, so a server starting at that moment (which takes it too) can't
+ * have its fresh files removed from under it.
+ */
 export function removeStale(name: string, dir = socketDir()): void {
   const p = sessionPaths(name, dir);
-  if (lockHolder(p.lock) !== null) return;
-  rmSync(p.sock, { force: true });
-  rmSync(p.pid, { force: true });
-  rmSync(p.lock, { force: true });
+  if (lockFile(p.lock) !== null) return; // a live server holds it
+  try {
+    rmSync(p.sock, { force: true });
+    rmSync(p.pid, { force: true });
+  } finally {
+    unlockFile(p.lock);
+  }
+}
+
+/** Removes startup-error files of clients that are gone (<name>.<pid>.err). */
+export function sweepErrFiles(dir = socketDir()): void {
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const f of names) {
+    const m = f.match(/\.(\d+)\.err$/);
+    if (!m) continue;
+    try {
+      process.kill(Number(m[1]), 0);
+      continue; // its client is still running
+    } catch (e: any) {
+      if (e?.code === "EPERM") continue;
+    }
+    rmSync(join(dir, f), { force: true });
+  }
 }
 
 export function readPid(name: string, dir = socketDir()): number | null {
@@ -146,23 +174,39 @@ export type Frame = { type: typeof MSG_JSON; msg: any } | { type: typeof MSG_OUT
 /** Largest frame accepted; anything bigger means the stream is garbage. */
 const MAX_FRAME = 256 * 1024 * 1024;
 
-/** Splits a byte stream into frames. */
+/** Splits a byte stream into frames (in time linear in the bytes, however they're chunked). */
 export class FrameReader {
-  private buf: Buffer = Buffer.alloc(0);
+  private buf: Buffer = Buffer.alloc(64 * 1024);
+  private start = 0;
+  private end = 0;
 
   constructor(private onFrame: (f: Frame) => void) {}
 
   push(chunk: Buffer): void {
-    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
-    while (this.buf.length >= 5) {
-      const type = this.buf[0]!;
-      const len = this.buf.readUInt32BE(1);
+    if (this.end + chunk.length > this.buf.length) {
+      const used = this.end - this.start;
+      if (used + chunk.length <= this.buf.length / 2) {
+        this.buf.copy(this.buf, 0, this.start, this.end); // room once the consumed part is dropped
+      } else {
+        const grown = Buffer.alloc(Math.max(this.buf.length * 2, used + chunk.length));
+        this.buf.copy(grown, 0, this.start, this.end);
+        this.buf = grown;
+      }
+      this.start = 0;
+      this.end = used;
+    }
+    chunk.copy(this.buf, this.end);
+    this.end += chunk.length;
+    while (this.end - this.start >= 5) {
+      const type = this.buf[this.start]!;
+      const len = this.buf.readUInt32BE(this.start + 1);
       if (len > MAX_FRAME || (type !== MSG_JSON && type !== MSG_OUTPUT) || (type === MSG_OUTPUT && len < 4)) throw new Error("bad frame from the session socket");
-      if (this.buf.length < 5 + len) return;
-      const payload = this.buf.subarray(5, 5 + len);
-      this.buf = this.buf.subarray(5 + len);
+      if (this.end - this.start < 5 + len) return;
+      const payload = this.buf.subarray(this.start + 5, this.start + 5 + len);
+      this.start += 5 + len;
       if (type === MSG_JSON) this.onFrame({ type, msg: JSON.parse(payload.toString("utf8")) });
       else this.onFrame({ type, seq: payload.readUInt32BE(0), data: payload.subarray(4).toString("utf8") });
     }
+    if (this.start === this.end) this.start = this.end = 0;
   }
 }

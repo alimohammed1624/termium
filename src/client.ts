@@ -23,6 +23,7 @@ import {
   sessionNames,
   sessionPaths,
   socketDir,
+  sweepErrFiles,
 } from "./session";
 import { drained, enterTerminal, out, queryCapabilities, querySizes, restoreTerminal, setTmuxPassthrough } from "./terminal";
 
@@ -63,19 +64,23 @@ function tmuxPassthroughSetting(): string | null {
  * (the active pane of a window being shown)? Queries sent from any other
  * pane are answered into that one, typed into whatever runs there.
  */
-function tmuxPaneActive(): boolean {
+function tmuxPane(): { active: boolean; visible: boolean; rgb: boolean } {
   const pane = process.env.TMUX_PANE;
-  if (!pane) return true;
+  const unknown = { active: true, visible: true, rgb: false };
+  if (!pane) return unknown;
   try {
-    const r = Bun.spawnSync(["tmux", "display-message", "-p", "-t", pane, "#{pane_active} #{window_active} #{session_attached}"], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    if (r.exitCode !== 0) return true;
-    const [p, w, attached] = r.stdout.toString().trim().split(" ");
-    return p === "1" && w === "1" && attached !== "0";
+    const r = Bun.spawnSync(
+      ["tmux", "display-message", "-p", "-t", pane, "#{pane_active}|#{window_active}|#{session_attached}|#{window_zoomed_flag}|#{client_termfeatures}"],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    if (r.exitCode !== 0) return unknown;
+    const [p, w, attached, zoomed, features] = r.stdout.toString().trim().split("|");
+    // Shown: its window is the current one of an attached session, and no
+    // other pane is zoomed over it.
+    const visible = w === "1" && attached !== "0" && (zoomed !== "1" || p === "1");
+    return { active: visible && p === "1", visible, rgb: (features ?? "").split(",").includes("RGB") };
   } catch {
-    return true;
+    return unknown;
   }
 }
 
@@ -140,6 +145,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
   // What the server we may start says if it fails (ours alone: a second
   // client starting the same session at once has its own).
   const errPath = `${paths.err.slice(0, -4)}.${process.pid}.err`;
+  sweepErrFiles(); // left by clients that were killed outright
   process.on("exit", () => rmSync(errPath, { force: true }));
 
   const inTmux = !!process.env.TMUX;
@@ -319,7 +325,9 @@ export async function runClient(o: ClientOptions): Promise<void> {
   }
   // Not the active pane: the graphics question would be answered into
   // another pane, so it isn't asked (tmux answers the others itself).
-  let paneActive = !inTmux || tmuxPaneActive();
+  const pane0 = inTmux ? tmuxPane() : { active: true, visible: true, rgb: false };
+  let paneActive = pane0.active;
+  let paneVisible = pane0.visible;
   queryCapabilities(paneActive);
 
   const graphicsReply = new Promise<void>((r) => (onGraphics = r));
@@ -344,8 +352,9 @@ export async function runClient(o: ClientOptions): Promise<void> {
   if (inTmux) {
     const timer = setInterval(() => {
       const was = paneActive;
-      paneActive = tmuxPaneActive();
-      if (paneActive && !was) onPaneActive?.();
+      const wasVisible = paneVisible;
+      ({ active: paneActive, visible: paneVisible } = tmuxPane());
+      if ((paneActive && !was) || (paneVisible && !wasVisible)) onPaneActive?.();
     }, 1000);
     timer.unref?.();
   }
@@ -358,10 +367,11 @@ export async function runClient(o: ClientOptions): Promise<void> {
 
   /** Stops a server this client started but won't attach to. */
   const stopOwnServer = async () => {
-    if (!child) return;
+    if (!child || childExit !== null) return; // none, or it already exited (lost a race: not ours to stop)
     const s = await waitForServer(2000).catch(() => null);
     if (s) {
-      s.write(jsonFrame({ t: "hello", v: PROTOCOL, kind: "kill" } satisfies Hello));
+      // Only ends it if it's ours and no other terminal has attached meanwhile.
+      s.write(jsonFrame({ t: "hello", v: PROTOCOL, kind: "abandon", starter: child.pid } satisfies Hello));
       await new Promise<void>((r) => {
         s.on("close", () => r());
         s.on("error", () => r());
@@ -474,7 +484,14 @@ export async function runClient(o: ClientOptions): Promise<void> {
   };
   /** tmux answers again: send the pictures once more, and see whether files work now. */
   let probing = false;
+  let probeAfterPump = false;
   const answeredAgain = async () => {
+    // A query must never go out between the slices of a picture the pump is
+    // sending: then it's run once the pump is done.
+    if (pumping) {
+      probeAfterPump = true;
+      return;
+    }
     if (probing) return;
     probing = true;
     if (fileProbe === "unknown" && paneActive && process.env.TERMIUM_TMUX_FILES !== "0") {
@@ -492,6 +509,17 @@ export async function runClient(o: ClientOptions): Promise<void> {
     pumping = true;
     while (outQueue.length) {
       const { data, done } = outQueue.shift()!;
+      if (fileTransport) {
+        try {
+          out(viaFiles(data), done);
+          continue;
+        } catch {
+          // Can't write the files (disk full, say): send the data itself instead.
+          loading = null;
+          fileTransport = false;
+          fileProbe = "no";
+        }
+      }
       // The pictures go first, then all the text in one write: the text
       // holds a synchronized update (?2026h ... ?2026l), and waiting in the
       // middle of one would leave tmux holding back a half-drawn pane. The
@@ -533,6 +561,10 @@ export async function runClient(o: ClientOptions): Promise<void> {
       out(acc + text, done);
     }
     pumping = false;
+    if (probeAfterPump) {
+      probeAfterPump = false;
+      void answeredAgain();
+    }
   };
 
   /** Rewrites each picture's chunks as one escape naming a temporary file with the PNG. */
@@ -565,7 +597,13 @@ export async function runClient(o: ClientOptions): Promise<void> {
   /** Terminal output from the session. */
   const emit = (data: string, done?: () => void) => {
     if (!inTmux || !placeholders) return out(data, done);
-    if (fileTransport) return out(viaFiles(data), done);
+    if (!paneVisible && data.includes("\x1b_G")) {
+      // Not shown: tmux would drop the pictures anyway (and files would
+      // pile up unread). They're sent again once the pane shows.
+      data = data.replace(/\x1b_G(?:[^;\x1b]*a=T|m=)[^\x1b]*\x1b\\/g, "");
+    }
+    // Always through the queue: output must never overtake a picture the
+    // pump is still sending in slices.
     outQueue.push({ data, done });
     void pump();
   };
@@ -636,9 +674,11 @@ export async function runClient(o: ClientOptions): Promise<void> {
     ...g,
     pixelMouse: caps.pixelMouse,
     placeholders,
+    rgbIds: pane0.rgb,
     via: !inTmux ? "direct" : fileTransport ? "tmux-files" : "tmux-paced",
     // A session we just started opens the URL itself.
-    url: child ? null : o.url,
+    url: o.url,
+    starter: child?.pid,
   } satisfies Hello);
   for (const ev of pending.splice(0)) send({ t: "input", ev });
   // The server answers an attach at once (before it draws anything).
@@ -706,6 +746,7 @@ export async function listSessions(): Promise<void> {
   } catch (e: any) {
     fail(e?.message ?? String(e));
   }
+  sweepErrFiles(dir);
   const rows: string[][] = [];
   for (const name of sessionNames(dir)) {
     const info = await sessionInfo(name);
@@ -729,6 +770,7 @@ export async function killSession(name: string): Promise<void> {
   } catch (e: any) {
     fail(e?.message ?? String(e));
   }
+  sweepErrFiles();
   const sock = await dial(p.sock).catch(() => null);
   if (!sock) {
     await sessionInfo(name); // clears a stale socket
