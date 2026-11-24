@@ -600,7 +600,16 @@ export class App {
   }
 
   /** The person at the terminal is in the middle of something (address bar, a prompt, help, a key prefix...). */
-  /** With `dialogOf`, that page's own dialog on screen doesn't count (an agent answering it), the person typing does. */
+  /** The person has something open that takes their keys (address bar, a prompt, a dialog, help, the update box, a key prefix). */
+  humanEditing(): boolean {
+    return this.attached && (this.mode !== "normal" || !!this.prompt);
+  }
+
+  /**
+   * For agents only (`termium ctl`): the person is editing something (see
+   * humanEditing) or typed in the last moment. With `dialogOf`, that page's
+   * own dialog on screen doesn't count (an agent answering it), the person typing does.
+   */
   humanBusy(dialogOf?: Page): boolean {
     const prompt = this.prompt && !(dialogOf && this.prompt.kind === "dialog" && this.prompt.page === dialogOf);
     return this.attached && (this.mode !== "normal" || !!prompt || Date.now() - this.lastKeyAt < 1500);
@@ -874,9 +883,11 @@ export class App {
       const middle = Date.now() - this.lastMiddlePress < 1500;
       if (middle) this.lastMiddlePress = 0; // one middle click, one background tab
       // A popup from a page you aren't looking at doesn't take focus either.
-      // Nor does any new page (another DevTools client's, a popup) while the
-      // person is busy: their draft and keys stay where they are.
-      const background = middle || (!!opener && opener !== this.focused) || this.humanBusy();
+      // A page another DevTools client opens (no opener in termium) waits in the
+      // background while the person is editing the address, a prompt or help:
+      // their draft stays. Popups and links from pages keep opening in front
+      // (the person's own clicks and keys open those).
+      const background = middle || (!!opener && opener !== this.focused) || (!opener && this.humanEditing());
       placement = { kind: "tab", space, index, editUrl: false, background };
     }
 
@@ -3864,8 +3875,10 @@ export class App {
    * them anything: "unsaved" (not closed) if the page may have unsaved
    * changes or shows a dialog, unless `force`, which discards them.
    */
-  async agentClose(page: Page, force: boolean): Promise<"closing" | "unsaved"> {
+  async agentClose(page: Page, force: boolean, stillOk: () => boolean = () => true): Promise<"closing" | "unsaved" | "stopped"> {
     if (!force && (page.dialog || (await this.wouldAsk(page)))) return "unsaved";
+    // The probe takes a moment: the agent's time and the person are checked again right before closing.
+    if (!stillOk()) return "stopped";
     page.closing = true;
     page.agentClosing = force ? "force" : "yes";
     if (force && page.dialog) await this.cdp.send("Page.handleJavaScriptDialog", { accept: page.dialog.type === "beforeunload" }, page.dialog.sessionId).catch(() => {});

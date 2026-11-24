@@ -33,7 +33,7 @@ import { promises as fsp } from "node:fs";
 import { promisify } from "node:util";
 
 const gunzipAsync = promisify(gunzip);
-import { lockFile, unlockFile } from "./browser";
+import { lockFile, tryLockFile, unlockFile } from "./browser";
 
 const REPO = "alimohammed1624/termium";
 /** Redirects to `…/releases/tag/<latest tag>`. */
@@ -193,8 +193,10 @@ export async function updateCache(path: string, change: (c: Cache) => Cache, wai
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const lock = `${path}.lock`;
   let held = false;
-  for (const end = Date.now() + waitMs; !stop?.aborted; ) {
-    held = lockFile(lock) === null;
+  for (let end = Date.now() + waitMs, lastFull = 0; !stop?.aborted; ) {
+    const full = Date.now() - lastFull >= 1000;
+    if (full) lastFull = Date.now();
+    held = full ? lockFile(lock) === null : tryLockFile(lock);
     if (held || Date.now() >= end) break;
     await Bun.sleep(15);
   }
@@ -299,26 +301,37 @@ export type CheckResult = { ok: true; tag: string } | { ok: false; error: string
  * check keeps the previously seen tag; a pre-release is never recorded.
  */
 export async function checkAndCache(path: string | null, version: string, stop?: AbortSignal): Promise<CheckResult> {
-  let r: CheckResult;
-  try {
-    r = { ok: true, tag: await fetchLatest(version, stop) };
-  } catch (e: any) {
-    r = { ok: false, error: e?.message ?? String(e) };
-  }
-  // Stopped (nobody to tell any more): nothing is recorded.
+  const r = await checkNow(version, stop);
   if (stop?.aborted) return { ok: false, error: "stopped" };
-  if (path) {
-    try {
-      await updateCache(
-        path,
-        (prev) => ({ ...prev, checked_at: Math.floor(Date.now() / 1000), latest: r.ok && parseVersion(r.tag) ? r.tag : prev.latest }),
-        500,
-        stop,
-      );
-    } catch {}
-    if (stop?.aborted) return { ok: false, error: "stopped" };
-  }
+  if (path) await recordCheck(path, r, stop);
+  if (stop?.aborted) return { ok: false, error: "stopped" };
   return r;
+}
+
+/** Asks for the latest release (within the 3 s deadline): the answer, not yet recorded (see recordCheck). */
+export async function checkNow(version: string, stop?: AbortSignal): Promise<CheckResult> {
+  try {
+    return { ok: true, tag: await fetchLatest(version, stop) };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+}
+
+/**
+ * Records a check's answer (and its time) in the cache: best effort, and
+ * not if `stop` comes first. A failed check keeps the previously seen tag;
+ * a pre-release is never recorded.
+ */
+export async function recordCheck(path: string, r: CheckResult, stop?: AbortSignal): Promise<void> {
+  if (stop?.aborted) return;
+  try {
+    await updateCache(
+      path,
+      (prev) => ({ ...prev, checked_at: Math.floor(Date.now() / 1000), latest: r.ok && parseVersion(r.tag) ? r.tag : prev.latest }),
+      500,
+      stop,
+    );
+  } catch {}
 }
 
 /** The one line `termium check-update` prints, and its exit status (0 up to date, 100 available, 1 failed). */
@@ -604,8 +617,11 @@ export async function binaryVersionAsync(argv: string[]): Promise<string | null>
 /** Takes lock file `path`, waiting for another holder up to `timeoutMs`; returns the release. */
 export async function waitLock(path: string, timeoutMs = 180_000): Promise<() => void> {
   const end = Date.now() + timeoutMs;
-  for (;;) {
-    if (lockFile(path) === null) return () => unlockFile(path);
+  // Whether a holder died (which runs ps) is asked once a second; in between, just whether it's free.
+  for (let lastFull = 0; ; ) {
+    const full = Date.now() - lastFull >= 1000;
+    if (full) lastFull = Date.now();
+    if (full ? lockFile(path) === null : tryLockFile(path)) return () => unlockFile(path);
     if (Date.now() > end) throw new Error("another termium update is still running; nothing was changed");
     await Bun.sleep(100);
   }

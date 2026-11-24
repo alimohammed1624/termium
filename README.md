@@ -319,7 +319,8 @@ termium update           # update to it (a release binary only)
   (ignoring the opt-outs and refreshing the cache) and exits 0 when up to
   date, 100 when a newer release is available and 1 when it could not
   check; `termium update` exits 0 when updated or already up to date and
-  1 on failure (always with the `install.sh` command to update by hand).
+  1 on failure (always with the `install.sh` command to update by hand);
+  both exit 2 on bad usage.
 
 ### Good to know
 

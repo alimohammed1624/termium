@@ -116,7 +116,7 @@ export function lockProfile(profileDir: string): void {
  */
 export function lockFile(path: string): number | null | "failed" {
   const tmp = `${path}.${process.pid}`;
-  writeFileSync(tmp, JSON.stringify({ pid: process.pid, start: startTime(process.pid) }), { mode: 0o600 });
+  writeFileSync(tmp, JSON.stringify({ pid: process.pid, start: ownStart() }), { mode: 0o600 });
   try {
     for (let attempt = 0; attempt < 20; attempt++) {
       try {
@@ -141,6 +141,30 @@ export function lockFile(path: string): number | null | "failed" {
       }
     }
     return "failed";
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/** This process's start time, asked once (ps). */
+let myStart: string | null = null;
+function ownStart(): string {
+  return (myStart ??= startTime(process.pid));
+}
+
+/**
+ * Takes lock file `path` if it's free, without asking whether a holder is
+ * still alive (no `ps`): for waiting loops, which call lockFile (that does)
+ * only now and then.
+ */
+export function tryLockFile(path: string): boolean {
+  const tmp = `${path}.${process.pid}`;
+  try {
+    writeFileSync(tmp, JSON.stringify({ pid: process.pid, start: ownStart() }), { mode: 0o600 });
+    linkSync(tmp, path);
+    return true;
+  } catch {
+    return false;
   } finally {
     rmSync(tmp, { force: true });
   }

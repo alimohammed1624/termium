@@ -259,7 +259,8 @@ class Agent {
       if (!created) throw new CtlError("couldn't open a tab");
       page = created;
       held = !req.background && this.app.activePage() !== page;
-      this.note(`opened ${url} in tab ${page.num}${held ? " (in the background: you're busy)" : ""}`);
+      // (The address is what's cut short, never what follows it.)
+      this.note(`opened ${clip(url, held ? 25 : 50)} in tab ${page.num}${held ? " (behind: you're busy)" : ""}`);
     } else {
       page = this.page(req.tab);
       await this.personFree(page, timeoutMs, "not navigated");
@@ -291,7 +292,18 @@ class Agent {
           "close --force discards them",
       );
     this.step("not closed");
-    if ((await this.app.agentClose(page, !!req.force)) === "unsaved") throw unsaved();
+    const how = await this.app.agentClose(
+      page,
+      !!req.force,
+      () => Date.now() < this.deadline && !(this.app.humanBusy() && page === this.app.activePage()),
+    );
+    if (how === "unsaved") throw unsaved();
+    if (how === "stopped") {
+      throw new CtlError(
+        Date.now() >= this.deadline ? "timed out; not closed" : "the person at the terminal got busy on that tab; not closed",
+        EXIT.timeout,
+      );
+    }
     this.note(`closing tab ${page.num}`);
     const end = Date.now() + 5000;
     while (this.app.isOpen(page) && Date.now() < end) {
@@ -508,27 +520,33 @@ class Agent {
     }
     const { page, node } = this.element(req.ref);
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
+    this.step("not clicked");
     const { x, y } = await this.centre(page, node);
-    // Something else on top (a cookie banner, an overlay) would take the click: say so.
+    // Something else on top (a cookie banner, an overlay) would take the click:
+    // then nothing is clicked, and the agent is told what covers it.
     const objectId = await this.objectOf(page, node);
-    const hit = await this.callOn(
+    const cover = await this.callOn(
       page,
       objectId,
       `function (x, y) {
-        if (this.ownerDocument !== document) return true;
-        const e = document.elementFromPoint(x, y);
-        return !e || e === this || this.contains(e) || e.contains(this) || (e.shadowRoot ? true : false);
+        if (this.ownerDocument !== document) return null;
+        let e = document.elementFromPoint(x, y);
+        while (e && e.shadowRoot) { const inner = e.shadowRoot.elementFromPoint(x, y); if (!inner || inner === e) break; e = inner; }
+        if (!e || e === this || this.contains(e) || e.contains(this)) return null;
+        const r = this.getRootNode && this.getRootNode();
+        if (r && r.host && (r.host === e || r.host.contains(e))) return null;
+        const name = (e.getAttribute && (e.getAttribute("aria-label") || e.getAttribute("title"))) || (e.innerText || "").trim().replace(/\s+/g, " ");
+        return e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (name ? ' "' + name.slice(0, 40) + '"' : "");
       }`,
       [x, y],
-    ).catch(() => true);
+    ).catch(() => null);
+    if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
     this.step("not clicked");
     const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count));
     // (The page is held by its dialog: it can't be asked for the element's name.)
     const label = dialog ? "an element" : await this.label(page, objectId);
     this.note(`clicked ${label}`);
-    const out: Record<string, unknown> = { tab: page.num, ref: req.ref, x: Math.round(x), y: Math.round(y), ...(dialog ? { dialog } : {}) };
-    if (!hit) out.warning = "another element covers its centre; the click went to that element";
-    return out;
+    return { tab: page.num, ref: req.ref, x: Math.round(x), y: Math.round(y), ...(dialog ? { dialog } : {}) };
   }
 
   private async label(page: Page, objectId: string): Promise<string> {
@@ -556,8 +574,8 @@ class Agent {
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "nothing was typed");
     // Named before anything is typed, from its names only.
     const label = await this.label(page, objectId);
-    await this.centre(page, node).catch(() => {}); // scrolled into view, where the watcher sees it
     this.step("nothing was typed");
+    await this.centre(page, node).catch(() => {}); // scrolled into view, where the watcher sees it
     const kind = await this.callOn(
       page,
       objectId,
@@ -567,9 +585,12 @@ class Agent {
         if (this.tagName === "SELECT") {
           const opt = [...this.options].find((o) => o.value === text || o.label.trim() === text || o.text.trim() === text);
           if (!opt) return { select: false, options: [...this.options].map((o) => o.label.trim() || o.value).slice(0, 50) };
+          this.focus();
           this.value = opt.value;
           this.dispatchEvent(new Event("input", { bubbles: true }));
           this.dispatchEvent(new Event("change", { bubbles: true }));
+          // Held to the same rule as text: the choice must stick.
+          if (this.value !== opt.value) return { field: true, mismatch: "changed the choice back (a handler)" };
           return { select: true };
         }
         const doc = this.ownerDocument, win = doc.defaultView;
@@ -627,8 +648,9 @@ class Agent {
     );
     if (kind?.select === false) throw new CtlError(`no option "${text}" in that list; it has: ${kind.options.join(", ")}`);
     if (kind?.select === true) {
+      if (req.submit) await this.submit(page, objectId, req.ref!, `chose "${clip(text, 40)}" in ${req.ref}`);
       this.note(`chose "${clip(text, 40)}"`);
-      return { tab: page.num, ref: req.ref, selected: text };
+      return { tab: page.num, ref: req.ref, selected: text, ...(req.submit ? { submitted: true } : {}) };
     }
     if (kind?.field === false) throw new CtlError(`element ${req.ref} isn't a text field (click it, then use key)`);
     if (kind?.refused) throw new CtlError(`element ${req.ref} can't be typed into: ${kind.refused}; nothing was typed`);
@@ -659,35 +681,39 @@ class Agent {
       ).catch(() => false);
       if (!check) throw new CtlError(`typed, but element ${req.ref} didn't get the text (the page moved focus?); check the page`);
     }
-    if (req.submit) {
-      this.step(`typed ${text.length} characters into ${req.ref}, not submitted`);
-      // Only the target's own form, and only while it still has focus (the
-      // page may have moved it after the text went in): checked and done in one go.
-      const how = await this.callOn(
-        page,
-        objectId,
-        `function () {
-          const doc = this.ownerDocument;
-          let now = doc.activeElement;
-          while (now && now.shadowRoot && now.shadowRoot.activeElement) now = now.shadowRoot.activeElement;
-          if (!(now === this || this.contains(now))) {
-            return { moved: !now ? "nowhere" : now.tagName.toLowerCase() + (now.id ? "#" + now.id : "") };
-          }
-          const form = this.form || (this.closest && this.closest("form"));
-          if (form) {
-            form.requestSubmit();
-            return { form: true };
-          }
-          return { enter: true };
-        }`,
-      );
-      if (how?.moved) throw new CtlError(`typed into ${req.ref}, but the page moved focus to ${how.moved}; not submitted`);
-      // No form: Enter, as a person would press it (focus was just checked).
-      if (how?.enter) await this.untilDialog(page, this.pressKey(page, "Enter"));
-    }
+    if (req.submit) await this.submit(page, objectId, req.ref!, `typed ${text.length} characters into ${req.ref}`);
     // What was typed is never shown (nor is a password field's name worth the risk).
     this.note(kind.secret ? "typed into a password field" : `typed into ${label}`);
     return { tab: page.num, ref: req.ref, typed: text.length };
+  }
+
+  /**
+   * Submits only the element's own form, and only while it still has focus
+   * (the page may have moved it after the text went in): checked and done in
+   * one go; with no form, Enter (focus was just checked).
+   */
+  private async submit(page: Page, objectId: string, ref: string, done: string): Promise<void> {
+    this.step(`${done}, not submitted`);
+    const how = await this.callOn(
+      page,
+      objectId,
+      `function () {
+        const doc = this.ownerDocument;
+        let now = doc.activeElement;
+        while (now && now.shadowRoot && now.shadowRoot.activeElement) now = now.shadowRoot.activeElement;
+        if (!(now === this || this.contains(now))) {
+          return { moved: !now ? "nowhere" : now.tagName.toLowerCase() + (now.id ? "#" + now.id : "") };
+        }
+        const form = this.form || (this.closest && this.closest("form"));
+        if (form) {
+          form.requestSubmit();
+          return { form: true };
+        }
+        return { enter: true };
+      }`,
+    );
+    if (how?.moved) throw new CtlError(`${done}, but the page moved focus to ${how.moved}; not submitted`);
+    if (how?.enter) await this.untilDialog(page, this.pressKey(page, "Enter"));
   }
 
   private async pressKey(page: Page, spec: string): Promise<void> {
@@ -729,6 +755,9 @@ class Agent {
     if (req.ref) {
       const el = this.element(req.ref);
       page = el.page;
+      // (Finding the element scrolls it into view: only once the person and the time allow.)
+      await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not scrolled");
+      this.step("not scrolled");
       at = await this.centre(page, el.node);
     } else {
       page = this.page(req.tab);

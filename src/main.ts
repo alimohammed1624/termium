@@ -46,9 +46,9 @@ Usage:
   termium devtools [name]      print the session's DevTools endpoint (http://127.0.0.1:PORT;
                                --json for more) for Puppeteer, Playwright, chrome-devtools-mcp
   termium check-update         check for a newer termium release (exit 0: up to date,
-                               100: one is available, 1: could not check)
+                               100: one is available, 1: could not check, 2: bad usage)
   termium update               update termium to the latest release (exit 0: updated or
-                               already up to date, 1: failed)
+                               already up to date, 1: failed, 2: bad usage)
 
 Options:
   -s, --session <name>  session to use (default: "${DEFAULT_SESSION}")

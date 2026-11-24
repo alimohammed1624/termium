@@ -48,8 +48,9 @@ import {
   cachePath,
   cachedNewer,
   binaryVersionAsync,
-  checkAndCache,
+  checkNow,
   currentExe,
+  recordCheck,
   displayVersion,
   isNewer,
   loadCache,
@@ -572,7 +573,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     lastCheck = Date.now();
     let again = false;
     try {
-      const r = await checkAndCache(cacheFile, version, stop.signal);
+      // Shown as soon as it's known; the cache is written after (best effort, still stopped by a detach).
+      const r = await checkNow(version, stop.signal);
+      if (!stop.signal.aborted) void recordCheck(cacheFile, r, stop.signal);
       if (stop.signal.aborted) {
         // The terminal went away first: nothing recorded, and the next attach checks again.
         lastCheck = 0;
@@ -590,6 +593,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       }
       if (isNewer(r.tag, version) && client && wantsUpdates) {
         log(`update check: termium ${displayVersion(r.tag)} is available`);
+        // (The skip comes from the cache as it was: this check's answer may not be written yet.)
         app?.updateAvailable(r.tag, loadCache(cacheFile)?.skipped !== r.tag);
       }
     } finally {
@@ -675,8 +679,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     restarting = true;
     for (const k of known) {
       const got = await binaryVersionAsync(k.argv);
-      if (got === k.version) {
-        target = k;
+      // That version or a newer one since (another update to the same place): the one there now.
+      if (got && !isNewer(k.version, got) && isNewer(got, version)) {
+        target = { ...k, version: got };
         break;
       }
       log(`restart: ${k.argv.join(" ")} is ${got ? `termium ${got}` : "gone"}, not termium ${k.version}`);

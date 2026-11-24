@@ -51,7 +51,8 @@ Options:
   --timeout SEC        give up after SEC seconds (default 30): exit status 4
   --                   the rest are arguments, even if they start with -
 
-Exit status: 0 done, 1 failed (bad id, page error...), 2 usage, 3 no such session, 4 timed out.
+Exit status: 0 done, 1 failed (bad id, page error...), 2 usage, 3 no such session, 4 timed out,
+5 partly done (shot --full of a page over its size limit: the top part saved).
 Start a session without a terminal first: termium start -s NAME`;
 
 /** Exits with an error: always one line on stderr (as the skill promises). */
@@ -376,7 +377,11 @@ function human(req: CtlRequest, r: any): string {
     case "open":
     case "select":
     case "close":
-      return `${req.cmd === "close" ? "closed" : req.cmd === "select" ? "showing" : "tab"} ${r.id}: ${r.title || "(untitled)"}  ${r.url}`;
+      return (
+        `${req.cmd === "close" ? "closed" : req.cmd === "select" ? "showing" : "tab"} ${r.id}: ${r.title || "(untitled)"}  ${r.url}` +
+        (r.background ? "\n(opened in the background: the person at the terminal was busy)" : "") +
+        (r.dialog ? `\nthe page shows a ${r.dialog.type} dialog: ${r.dialog.message}` : "")
+      );
     case "snapshot":
       return `tab ${r.tab}: ${r.title || "(untitled)"}  ${r.url}\n${r.snapshot}`;
     case "text":
@@ -384,11 +389,11 @@ function human(req: CtlRequest, r: any): string {
     case "eval":
       return r.type === "undefined" ? "undefined" : JSON.stringify(r.value, null, 2);
     case "click":
-      return `clicked${r.ref ? ` ${r.ref}` : ""} at ${r.x},${r.y}${r.warning ? `\nwarning: ${r.warning}` : ""}`;
+      return `clicked${r.ref ? ` ${r.ref}` : ""} at ${r.x},${r.y}${r.dialog ? `\nthe page shows a ${r.dialog.type} dialog: ${r.dialog.message}` : ""}`;
     case "type":
       return r.selected !== undefined ? `chose "${r.selected}" in ${r.ref}` : `typed ${r.typed} characters into ${r.ref}`;
     case "key":
-      return `pressed ${r.keys.join(" ")}`;
+      return `pressed ${r.keys.join(" ")}${r.dialog ? `\nthe page shows a ${r.dialog.type} dialog (${r.pressed} of ${r.of} keys pressed): ${r.dialog.message}` : ""}`;
     case "scroll":
       return `scrolled to ${r.scrollX},${r.scrollY}`;
     case "wait":

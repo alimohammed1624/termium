@@ -146,6 +146,9 @@ The port changes each time the session starts: ask `termium devtools`.
   has focus; otherwise exit 1, not submitted. `dialog` doesn't wait its
   turn: it can answer a dialog an `open`, `click` or `key` is stopped on
   (they return as soon as the page shows one, with `dialog` in the reply).
+- `click ID` clicks only if the element itself is under its centre: if
+  something covers it (a banner, an overlay), it's exit 1 naming the
+  cover, and nothing is clicked.
 - `shot` files are readable only by you. `shot --full` captures the whole
   page, in tiles if it's tall, up to 40 megapixels (about 29000 px of a
   1380 px wide page; exit 5 beyond: the top part, said on stderr).
