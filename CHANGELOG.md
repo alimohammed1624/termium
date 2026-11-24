@@ -46,6 +46,8 @@ All notable changes to termium are documented here. The format follows
   protocol says how to end it (`termium kill NAME`).
 
 ### Fixed
+- `--browser ./path` is made absolute when the session starts, so a
+  restart from another directory finds it.
 - After re-attaching at another size, the first picture of a page could
   be one of the old shape (the browser's first frame after a resize can
   carry the new size in its metadata but the old picture). Right after a
