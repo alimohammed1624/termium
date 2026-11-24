@@ -133,8 +133,11 @@ prefixes.
 
 An agent (Claude Code, Codex, a script) can drive a session while you
 watch it in your terminal, a tmux or herdr pane say: everything it does
-shows as it happens (and is named in the status line as `agent: ...`),
-and it never takes over your terminal or keyboard.
+shows as it happens (and is named in the status line as `agent: ...`,
+never with what it typed: a password stays unshown), and it never takes
+over your terminal or keyboard. While you're editing the address bar,
+answering a prompt or reading help, an agent's `select` waits for you to
+finish rather than switching tabs under you.
 
 ```sh
 termium start -s agent [url]   # start a session without a terminal (returns once it's up)
@@ -157,8 +160,10 @@ termium --skill                # a SKILL.md that teaches an agent all this
   while the element exists. `--json` for machine-readable output; exit
   status 0 done, 1 failed, 2 usage, 3 no such session, 4 timed out.
 - **`termium start`** starts a session in the background with no
-  terminal (pages are 1280x800 until a terminal attaches and sizes them
-  to its panes). On a running session it says so and exits 0.
+  terminal (pages opened then are 1280x800; a terminal that attaches sizes
+  them to its panes, and they keep that size when it detaches). On a
+  running session it says so (opening its URL there) and exits 0; two at
+  once start one session, with both URLs.
 - **The DevTools endpoint.** Every session's browser listens for DevTools
   clients on `127.0.0.1` (a free port, new each start; `termium devtools
   [NAME] [--json]` prints it), besides termium's own private pipe:

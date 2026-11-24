@@ -2,6 +2,7 @@
 // agent's Puppeteer or Playwright would be), speaking raw CDP.
 // Usage:
 //   bun tests/support/cdp-ext.ts create <browserURL> <url>          prints the new target's id
+//   bun tests/support/cdp-ext.ts create-isolated <browserURL> <url> <seconds>   in a new browser context, kept that long
 //   bun tests/support/cdp-ext.ts close <browserURL> <targetId>
 //   bun tests/support/cdp-ext.ts viewport <browserURL> <url-part> <w> <h> <seconds>
 //       sets the page's viewport from this client, prints what the page reports,
@@ -14,6 +15,13 @@ const cdp = await CDP.connect(version.webSocketDebuggerUrl);
 if (cmd === "create") {
   const { targetId } = await cdp.send("Target.createTarget", { url: rest[0] });
   console.log(targetId);
+} else if (cmd === "create-isolated") {
+  // A tab in a new browser context (Playwright's newContext()), kept for <seconds> while connected.
+  const [url, secs] = rest;
+  const { browserContextId } = await cdp.send("Target.createBrowserContext", {});
+  const { targetId } = await cdp.send("Target.createTarget", { url, browserContextId });
+  console.log(targetId);
+  await Bun.sleep(Number(secs) * 1000);
 } else if (cmd === "close") {
   await cdp.send("Target.closeTarget", { targetId: rest[0] });
   console.log("closed");

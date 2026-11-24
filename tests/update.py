@@ -523,8 +523,10 @@ try:
     rf5 = term(cur_bin, "-s", "rf5", state="st-rf")
     check("restart snapshot: an unreachable page keeps its address", rf5.wait_for(lambda: "127.0.0.1:9/unreachable.html" in rf5.line(2), 40), rf5.line(2))
     check("restart snapshot: ...and counts as reopened (the snapshot goes)", rf5.wait_for(lambda: not os.path.exists(rpath), 10))
-    rf5.key("ctrl+r"); time.sleep(3)
-    check("restart snapshot: ...and still has it after a reload", "127.0.0.1:9/unreachable.html" in rf5.line(2), rf5.line(2))
+    rf5.key("ctrl+r")
+    # (Reloaded while its first load may still be held by Helium's content blocker, the page is
+    # replaced by a fresh one that shows no address until its navigation starts.)
+    check("restart snapshot: ...and still has it after a reload", rf5.wait_for(lambda: "127.0.0.1:9/unreachable.html" in rf5.line(2), 20), rf5.line(2))
     stop("rf5")
 
     # ------------------------------------------------ u: update, then r: restart into it (layout kept)
@@ -768,13 +770,18 @@ try:
                          capture_output=True, text=True, timeout=30)
     check("restart with agents: a DevTools client opens a tab", ext.returncode == 0 and ac.wait_for(lambda: "2" in ac.line(1) and "reader" in ac.line(1).lower(), 15),
           (before, ext.stderr[-200:], ac.line(1)))
+    iso = subprocess.Popen(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "create-isolated", before or "", f"{BASE}/fixtures/reader.html?iso=1", "120"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    iso.stdout.readline()
+    check("restart with agents: a DevTools client opens a tab in an isolated context", ac.wait_for(lambda: " 3 " in ac.line(1), 15), ac.line(1))
     ac.wait_for(lambda: notice(ac), 30)
     open_box(ac); ac.key("u")
     ac.wait_for(lambda: f"updated to termium {NEXT}" in ac.text(), 60)
     old_pid = server_pid("agr")
     open_box(ac); ac.key("r")
-    check("restart with agents: the session restarts", ac.wait_for(lambda: server_pid("agr") not in (None, old_pid), 30) and
-          ac.wait_for(lambda: "Restarted:" in ac.text(), 40), output(ac)[-200:])
+    check("restart with agents: the session restarts, saying the isolated context's tab isn't reopened",
+          ac.wait_for(lambda: server_pid("agr") not in (None, old_pid), 30) and ac.wait_for(lambda: "(1 tab of other" in ac.text(), 40), ac.line(2))
+    iso.kill(); iso.wait()
     after = endpoint()
     def page_urls(url):
         import urllib.request
@@ -785,6 +792,7 @@ try:
     check("restart with agents: the DevTools endpoint is back, on its new port, and termium devtools reports it",
           after and after != before and any("page.html" in u for u in page_urls(after)), (before, after, page_urls(after) if after else None))
     check("restart with agents: the tab the DevTools client opened is reopened", ac.wait_for(lambda: any("ext=1" in u for u in page_urls(after)), 20), page_urls(after))
+    check("restart with agents: ...but not the isolated context's (it'd lose its isolation)", not any("iso=1" in u for u in page_urls(after)), page_urls(after))
     stop("agr")
 
     # ------------------------------------------------ two updaters at once never downgrade

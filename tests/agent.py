@@ -186,6 +186,45 @@ try:
     r = ctl("dialog", "accept")
     check("dialog accept answers it", r.returncode == 0 and page_value("window.answer") is True, (r.stdout, r.stderr))
 
+    # --- typing only ever goes where it was asked to, and never shows what was typed
+    snap = ctl("snapshot").stdout
+    off_id, pw_id = ref(snap, "textbox", "Locked"), ref(snap, "textbox", "Secret")
+    ctl("type", name_id, "first field")
+    r = ctl("type", off_id, "xyz")
+    check("type into a disabled field: exit 1, nothing typed anywhere",
+          r.returncode == 1 and "disabled" in r.stderr and page_value("[document.getElementById('name').value, document.getElementById('off').value]") == ["first field", ""],
+          (r.returncode, r.stderr, page_value("[document.getElementById('name').value, document.getElementById('off').value]")))
+    r = ctl("type", pw_id, "EXAMPLE-SECRET-1")
+    shown = h.wait_for(lambda: "password field" in h.line(2), 5)
+    log = open(os.path.join(tmp, "state", "termium", "termium.log")).read()
+    check("type into a password field: typed, but the text is shown nowhere (status, output, log)",
+          r.returncode == 0 and page_value("document.getElementById('pw').value") == "EXAMPLE-SECRET-1" and shown
+          and "EXAMPLE" not in h.text() and "EXAMPLE" not in r.stdout + r.stderr and "EXAMPLE" not in log, (r.stdout, h.line(2)))
+    ctl("type", name_id, "")  # (empty again for what follows)
+    r = ctl("open", f"{BASE}/agent.html#termium-heading", "--timeout", "10")
+    check("open a page with a real #termium-... fragment: loads, no timeout", r.returncode == 0, (r.returncode, r.stderr))
+    r = ctl("wait", "text", "Agent fixture", "--timeout", "0.1")
+    check("wait with a tiny timeout still looks once (the text is there: exit 0)", r.returncode == 0, (r.returncode, r.stderr))
+    r = ctl("wait", "load", "--timeout", "0.1")
+    check("wait load with a tiny timeout still looks once", r.returncode == 0, (r.returncode, r.stderr))
+
+    # --- select never throws away what the person is typing in the address bar
+    r = ctl_json("open", f"{BASE}/page.html", "--new-tab", "--background")
+    second = r.get("id")
+    h.key("ctrl+l"); h.key("ctrl+a"); h.type("half-typed"); time.sleep(0.5)
+    r = ctl("select", str(second), "--timeout", "2")
+    check("select while the person edits the address: waits, then gives up (exit 4), their edit intact",
+          r.returncode == 4 and "busy" in r.stderr and "half-typed" in h.line(2) and [t["active"] for t in ctl_json("tabs")] == [True, False],
+          (r.returncode, r.stderr, h.line(2)))
+    p = subprocess.Popen(["bun", main, "ctl", "-s", "watch", "select", str(second), "--timeout", "15", "--json"], cwd=ROOT,
+                         env=dict(os.environ, **ENV), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(1.5)
+    h.key("escape")
+    out, err = p.communicate(timeout=30)
+    check("...and once they're done, the waiting select switches", p.returncode == 0 and json.loads(out or "{}").get("waitedForPerson", 0) > 500
+          and [t["active"] for t in ctl_json("tabs")] == [False, True], (p.returncode, out, err))
+    ctl("close", str(second)); ctl("select", str(first))
+
     # --- errors and exit statuses
     r = ctl("click", f"{first}:999999")
     check("an element that's gone: exit 1, says to snapshot again", r.returncode == 1 and "snapshot" in r.stderr, (r.returncode, r.stderr))
@@ -244,6 +283,15 @@ try:
     check("it isn't ended for want of a terminal", server_pid("bg") is not None)
     r = cli("kill", "bg")
     check("kill ends it", r.returncode == 0 and server_pid("bg") is None, (r.returncode, r.stderr))
+    # Two starts of one name at once, each with a URL: one session, both URLs open.
+    starts = [subprocess.Popen(["bun", main, "start", "-s", "race", "--incognito", f"{BASE}/{f}"], cwd=ROOT, env=dict(os.environ, **ENV),
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+              for f in ("agent.html?one=1", "page.html?two=1")]
+    outs = [p.communicate(timeout=90) for p in starts]
+    urls = [t["url"] for t in ctl_json("tabs", session="race")] if server_pid("race") else []
+    check("two starts at once: both exit 0, one session, both URLs open", all(p.returncode == 0 for p in starts)
+          and any("one=1" in u for u in urls) and any("two=1" in u for u in urls), (outs, urls))
+    cli("kill", "race")
 finally:
     for t in [x for x in globals().values() if isinstance(x, Term)]:
         if t.alive:
@@ -251,7 +299,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("watch", "bg"):
+    for name in ("watch", "bg", "race"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)

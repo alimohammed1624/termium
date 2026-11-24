@@ -15,7 +15,8 @@ All notable changes to termium are documented here. The format follows
   `shot`, `eval`, `wait`, `dialog`; `--json` output, exit status 0/1/2/3/4
   (done, failed, usage, no session, timeout).
 - `termium start [-s NAME] [URL]` starts a session in the background with
-  no terminal (pages are 1280x800 until a terminal attaches).
+  no terminal (pages opened then are 1280x800; a terminal that attaches
+  sizes them, and they keep that size when it detaches).
 - Every session's browser has a DevTools endpoint on `127.0.0.1` (any free
   port); `termium devtools [NAME] [--json]` prints it, for Puppeteer,
   Playwright `connectOverCDP` and chrome-devtools-mcp. Tabs they open or
