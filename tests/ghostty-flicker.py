@@ -12,7 +12,7 @@ other window is deleted). A capture is "blank" when most of the page area
 shows the terminal's own (translucent) background instead of the page's
 (opaque) picture. Writes OUTDIR/summary.json and keeps the captures.
 """
-import fcntl, json, os, shutil, struct, subprocess, sys, tempfile, termios, threading, time
+import fcntl, hashlib, json, os, shutil, signal, socket, struct, subprocess, sys, tempfile, termios, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -34,6 +34,12 @@ cw, ch = xpix // cols, ypix // rows
 URL1 = "https://en.wikipedia.org/wiki/Terminal_emulator"
 URL2 = "https://en.wikipedia.org/wiki/Tmux"
 URL3 = "https://news.ycombinator.com"
+# A page that never stops moving: the test fixture, served here.
+with socket.socket() as _so:
+    _so.bind(("127.0.0.1", 0)); _PORT = _so.getsockname()[1]
+fixtures = subprocess.Popen([sys.executable, "-m", "http.server", str(_PORT), "--bind", "127.0.0.1",
+                             "--directory", os.path.join(ROOT, "tests", "fixtures")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+ANIM = f"http://127.0.0.1:{_PORT}/anim.html"
 
 
 def activate():
@@ -107,6 +113,13 @@ def type_(text):
     if MODE != "tmux":
         return t.type(text, 0.01)
     t.write(text)
+
+
+def _page_hash(path):
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    return hashlib.md5(im.crop((w // 4, h // 4, w * 3 // 4, h * 3 // 4)).tobytes()).hexdigest()
 
 
 def key(t, k, n=1, pause=0.12):
@@ -185,6 +198,41 @@ try:
     action[0] = "re-attached tabs"
     for _ in range(4):
         press("ctrl+b"); press("n"); time.sleep(0.8)
+    # a stuck client (it stops acknowledging frames) taken over at the same size, on a moving page
+    action[0] = "animating"
+    press("ctrl+l"); time.sleep(0.2); type_(ANIM); press("enter"); time.sleep(4)
+    if MODE == "tmux":
+        shell = tm("display-message", "-p", "-t", "f", "#{pane_pid}").stdout.strip()
+        ps = subprocess.run(["ps", "-o", "pid=", "--ppid", shell], capture_output=True, text=True).stdout.split()
+        stuck = int(ps[0])  # the termium client this pane's shell runs
+    else:
+        stuck = t.pid
+    os.kill(stuck, signal.SIGSTOP)
+    action[0] = "stuck"
+    time.sleep(3)
+    action[0] = "stuck takeover"
+    if MODE == "tmux":
+        tm("new-window", "-t", "f", "-c", ROOT)
+        time.sleep(1)
+        tm("send-keys", "-t", "f", f"termium() {{ bun '{ROOT}/src/main.ts' \"$@\"; }}; clear; termium attach", "Enter")
+    else:
+        old = t
+        # The stuck client's driver must stop reading this window's input: the
+        # terminal's answers to the new client's queries are for the new one.
+        old.alive = False
+        time.sleep(0.3)
+        t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "attach"], cwd=ROOT, passthrough=True,
+                 env={**XDG, **({"TERMIUM_GRAPHICS": "placeholders"} if MODE == "placeholders" else {})})
+    time.sleep(3)
+    action[0] = "after takeover"
+    time.sleep(6)
+    os.kill(stuck, signal.SIGKILL)
+    if MODE != "tmux":
+        try:
+            os.waitpid(stuck, 0)
+        except ChildProcessError:
+            pass
+        old.alive = False
     action[0] = "end"
     time.sleep(1)
 finally:
@@ -202,6 +250,7 @@ finally:
     pid_file = os.path.join(rt, "termium", "default.pid")
     if os.path.exists(pid_file):
         subprocess.run(["bun", os.path.join(ROOT, "src/main.ts"), "kill"], env=env, capture_output=True, timeout=30)
+    fixtures.terminate()
     results = []
     for path, label, t0 in frames:
         try:
@@ -212,8 +261,11 @@ finally:
         "mode": MODE,
         "captures": len(results),
         # (a new tab or split pane is empty until its page draws: not flicker)
-        "blank": [r["file"] for r in results if r.get("blank", 0) > 0.5 and r["action"] not in ("start", "new tab", "new split", "detach", "new attach")],
+        "blank": [r["file"] for r in results if r.get("blank", 0) > 0.5 and r["action"] not in ("start", "new tab", "new split", "detach", "new attach", "stuck takeover")],
         "frames": results,
+        # After taking over from the stuck client, the moving page must keep changing.
+        "after_takeover_distinct": len({_page_hash(os.path.join(OUT, r["file"])) for r in results if r["action"] == "after takeover"}),
+        "after_takeover_captures": sum(1 for r in results if r["action"] == "after takeover"),
     }
     with open(os.path.join(OUT, "summary.json"), "w") as f:
         json.dump(summary, f, indent=1)

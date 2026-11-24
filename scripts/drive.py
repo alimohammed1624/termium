@@ -224,6 +224,9 @@ class Term:
             cleaned = _expand_rep(cleaned)
         # Colon-separated SGR (tmux writes 38:2:r:g:b) as pyte's semicolons.
         cleaned = re.sub(rb"\x1b\[[0-9:;]*:[0-9:;]*m", lambda m: m.group(0).replace(b"::", b":").replace(b":", b";"), cleaned)
+        # 256-colour foregrounds kept exactly: pyte stores them as palette hex, where several
+        # indexes share one colour (15 and 231 are both ffffff).
+        cleaned = re.sub(rb"\x1b\[([0-9;]*)m", _mark_palette_fg, cleaned)
         with self.lock:
             try:
                 self.stream.feed(cleaned)
@@ -507,7 +510,7 @@ class Term:
                 lows = []
                 if cell.fg in _COLOR_INDEX:
                     lows.append(_COLOR_INDEX[cell.fg])
-                if isinstance(cell.fg, str) and re.fullmatch(r"[0-9a-fA-F]{6}", cell.fg):
+                elif isinstance(cell.fg, str) and re.fullmatch(r"[0-9a-fA-F]{6}", cell.fg):
                     lows.append(int(cell.fg, 16))
                 marks = cell.data[1:]
                 pr = _DIACRITIC.get(marks[0]) if len(marks) > 0 else None
@@ -706,8 +709,28 @@ class _Screen(pyte.Screen):
 PLACEHOLDER = "\U0010EEEE"
 # pyte stores 256-colour foregrounds as hex; map them back to the index (the image id).
 _COLOR_INDEX: dict[str, int] = {}
-for _n, _hex in enumerate(pyte.graphics.FG_BG_256):
-    _COLOR_INDEX.setdefault(_hex, _n)
+# 38;5;N reaches pyte as the RGB marker 7e d1 NN (see _mark_palette_fg).
+for _n in range(256):
+    _COLOR_INDEX[f"7ed1{_n:02x}"] = _n
+
+
+def _mark_palette_fg(m):
+    params = m.group(1).split(b";")
+    out, i = [], 0
+    while i < len(params):
+        if params[i] == b"38" and i + 2 < len(params) and params[i + 1] == b"5" and params[i + 2].isdigit() and int(params[i + 2]) < 256:
+            out += [b"38", b"2", b"126", b"209", params[i + 2]]
+            i += 3
+        elif params[i] in (b"38", b"48") and i + 1 < len(params) and params[i + 1] == b"2":
+            out += params[i:i + 5]  # an RGB colour: its numbers aren't commands
+            i += 5
+        elif params[i] in (b"38", b"48") and i + 1 < len(params) and params[i + 1] == b"5":
+            out += params[i:i + 3]
+            i += 3
+        else:
+            out.append(params[i])
+            i += 1
+    return b"\x1b[" + b";".join(out) + b"m"
 # ...and the 16 basic colours by name (tmux re-encodes 38;5;1 as 31, and so on).
 for _code, _name in pyte.graphics.FG_ANSI.items():
     if _name != "default":

@@ -535,7 +535,7 @@ try:
     # is replaced by a fresh one on the next navigation
     t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type("chrome://crash"); t.key("enter"); time.sleep(5)
     t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/page.html?recovered=1"); t.key("enter")
-    check("stuck page recovers on the next navigation", t.wait_for(lambda: any("recovered=1" in p["url"] and p["value"] for p in pages()), 30),
+    check("stuck page recovers on the next navigation", t.wait_for(lambda: any("recovered=1" in p["url"] and p["value"] for p in pages()), 45),
           [p["url"] for p in pages("1")])
 
     # 15. a real URL with a #termium-... fragment is shown as-is

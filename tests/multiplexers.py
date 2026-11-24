@@ -140,7 +140,7 @@ try:
     check("tmux: placeholder ids are 24-bit colours where the terminal shows RGB", not rgb or all((i & 0xFFFFFF) > 255 for i in t.placeholder_images()),
           (rgb, list(t.placeholder_images())))
     check("tmux: temporary files have unguessable names, mode 0600, and are no symlinks",
-          t.graphics_files and all(_re.fullmatch(r"termium-tty-graphics-protocol-[0-9a-f]{32}", n) and m == 0o600 and not l
+          t.graphics_files and all(_re.fullmatch(r"termium-tty-graphics-protocol-[0-9]+-[0-9a-f]{32}", n) and m == 0o600 and not l
                                    for n, m, l in t.graphics_files), t.graphics_files[:3])
 
     # keyboard through tmux: address bar, then a page with state
@@ -246,11 +246,48 @@ try:
     check("tmux: kill ends the session", r.returncode == 0 and server_pid() is None, r.stderr)
     tmux("send-keys", "-t", "main.1", "clear", "Enter")
     time.sleep(0.5)
+    # From here pane 1's input is also recorded with times: (time, length, bytes) records.
+    stamper = os.path.join(tmp, "stamp.py")
+    with open(stamper, "w") as f:
+        f.write("import os, struct, sys, time\nraw = open(sys.argv[1], 'ab'); rec = open(sys.argv[2], 'ab')\n"
+                "while True:\n    d = os.read(0, 65536)\n    if not d: break\n"
+                "    raw.write(d); raw.flush(); rec.write(struct.pack('>dI', time.time(), len(d)) + d); rec.flush()\n")
+    stamps = os.path.join(tmp, "pane1.stamps")
+    tmux("pipe-pane", "-t", "main.1", f"python3 {stamper} {pane_out[1]} {stamps}")
+    time.sleep(0.5)
     before = len(t.raw)
     tmux("send-keys", "-t", "main.1", f"TERMIUM_TMUX_FILES=0 bun src/main.ts --profile {prof} {BASE}/noise.html", "Enter")
     big_now = lambda: any(len(t.images.get(i, b"")) > 1_000_000 for i in t.virtual) and b"\x1b_Gm=1;" in bytes(t.raw[before:])
     check("tmux: without files, a large picture arrives whole in paced chunks", t.wait_for(big_now, 40),
           {i: len(t.images.get(i, b"")) for i in t.virtual})
+    # Full redraws (sidebar on and off, a new tab and back) with large pictures, paced: each
+    # synchronized update must reach tmux whole, not held open across the pacing waits.
+    tmux("select-pane", "-t", "main.1")
+    for keys in ("b", "b", "b", "b"):
+        t.write("\x02"); time.sleep(0.15); t.write("\x02"); time.sleep(0.15); t.write(keys); time.sleep(2.5)
+    t.write("\x14"); time.sleep(1.5); t.write(f"{BASE}/noise.html?two=1\r"); time.sleep(5)
+    t.write("\x02"); time.sleep(0.15); t.write("\x02"); time.sleep(0.15); t.write("p"); time.sleep(4)
+    def sync_spans(path):
+        """How long each synchronized update stayed open in what termium wrote (seconds)."""
+        import struct as _st, bisect as _bi
+        buf, starts, times, pos = bytearray(), [], [], 0
+        data = open(path, "rb").read() if os.path.exists(path) else b""
+        while pos + 12 <= len(data):
+            when, n = _st.unpack(">dI", data[pos:pos + 12])
+            starts.append(len(buf)); times.append(when)
+            buf += data[pos + 12:pos + 12 + n]
+            pos += 12 + n
+        at = lambda off: times[_bi.bisect_right(starts, off) - 1]
+        spans, opened = [], None
+        for m in _re.finditer(rb"\x1b\[\?2026([hl])", bytes(buf)):
+            if m.group(1) == b"h":
+                opened = m.start() if opened is None else opened
+            elif opened is not None:
+                spans.append(at(m.start()) - at(opened)); opened = None
+        return spans
+    spans = sync_spans(stamps)
+    check("tmux: paced, every synchronized update reaches tmux whole (open < 0.15 s)",
+          len(spans) >= 5 and max(spans) < 0.15, (len(spans), sorted(spans)[-5:]))
     def interleaved(path):
         """Graphics commands termium wrote inside one of its own chunked transfers (not counting
         what tmux may drop on the way: that's checked at the source, the pane's input)."""

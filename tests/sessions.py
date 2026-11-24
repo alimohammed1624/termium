@@ -367,6 +367,144 @@ try:
     check("prefix: a plain d on the new terminal doesn't detach it", exit_code(p2, 0.5) is None, output(p2)[-200:])
     p2.close()
 
+    # ================================================================ terminals coming and going mid-input
+    r3prof = os.path.join(tmp, "r3prof")
+    r3state = lambda: page_eval("window.termiumState ? termiumState() : null", profile=r3prof)
+    dir_a = os.path.join(tmp, "dir-a"); dir_b = os.path.join(tmp, "dir-b")
+    os.makedirs(dir_a); os.makedirs(dir_b)
+    open(os.path.join(dir_b, "only-in-b.txt"), "w").write("b")
+    c1 = Term(["bun", main, "-s", "r3", "--profile", r3prof, f"{BASE}/page.html"], cwd=dir_a, env=ENV)
+    check("r3: session starts", c1.wait_for(lambda: r3state() is not None, 30))
+    c1.wait_idle(0.8, 10); time.sleep(1)
+    check("r3: the session's pid file is private (0600)", stat.S_IMODE(os.stat(os.path.join(sockdir, "r3.pid")).st_mode) == 0o600)
+    inp = page_eval("(() => { const r = document.getElementById('inp').getBoundingClientRect(); return [r.x + 10, r.y + r.height/2]; })()", profile=r3prof)
+    c1.click(220 + int(inp[0]), 40 + int(inp[1])); time.sleep(0.3)
+    clicks0 = (r3state() or {}).get("clicks", 0)
+    btn = page_eval("(() => { const r = document.getElementById('btn').getBoundingClientRect(); return [r.x + r.width/2, r.y + r.height/2]; })()", profile=r3prof)
+    c1.key("q", release=False); time.sleep(0.3)  # held
+    c1.mouse(220 + int(btn[0]), 40 + int(btn[1]), 0, "press"); time.sleep(0.3)  # held
+    check("r3: (precondition) the page saw the key go down", "down q" in (r3state() or {}).get("log", ""))
+    c2 = Term(["bun", main, "attach", "r3"], cwd=dir_b, env=ENV)  # takes over, from another directory
+    check("r3: takeover attaches", c2.wait_frames(1, 20))
+    time.sleep(1)
+    st3 = r3state() or {}
+    check("r3: a key held on the old terminal is released on the page", "up q" in st3.get("log", ""), st3.get("log", "")[-120:])
+    check("r3: a mouse button held on the old terminal is released on the page", st3.get("clicks", 0) == clicks0 + 1, (clicks0, st3.get("clicks")))
+    fl = page_eval("(() => { const r = document.getElementById('file').getBoundingClientRect(); return [r.x + 10, r.y + r.height/2]; })()", profile=r3prof)
+    c2.click(220 + int(fl[0]), 40 + int(fl[1]))
+    check("r3: file chooser on the new terminal", c2.wait_text("Upload file:", 5), c2.line(2))
+    c2.key("ctrl+a"); c2.key("ctrl+k"); c2.type("only-in-b.txt"); c2.key("enter"); time.sleep(1)
+    check("r3: a relative upload path is relative to the attached terminal's directory", (r3state() or {}).get("file") == "only-in-b.txt",
+          ((r3state() or {}).get("file"), c2.line(2)))
+
+    # a stuck terminal (it never acknowledges a frame) taken over by one of the same size: the page keeps moving
+    c2.key("ctrl+l"); c2.key("ctrl+a"); c2.key("ctrl+k"); c2.type(f"{BASE}/anim.html"); c2.key("enter")
+    c2.wait_frames(5, 20)
+    stuck_pid = c2.pid
+    os.kill(stuck_pid, signal.SIGSTOP)
+    time.sleep(3)
+    c3 = Term(["bun", main, "attach", "r3"], cwd=dir_b, env=ENV)
+    f0 = c3.frames
+    check("r3: after taking over from a stuck terminal, frames keep coming", c3.wait_for(lambda: c3.frames - f0 >= 10, 15), c3.frames - f0)
+    os.kill(stuck_pid, signal.SIGKILL); os.waitpid(stuck_pid, 0); c2.alive = False
+
+    # re-attaching smaller after the page changed while detached: no stale or wrong-size picture first
+    c3.key("ctrl+l"); c3.key("ctrl+a"); c3.key("ctrl+k"); c3.type(f"{BASE}/page.html?r3=1"); c3.key("enter")
+    c3.wait_for(lambda: any("r3=1" in p["url"] and p["value"] for p in json.loads(subprocess.run(
+        ["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), r3prof, "1"], capture_output=True, text=True, timeout=20).stdout or "[]")), 20)
+    time.sleep(2)
+    c3.key("ctrl+b"); c3.key("d"); exit_code(c3)
+    page_eval("(() => { document.body.innerHTML = ''; document.body.style.background = 'rgb(200, 0, 0)'; return 1; })()", profile=r3prof)
+    c4 = Term(["bun", main, "attach", "r3"], cwd=dir_b, env=ENV, cols=100, rows=30)
+    c4.wait_frames(1, 20); time.sleep(1.5)
+    def first_picture(t):
+        """The first picture the terminal was sent, decoded."""
+        import base64 as _b64, io as _io, re as _re
+        from PIL import Image as _Image
+        raw = bytes(t.raw)
+        m = _re.search(rb"\x1b_Ga=T[^;\x1b]*;([^\x1b]*)\x1b\\", raw)
+        if not m:
+            return None
+        data, pos = bytearray(_b64.b64decode(m.group(1))), m.end()
+        if b"m=1" in m.group(0)[:60]:
+            for c in _re.finditer(rb"\x1b_Gm=(\d);([^\x1b]*)\x1b\\", raw[pos:]):
+                data += _b64.b64decode(c.group(2))
+                if c.group(1) == b"0":
+                    break
+        return _Image.open(_io.BytesIO(bytes(data))).convert("RGB")
+    im = first_picture(c4)
+    check("r3: the first picture after re-attaching is current and at the new size",
+          im is not None and im.size == (78 * 10, 28 * 20) and im.getpixel((im.width // 2, im.height // 2))[0] > 150,
+          im and (im.size, im.getpixel((im.width // 2, im.height // 2))))
+    c4.close()
+
+    # a slow browser start: the first terminal's queued Ctrl+B d isn't replayed on the one that took over
+    helium = shutil.which("helium-browser") or shutil.which("helium")
+    slow = os.path.join(tmp, "slow-browser")
+    with open(slow, "w") as f:
+        f.write(f'#!/bin/sh\nsleep 5\nexec "{helium}" "$@"\n')
+    os.chmod(slow, 0o755)
+    q1 = termium("-s", "r3b", "--incognito", "--browser", slow)
+    q1.wait_for(lambda: server_pid("r3b") is not None and os.path.exists(os.path.join(sockdir, "r3b.sock")), 15); time.sleep(1.5)
+    q1.key("ctrl+b"); q1.key("d"); time.sleep(0.5)  # queued: the browser isn't up yet
+    q2 = termium("attach", "r3b")
+    time.sleep(12)
+    check("r3: input queued by the old terminal during startup isn't replayed on the new one",
+          exit_code(q2, 0.5) is None and "SPACES" in q2.text(), output(q2)[-200:])
+    q2.close()
+
+    # kill when both the server and its browser are stopped
+    k1 = termium("-s", "r3k", "--incognito")
+    check("r3: session to kill starts", at_address_bar(k1))
+    kpid = server_pid("r3k")
+    ps = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout.split("\n")
+    kids = {}
+    for line in ps:
+        parts = line.split()
+        if len(parts) == 2:
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    family, todo = [], [kpid]
+    while todo:
+        x = todo.pop(); family.append(x); todo += kids.get(x, [])
+    for x in family:
+        os.kill(x, signal.SIGSTOP)
+    t0 = time.time(); r = cli("kill", "r3k"); took = time.time() - t0
+    def alive_pid(x):
+        try:
+            os.kill(x, 0); return True
+        except OSError:
+            return False
+    time.sleep(0.5)
+    check("r3: kill ends a stopped server and its stopped browser", r.returncode == 0 and not any(alive_pid(x) for x in family) and took < 15,
+          (r.returncode, r.stderr, [x for x in family if alive_pid(x)], took))
+    check("r3: ...and says what it had to do", "killed its server" in r.stderr, r.stderr)
+    exit_code(k1, 5)
+
+    # picture files of a client killed outright are cleaned up; those of live ones aren't
+    shm = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
+    dead = os.path.join(shm, "termium-tty-graphics-protocol-999999-" + "ab" * 16)
+    live = os.path.join(shm, f"termium-tty-graphics-protocol-{os.getpid()}-" + "cd" * 16)
+    for f in (dead, live):
+        open(f, "w").close()
+    cli("ls")
+    check("r3: a dead client's picture files are removed, a live one's kept", not os.path.exists(dead) and os.path.exists(live))
+    os.remove(live)
+
+    # a big frame before hello is refused (the connection dropped), and the session carries on
+    bf = termium("-s", "r3f", "--incognito")
+    check("r3: a session for the oversized frame", at_address_bar(bf))
+    big = socket.socket(socket.AF_UNIX); big.connect(os.path.join(sockdir, "r3f.sock")); big.settimeout(5)
+    import struct as _st
+    big.sendall(bytes([1]) + _st.pack(">I", 50_000_000) + b"x" * 1000)
+    try:
+        closed = big.recv(10) == b""
+    except (socket.timeout, ConnectionResetError):
+        closed = False
+    big.close()
+    check("r3: a frame of 50 MB before hello closes that connection", closed)
+    check("r3: ...and the session still answers", "r3f" in cli("ls").stdout and exit_code(bf, 0.5) is None)
+    bf.close()
+
     # --- a stale socket from a server that never cleaned up (and an error file of a client killed outright)
     open(os.path.join(sockdir, "gone.999999.err"), "w").write("x")
     cli("ls")
@@ -385,7 +523,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("default", "one", "two", "stale", "hung", "handler", "work", "shared", "urlrace", "prefix", f"race{os.getpid()}"):
+    for name in ("default", "one", "two", "stale", "hung", "handler", "work", "shared", "urlrace", "prefix", "r3", "r3b", "r3k", "r3f", f"race{os.getpid()}"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)
