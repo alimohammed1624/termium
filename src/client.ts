@@ -24,6 +24,9 @@ import {
   sessionPaths,
   socketDir,
   sweepErrFiles,
+  GRAPHICS_FILE_PREFIX,
+  graphicsDir,
+  sweepGraphicsFiles,
 } from "./session";
 import { drained, enterTerminal, out, queryCapabilities, querySizes, restoreTerminal, setTmuxPassthrough } from "./terminal";
 
@@ -97,7 +100,8 @@ const TMUX_HINT =
  * never read (tmux dropped the escape) are removed after a while.
  */
 const graphicsFiles = (() => {
-  const dir = existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
+  const dir = graphicsDir();
+  sweepGraphicsFiles(); // what clients killed outright left
   const made = new Map<string, number>();
   let timer: ReturnType<typeof setInterval> | null = null;
   const sweep = () => {
@@ -111,7 +115,7 @@ const graphicsFiles = (() => {
     write(data: Uint8Array): string {
       // An unguessable name, created exclusively (never through a symlink
       // someone planted), readable only by us (and the terminal: same user).
-      const path = join(dir, `termium-tty-graphics-protocol-${randomBytes(16).toString("hex")}`);
+      const path = join(dir, `${GRAPHICS_FILE_PREFIX}${process.pid}-${randomBytes(16).toString("hex")}`);
       const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       try {
         for (let off = 0; off < data.length; ) off += writeSync(fd, data, off);
@@ -504,15 +508,45 @@ export async function runClient(o: ClientOptions): Promise<void> {
   // Pictures sent while the pane wasn't active may not have arrived, and the
   // terminal couldn't be asked about files: do both now.
   onPaneActive = () => void answeredAgain();
+  // Text of a synchronized update (?2026h ... ?2026l) spread over several
+  // output frames (a full redraw is) is held until the update is complete
+  // and written at once, after the pictures in between: tmux holds back the
+  // pane while one is open, but only so long, and pacing waits could
+  // otherwise show it half drawn (cleared).
+  let heldText = "";
+  let heldDone: (() => void)[] = [];
+  let syncDepth = 0;
+  let heldTimer: ReturnType<typeof setTimeout> | null = null;
+  const flushHeld = () => {
+    if (heldTimer) clearTimeout(heldTimer);
+    heldTimer = null;
+    const dones = heldDone;
+    heldDone = [];
+    const text = heldText;
+    heldText = "";
+    syncDepth = 0;
+    out(text, () => dones.forEach((d) => d()));
+  };
+  /** The safety flush: only once the pump has nothing left (its pictures go first). */
+  const flushIfIdle = () => {
+    heldTimer = null;
+    if (pumping || outQueue.length) heldTimer = setTimeout(flushIfIdle, 100);
+    else if (heldText || heldDone.length) flushHeld();
+  };
   const pump = async () => {
     if (pumping) return;
     pumping = true;
     while (outQueue.length) {
       const { data, done } = outQueue.shift()!;
-      if (fileTransport) {
+      // The pictures go first, then the text; the pictures' order among
+      // themselves (deletes before a reused id is sent again) is kept.
+      const apcs = data.match(/\x1b_G[^\x1b]*\x1b\\/g) ?? [];
+      const text = data.replace(/\x1b_G[^\x1b]*\x1b\\/g, "");
+      let sentFiles = false;
+      if (fileTransport && apcs.length) {
         try {
-          out(viaFiles(data), done);
-          continue;
+          out(viaFiles(apcs.join("")));
+          sentFiles = true;
         } catch {
           // Can't write the files (disk full, say): send the data itself instead.
           loading = null;
@@ -520,15 +554,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
           fileProbe = "no";
         }
       }
-      // The pictures go first, then all the text in one write: the text
-      // holds a synchronized update (?2026h ... ?2026l), and waiting in the
-      // middle of one would leave tmux holding back a half-drawn pane. The
-      // pictures' order among themselves (deletes before a reused id is sent
-      // again) is kept.
-      const apcs = data.match(/\x1b_G[^\x1b]*\x1b\\/g) ?? [];
-      const text = data.replace(/\x1b_G[^\x1b]*\x1b\\/g, "");
       let acc = "";
-      for (const piece of apcs) {
+      for (const piece of sentFiles ? [] : apcs) {
         if (flowOk && sent > 0 && sent + piece.length > budget()) {
           out(acc);
           acc = "";
@@ -558,7 +585,12 @@ export async function runClient(o: ClientOptions): Promise<void> {
         acc += piece;
         sent += piece.length;
       }
-      out(acc + text, done);
+      if (acc) out(acc);
+      heldText += text;
+      if (done) heldDone.push(done);
+      syncDepth += (text.match(/\x1b\[\?2026h/g) ?? []).length - (text.match(/\x1b\[\?2026l/g) ?? []).length;
+      if (syncDepth <= 0) flushHeld();
+      else if (!heldTimer) heldTimer = setTimeout(flushIfIdle, 500); // never hold forever
     }
     pumping = false;
     if (probeAfterPump) {
@@ -675,6 +707,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     pixelMouse: caps.pixelMouse,
     placeholders,
     rgbIds: pane0.rgb,
+    cwd: process.cwd(),
     via: !inTmux ? "direct" : fileTransport ? "tmux-files" : "tmux-paced",
     // A session we just started opens the URL itself.
     url: o.url,
@@ -763,6 +796,27 @@ export async function listSessions(): Promise<void> {
   process.exit(0);
 }
 
+/** Pids of every process under `pid` (children, theirs, ...). */
+function descendants(pid: number): number[] {
+  const r = Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="], { stdout: "pipe", stderr: "ignore" });
+  const kids = new Map<number, number[]>();
+  for (const line of r.stdout.toString().split("\n")) {
+    const [c, parent] = line.trim().split(/\s+/).map(Number);
+    if (!c || !parent) continue;
+    if (!kids.has(parent)) kids.set(parent, []);
+    kids.get(parent)!.push(c);
+  }
+  const out: number[] = [];
+  const walk = (p: number) => {
+    for (const c of kids.get(p) ?? []) {
+      out.push(c);
+      walk(c);
+    }
+  };
+  walk(pid);
+  return out;
+}
+
 export async function killSession(name: string): Promise<void> {
   let p: ReturnType<typeof sessionPaths>;
   try {
@@ -776,6 +830,7 @@ export async function killSession(name: string): Promise<void> {
     await sessionInfo(name); // clears a stale socket
     fail(`no session "${name}"`, 1);
   }
+  const serverPid = lockHolder(p.lock) ?? readPid(name);
   // The server says it's on it at once, then closes the socket once the
   // browser is stopped. No word at all: it's hung, and gets SIGKILL.
   const answered = await new Promise<boolean>((resolve) => {
@@ -796,23 +851,33 @@ export async function killSession(name: string): Promise<void> {
     sock.on("error", () => finish(heard));
     sock.write(jsonFrame({ t: "hello", v: PROTOCOL, kind: "kill" } satisfies Hello));
   });
-  if (!answered) {
-    const pid = lockHolder(p.lock) ?? readPid(name);
-    if (pid) {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {}
-      for (let i = 0; i < 40; i++) {
-        try {
-          process.kill(pid, 0);
-        } catch {
-          break;
-        }
-        await Bun.sleep(50);
-      }
+  // Whatever it said, make sure it's gone, its browser too: a stopped or
+  // hung server (or browser) gets SIGKILL.
+  const pid = serverPid;
+  const stillAlive = (pids: number[]) => pids.filter((q) => {
+    try {
+      process.kill(q, 0);
+      return true;
+    } catch (e: any) {
+      return e?.code === "EPERM";
     }
+  });
+  // (A server that ended closes its socket just before it exits.)
+  if (answered) for (let i = 0; i < 40 && pid && stillAlive([pid]).length; i++) await Bun.sleep(50);
+  if (pid && stillAlive([pid]).length) {
+    const family = [pid, ...descendants(pid)];
+    for (const q of family) {
+      try {
+        process.kill(q, "SIGKILL");
+      } catch {}
+    }
+    for (let i = 0; i < 60 && stillAlive(family).length; i++) await Bun.sleep(50);
+    const left = stillAlive(family);
+    if (left.length) fail(`session "${name}": processes ${left.join(", ")} won't die`, 1);
     removeStale(name);
-    console.error(`termium: session "${name}" wasn't responding; killed its server${pid ? ` (pid ${pid})` : ""}`);
+    console.error(`termium: session "${name}" ${answered ? "didn't end in time" : "wasn't responding"}; killed its server (pid ${pid}) and browser`);
+  } else if (!answered) {
+    removeStale(name);
   }
   process.exit(0);
 }

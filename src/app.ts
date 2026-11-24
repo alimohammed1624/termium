@@ -81,6 +81,10 @@ export interface Page {
   phIds: number[];
   /** Where its image currently sits, so a stale placement can be redrawn. */
   placed: Rect | null;
+  /** Restart the screencast even if its size is unchanged (a terminal attached). */
+  restartCast?: boolean;
+  /** When its viewport or screencast last changed: frames of another size just after are stale. */
+  viewportAt?: number;
 }
 
 interface Tab {
@@ -226,6 +230,8 @@ export class App {
   cellW = 10;
   cellH = 20;
   pixelMouse = false;
+  /** The attached terminal's working directory (relative paths typed there mean this). */
+  cwd = process.cwd();
   /** Draw pages with unicode placeholders (inside tmux) rather than placing images at cells. */
   placeholders = false;
   /** Whether a terminal is attached; detached, nothing is drawn and screencasts stop. */
@@ -274,7 +280,7 @@ export class App {
   private nextMarker = 1;
   private placements = new Map<string, Placement>(); // by marker
   /** Keys whose keydown went to a page, and which page, so the keyup follows it. */
-  private pageKeysDown = new Map<string, Page>();
+  private pageKeysDown = new Map<string, { page: Page; ev: KeyEvent }>();
   /** iframe (out-of-process) and worker sessions, mapped to the page they belong to. */
   private frameOwner = new Map<string, Page>();
   private downloads = new Map<string, string>(); // guid -> suggested file name
@@ -935,11 +941,14 @@ export class App {
       const stuck = () => page.navSeq === seq && (page.loading || page.navStarted !== 0);
       if (!stuck() || page.dialog || !this.pages.has(page.sessionId)) return;
       // Busy pages answer eventually: only two unanswered probes a few
-      // seconds apart count as hung.
+      // seconds apart count as hung. Then it's replaced unless a newer
+      // navigation came meanwhile, whether or not it still looks like it's
+      // loading (a hung renderer's load can end without the page coming back).
       if (await this.responsive(page, 3000)) return;
       await Bun.sleep(2000);
-      if (!stuck() || page.dialog || (await this.responsive(page, 3000))) return;
-      if (stuck() && !page.dialog && this.pages.has(page.sessionId)) {
+      if (page.navSeq !== seq || page.dialog || !this.pages.has(page.sessionId)) return;
+      if (await this.responsive(page, 3000)) return;
+      if (page.navSeq === seq && !page.dialog && this.pages.has(page.sessionId)) {
         this.showToast("The page stopped responding; opened it again");
         this.recover(page, url);
       }
@@ -1086,17 +1095,30 @@ export class App {
    * A terminal attached: draw everything for it from scratch, at its size.
    * Image ids and positions from an earlier terminal mean nothing to it.
    */
-  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean }): void {
+  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string }): void {
+    if (t.cwd) this.cwd = t.cwd;
     // Nothing half-typed on the previous terminal carries over (a pending
     // Ctrl+B prefix would turn this one's first key into a command).
     this.resetInput();
     this.attached = true;
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
+    const shown = new Set(this.tab ? leaves(this.tab.root) : []);
     for (const page of this.pages.values()) {
       page.imageIds = [];
       page.phIds = [];
       page.placed = null;
+      // Restart the screencasts, so a frame comes even if the size didn't
+      // change (and a frame the previous terminal never acknowledged doesn't
+      // hold them up). What the pages about to be drawn have cached may be
+      // stale (changed while detached) or of another size: they wait for a
+      // fresh frame. Other tabs keep theirs, shown at once on a switch.
+      if (shown.has(page)) {
+        page.lastFrame = null;
+        page.lastCast = undefined;
+      }
+      page.queuedKey = null;
+      page.restartCast = true;
     }
     this.phInUse.clear();
     this.phReleasing = [];
@@ -1146,15 +1168,42 @@ export class App {
     if (this.started) this.relayout();
   }
 
-  /** Forgets input state that belongs to a terminal: pending prefix or mode, buttons, held keys. */
+  /**
+   * Forgets input state that belongs to a terminal: pending prefix or mode,
+   * and lets go of keys and mouse buttons still held on it, telling the
+   * pages (their keyup/mouseup would otherwise never come).
+   */
   private resetInput(): void {
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
+    for (const { page, ev } of this.pageKeysDown.values()) {
+      if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
+    }
+    for (const { page, ev } of this.syntheticDown.values()) {
+      if (this.pages.has(page.sessionId)) this.domKey(page, { ...ev, event: "release" }, "keyup");
+    }
+    const at = this.mousePressedAt;
+    if (this.mouseButtons && at && this.pages.has(at.page.sessionId)) {
+      let buttons = this.mouseButtons;
+      for (const [bit, name] of [[1, "left"], [2, "right"], [4, "middle"], [8, "back"], [16, "forward"]] as const) {
+        if (!(buttons & bit)) continue;
+        buttons &= ~bit;
+        this.cdp
+          .send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at.x, y: at.y, button: name, buttons, clickCount: 1 }, at.page.sessionId)
+          .catch(() => {});
+      }
+    }
+    this.mousePressedAt = null;
     this.mouseCapture = null;
     this.mouseButtons = 0;
     this.drag = null;
     this.hoverPage = null;
     this.pageKeysDown.clear();
     this.syntheticDown.clear();
+  }
+
+  /** Drops input queued (before the app was ready) by a terminal that's gone. */
+  dropQueuedInput(): void {
+    this.early = [];
   }
 
   setGeometry(cols: number, rows: number, cellW: number, cellH: number): void {
@@ -1250,6 +1299,7 @@ export class App {
     const sid = page.sessionId;
     const want = page.css;
     if (want && !sameSize(page.appliedCss, want)) {
+      page.viewportAt = Date.now();
       for (let attempt = 0; attempt < 4; attempt++) {
         await this.cdp.send("Emulation.setDeviceMetricsOverride", {
           width: want.w,
@@ -1269,7 +1319,9 @@ export class App {
       // resizing that window shrinks the captured frames. See README.)
     }
     const cast = page.casting;
-    if (cast && !sameSize(page.appliedCast, cast)) {
+    if (cast && (!sameSize(page.appliedCast, cast) || page.restartCast)) {
+      page.restartCast = false;
+      page.viewportAt = Date.now();
       if (page.appliedCast) await this.cdp.send("Page.stopScreencast", {}, sid).catch(() => {});
       await this.cdp.send("Page.startScreencast", { format: "png", maxWidth: cast.w, maxHeight: cast.h, everyNthFrame: 1 }, sid);
       page.appliedCast = cast;
@@ -1394,6 +1446,14 @@ export class App {
   private onFrame(p: any, sid: string | undefined): void {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page) return;
+    const m = p.metadata;
+    if (page.css && m && Date.now() - (page.viewportAt ?? 0) < 2000 &&
+        (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1)) {
+      // A frame of the viewport as it was (the first after a resize or a
+      // restarted screencast can be): the right one follows.
+      this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
+      return;
+    }
     if (page.css && page.css.dsf > 1.01) {
       // Taking a screenshot can itself produce a screencast frame with the
       // same picture; only a frame that differs from the last one is a change.
@@ -1928,12 +1988,12 @@ export class App {
     if (release) {
       // Only release keys whose press reached the page.
       const k = ev.code || ev.key;
-      const target = this.pageKeysDown.get(k);
+      const held = this.pageKeysDown.get(k);
       this.pageKeysDown.delete(k);
-      if (target && this.pages.has(target.sessionId)) this.sendKey(target, ev);
+      if (held && this.pages.has(held.page.sessionId)) this.sendKey(held.page, ev);
       const synthetic = this.syntheticDown.get(k);
       this.syntheticDown.delete(k);
-      if (synthetic && this.pages.has(synthetic.sessionId)) this.domKey(synthetic, ev, "keyup");
+      if (synthetic && this.pages.has(synthetic.page.sessionId)) this.domKey(synthetic.page, ev, "keyup");
       return;
     }
     if (isModifier(ev)) {
@@ -1971,7 +2031,7 @@ export class App {
     if (BROWSER_RESERVED.has(combo)) return;
     if (BROWSER_SHORTCUTS.has(combo)) {
       this.domKey(page, ev, "keydown");
-      this.syntheticDown.set(ev.code || ev.key, page);
+      this.syntheticDown.set(ev.code || ev.key, { page, ev });
       return;
     }
     if (combo === "ctrl+c" || combo === "ctrl+x") {
@@ -2206,7 +2266,8 @@ export class App {
 
   private uploadFiles(prompt: Extract<Prompt, { kind: "file" }>, text: string): void {
     const home = homedir();
-    const expand = (f: string) => (f === "~" || f.startsWith("~/") ? home + f.slice(1) : f);
+    // Relative paths are relative to the attached terminal's directory, not the session's.
+    const expand = (f: string) => resolvePath(this.cwd, f === "~" || f.startsWith("~/") ? home + f.slice(1) : f);
     // A path that names a file as typed is that file, spaces and all; only
     // otherwise is the text split (quotes and backslashes keep spaces).
     const whole = expand(splitPaths(text).length === 1 ? splitPaths(text)[0]! : text.trim());
@@ -2221,7 +2282,7 @@ export class App {
       return;
     }
     // Absolute paths only: the browser kills the renderer over a relative one.
-    files = files.map((f) => resolvePath(f));
+    files = files.map((f) => resolvePath(this.cwd, f));
     this.lastUploadDir = `${dirname(files[0]!)}/`;
     this.cdp
       .send("DOM.setFileInputFiles", { files, backendNodeId: prompt.backendNodeId }, prompt.sessionId)
@@ -2249,7 +2310,9 @@ export class App {
     this.queueChrome();
   }
 
-  private syntheticDown = new Map<string, Page>();
+  private syntheticDown = new Map<string, { page: Page; ev: KeyEvent }>();
+  /** Where the mouse buttons now down were pressed (to release them if the terminal goes). */
+  private mousePressedAt: { page: Page; x: number; y: number } | null = null;
 
   /**
    * The session of the frame that has focus: the page's own, or a focused
@@ -2335,7 +2398,7 @@ export class App {
       commands: editCommands(ev),
     });
     if (ev.legacy) void send({ type: "keyUp", ...base });
-    else this.pageKeysDown.set(ev.code || ev.key, page);
+    else this.pageKeysDown.set(ev.code || ev.key, { page, ev });
   }
 
   /**
@@ -2709,6 +2772,7 @@ export class App {
       Object.assign(lc, { time: now, x: px, y: py, button: ev.button });
       this.mouseButtons |= bits[ev.button] ?? 0;
       this.mouseCapture = page;
+      this.mousePressedAt = { page, x, y };
       void send({ type: "mousePressed", x, y, button: name, buttons: this.mouseButtons, clickCount: lc.count, modifiers });
     } else {
       this.mouseButtons &= ~(bits[ev.button] ?? 0);

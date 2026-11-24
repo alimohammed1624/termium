@@ -96,6 +96,40 @@ export function removeStale(name: string, dir = socketDir()): void {
   }
 }
 
+/** Where pictures go as temporary files for the terminal (kitty graphics t=t). */
+export function graphicsDir(): string {
+  return existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
+}
+
+/** Picture files: the name must contain "tty-graphics-protocol"; then the owning client's pid. */
+export const GRAPHICS_FILE_PREFIX = "termium-tty-graphics-protocol-";
+
+/** Removes picture files of ours whose client is gone (killed before it could clean up). */
+export function sweepGraphicsFiles(): void {
+  const dir = graphicsDir();
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const uid = process.getuid?.();
+  for (const f of names) {
+    const m = f.startsWith(GRAPHICS_FILE_PREFIX) && f.slice(GRAPHICS_FILE_PREFIX.length).match(/^(\d+)-[0-9a-f]{32}$/);
+    if (!m) continue;
+    try {
+      process.kill(Number(m[1]), 0);
+      continue; // its client still runs
+    } catch (e: any) {
+      if (e?.code === "EPERM") continue;
+    }
+    try {
+      const st = lstatSync(join(dir, f));
+      if (st.isFile() && st.uid === uid) rmSync(join(dir, f), { force: true });
+    } catch {}
+  }
+}
+
 /** Removes startup-error files of clients that are gone (<name>.<pid>.err). */
 export function sweepErrFiles(dir = socketDir()): void {
   let names: string[] = [];
@@ -177,6 +211,8 @@ const MAX_FRAME = 256 * 1024 * 1024;
 /** Splits a byte stream into frames (in time linear in the bytes, however they're chunked). */
 export class FrameReader {
   private buf: Buffer = Buffer.alloc(64 * 1024);
+  /** Largest frame accepted now: small until the peer has said who it is (raise it then). */
+  maxFrame = MAX_FRAME;
   private start = 0;
   private end = 0;
 
@@ -200,7 +236,7 @@ export class FrameReader {
     while (this.end - this.start >= 5) {
       const type = this.buf[this.start]!;
       const len = this.buf.readUInt32BE(this.start + 1);
-      if (len > MAX_FRAME || (type !== MSG_JSON && type !== MSG_OUTPUT) || (type === MSG_OUTPUT && len < 4)) throw new Error("bad frame from the session socket");
+      if (len > this.maxFrame || (type !== MSG_JSON && type !== MSG_OUTPUT) || (type === MSG_OUTPUT && len < 4)) throw new Error("bad frame from the session socket");
       if (this.end - this.start < 5 + len) return;
       const payload = this.buf.subarray(this.start + 5, this.start + 5 + len);
       this.start += 5 + len;

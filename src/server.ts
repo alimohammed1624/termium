@@ -9,7 +9,7 @@
 import { appendFileSync, chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { App } from "./app";
 import {
   clearOwner,
@@ -24,7 +24,7 @@ import {
 } from "./browser";
 import { CDP } from "./cdp";
 import type { InputEvent } from "./input";
-import { DEFAULT_SESSION, FrameReader, PROTOCOL, dial, jsonFrame, outputFrame, sessionPaths } from "./session";
+import { DEFAULT_SESSION, FrameReader, PROTOCOL, dial, jsonFrame, outputFrame, sessionPaths, sweepGraphicsFiles } from "./session";
 import { setSink } from "./terminal";
 
 export interface LaunchOptions {
@@ -48,6 +48,8 @@ export interface Hello {
   cellH?: number;
   pixelMouse?: boolean;
   placeholders?: boolean;
+  /** The client's working directory: relative paths typed in this terminal mean that. */
+  cwd?: string;
   /** Placeholder ids may use RGB colours (the terminal under tmux shows RGB). */
   rgbIds?: boolean;
   /** How pictures reach the terminal (for the log): "direct", "tmux-files" or "tmux-paced". */
@@ -78,6 +80,7 @@ export function tempBase(): string {
  * browser still running on them.
  */
 async function sweepTemp(): Promise<void> {
+  sweepGraphicsFiles(); // picture files of clients killed outright
   const base = tempBase();
   let names: string[] = [];
   try {
@@ -115,7 +118,8 @@ async function sweepTemp(): Promise<void> {
 
 /** $TERMIUM_DOWNLOAD_DIR, else the XDG download directory (xdg-user-dir), else ~/Downloads. */
 function downloadDir(): string {
-  if (process.env.TERMIUM_DOWNLOAD_DIR) return process.env.TERMIUM_DOWNLOAD_DIR;
+  // Absolute now: relative to where the session started, whichever terminal is attached later.
+  if (process.env.TERMIUM_DOWNLOAD_DIR) return resolvePath(process.env.TERMIUM_DOWNLOAD_DIR);
   try {
     const r = Bun.spawnSync(["xdg-user-dir", "DOWNLOAD"], { stdout: "pipe", stderr: "ignore" });
     const dir = r.stdout.toString().trim();
@@ -174,6 +178,8 @@ class Conn {
   ) {
     this.reader = new FrameReader((f) => {
       if (f.type !== 1) return;
+      // Small frames only, until it has said hello in a version we speak.
+      if (f.msg?.t === "hello" && f.msg?.v === PROTOCOL) this.reader.maxFrame = 64 * 1024 * 1024;
       try {
         onMessage(this, f.msg);
       } catch (e) {
@@ -181,6 +187,7 @@ class Conn {
         log(`handling ${JSON.stringify(f.msg?.t)}: ${e instanceof Error ? e.stack : e}`);
       }
     });
+    this.reader.maxFrame = 64 * 1024;
     sock.on("data", (chunk: Buffer) => {
       try {
         this.reader.push(chunk);
@@ -215,6 +222,13 @@ class Conn {
       this.acks.set(seq, done);
     }
     this.sock.write(outputFrame(data, seq));
+  }
+
+  /** Lets go of every frame waiting for this client's acknowledgement. */
+  releaseAcks(): void {
+    const pending = [...this.acks.values()];
+    this.acks.clear();
+    for (const done of pending) done();
   }
 
   ack(seq: number): void {
@@ -274,7 +288,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     // An older termium (without the lock) serving this name.
     die(`session "${name}" is already running`, 3);
   }
-  writeFileSync(paths.pid, `${process.pid}\n`);
+  writeFileSync(paths.pid, `${process.pid}\n`, { mode: 0o600 });
 
   await sweepTemp();
   let profile: string;
@@ -386,6 +400,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     if (!c) return;
     client = null;
     setSink(null);
+    c.releaseAcks();
     app?.detach();
     void c.end({ t: "bye", reason });
     log(`client ${reason}`);
@@ -486,9 +501,16 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         // The newest attach wins; the other terminal gets its shell back.
         const old = client;
         client = null;
+        // Frames it never acknowledged (stuck, or just slow) mustn't hold
+        // the new terminal's screencast up.
+        old.releaseAcks();
         void old.end({ t: "bye", reason: "takeover" });
         log("client taken over by a new attach");
       }
+      // Input the previous terminal had queued (typed before the browser was
+      // ready, say) isn't this terminal's: it would act on it.
+      pending.length = 0;
+      app?.dropQueuedInput();
       client = c;
       everAttached = true;
       lastHello = h;
@@ -601,5 +623,6 @@ function terminalOf(h: Partial<Hello>) {
     pixelMouse: !!h.pixelMouse,
     placeholders: !!h.placeholders,
     rgbIds: !!h.rgbIds,
+    cwd: typeof h.cwd === "string" && h.cwd.startsWith("/") ? h.cwd : undefined,
   };
 }
