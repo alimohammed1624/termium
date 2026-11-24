@@ -144,8 +144,8 @@ export interface UpdateHooks {
   blocker(): string | null;
   /** Download, verify and install release `tag` (reported back through updateStep/updateDone). */
   start(tag: string): void;
-  /** Never offer `tag` again. */
-  skip(tag: string): void;
+  /** Never offer `tag` again: resolves to whether that was saved (for later sessions too). */
+  skip(tag: string): Promise<boolean>;
   /** Restart the session into the termium on disk, reopening its spaces and tabs. */
   restart(): void;
 }
@@ -2272,6 +2272,16 @@ export class App {
     this.queueChrome();
   }
 
+  /** The newer termium that was installed is gone (or another version now): no restart into it is offered. */
+  clearInstalled(): void {
+    this.updateInstalled = null;
+    if (this.updateBox && (this.updateBox.state === "installed" || this.updateBox.state === "done")) {
+      this.updateBox = null;
+      if (this.mode === "update") this.closeUpdate(false);
+    }
+    this.queueChrome();
+  }
+
   /** A terminal running a newer termium attached: that one is installed, and this session runs the old one. */
   newerInstalled(version: string): void {
     if (!isNewer(version, this.opts.version)) return;
@@ -2356,9 +2366,15 @@ export class App {
           this.queueChrome();
         } else if (combo === "s") {
           this.skippedTag = box.tag;
-          this.opts.update?.skip(box.tag);
           this.closeUpdate(true);
-          this.showToast(`termium ${shown} skipped: not offered again`, 4000);
+          void this.opts.update?.skip(box.tag).then((saved) =>
+            this.showToast(
+              saved
+                ? `termium ${shown} skipped: not offered again`
+                : `termium ${shown} skipped in this session only: couldn't save it (the update cache is busy)`,
+              saved ? 4000 : 8000,
+            ),
+          );
         } else if (combo === "l") {
           this.closeUpdate(true);
         } else pass();

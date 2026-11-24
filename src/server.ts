@@ -46,6 +46,7 @@ import {
   MAX_AGE_MS,
   cachePath,
   cachedNewer,
+  binaryVersionAsync,
   checkAndCache,
   currentExe,
   displayVersion,
@@ -87,6 +88,8 @@ export interface Hello {
   url?: string | null;
   /** This terminal wants update news: the session checks for a newer termium while it's attached. */
   updateCheck?: boolean;
+  /** How to run this terminal's termium (its binary, or bun and the script): a restart into it runs that. */
+  argv?: string[];
   /**
    * Pid of the server this client started, if any: that server opened the
    * URL itself (so it's not opened twice), and only that one may be
@@ -472,14 +475,13 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         update: {
           blocker: () => selfUpdateBlocker(),
           start: (tag) => void runSelfUpdate(tag),
-          skip: (tag) => {
-            // Never offered again in this session either way; saved for later ones if the cache is free.
-            skipVersion(cacheFile, tag).then(
-              (saved) => saved || log("update: the cache was busy; the skipped version holds for this session only"),
-              (e) => log(`update: can't save the skipped version: ${e}`),
-            );
+          skip: async (tag) => {
+            // Never offered again in this session either way; saved for later ones once the cache is free.
+            const saved = await skipVersion(cacheFile, tag);
+            if (!saved) log("update: the cache stayed busy; the skipped version holds for this session only");
+            return saved;
           },
-          restart: () => restartSession(),
+          restart: () => void restartSession(),
         },
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
@@ -533,6 +535,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   let installed: string | null = null;
   /** The binary that update replaced (this server's own, symlinks resolved): what a restart runs. */
   let installedExe: string | null = null;
+  /** A newer termium a terminal attached with (how to run it), checked to report its version. */
+  let newerFrom: { version: string; argv: string[] } | null = null;
 
   const runCheck = async () => {
     if (checking || !client || !wantsUpdates || !appReady || shuttingDown) return;
@@ -575,7 +579,17 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     app.setUpdatesShown(wantsUpdates);
     if (!wantsUpdates) stopCheck();
     // That terminal runs a newer termium: it's installed, and this session runs the old one.
-    if (typeof h.version === "string") app.newerInstalled(h.version);
+    // (Offered only once that termium is found to run and report that version.)
+    const argv = Array.isArray(h.argv) && h.argv.length && h.argv.every((a) => typeof a === "string") ? h.argv : null;
+    if (typeof h.version === "string" && argv && isNewer(h.version, version) && (!newerFrom || isNewer(h.version, newerFrom.version))) {
+      const v = h.version;
+      void binaryVersionAsync(argv).then((got) => {
+        if (got !== v) return log(`update: ${argv.join(" ")} doesn't report termium ${v} (${got ?? "doesn't run"}); no restart into it`);
+        if (newerFrom && !isNewer(v, newerFrom.version)) return;
+        newerFrom = { version: v, argv };
+        app?.newerInstalled(v);
+      });
+    }
     if (installed) app.newerInstalled(installed);
     if (!wantsUpdates) return;
     const c = loadCache(cacheFile);
@@ -609,9 +623,30 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
    * launch options are left for the next server (see writeRestore), the
    * browser is closed, and the attached client starts that server.
    */
-  const restartSession = () => {
-    if (!app || shuttingDown) return;
-    if (!client) return;
+  let restarting = false;
+  const restartSession = async () => {
+    if (!app || shuttingDown || !client || restarting) return;
+    // The termium to restart into: the newest known to be installed (the
+    // binary this session's update replaced, or the one a newer terminal
+    // runs), checked again now to still run and be that version.
+    const known = [installed && installedExe ? { version: installed, argv: [installedExe] } : null, newerFrom].filter(
+      (c): c is { version: string; argv: string[] } => !!c,
+    );
+    const target = known.sort((a, b) => (isNewer(a.version, b.version) ? -1 : isNewer(b.version, a.version) ? 1 : 0))[0];
+    if (target) {
+      restarting = true;
+      const got = await binaryVersionAsync(target.argv);
+      restarting = false;
+      if (got !== target.version) {
+        log(`restart: ${target.argv.join(" ")} is ${got ? `termium ${got}` : "gone"}, not termium ${target.version}`);
+        if (target === newerFrom) newerFrom = null;
+        else installed = installedExe = null;
+        app?.clearInstalled();
+        app?.showToast(`Can't restart: termium ${target.version} isn't at ${target.argv.join(" ")} any more`, 8000);
+        return;
+      }
+    }
+    if (!app || shuttingDown || !client) return;
     const r: Restore = {
       v: 1,
       at: Date.now(),
@@ -625,15 +660,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       app.showToast(`Can't restart: ${e?.message ?? e}`, 5000);
       return;
     }
-    // The binary to restart from: the one this session updated, unless the
-    // attached terminal runs a newer termium still (then its own).
-    const h = lastHello;
-    const exe =
-      installed && installedExe && !(typeof h?.version === "string" && isNewer(h.version, installed))
-        ? { exe: installedExe, version: installed }
-        : {};
-    log(`restarting into the updated termium${"exe" in exe ? ` (${exe.exe}, ${exe.version})` : ""}`);
-    void shutdown(0, undefined, undefined, "restart", exe);
+    log(`restarting into the updated termium${target ? ` (${target.argv.join(" ")}, ${target.version})` : ""}`);
+    void shutdown(0, undefined, undefined, "restart", target ? { argv: target.argv, version: target.version } : {});
   };
 
   let lastHello: Hello | null = null;

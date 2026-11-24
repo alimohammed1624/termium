@@ -197,9 +197,17 @@ export async function updateCache(path: string, change: (c: Cache) => Cache, wai
   }
 }
 
-/** Records that the user does not want to be asked about `tag` again; false if it couldn't be saved. */
-export function skipVersion(path: string, tag: string): Promise<boolean> {
-  return updateCache(path, (c) => ({ ...c, skipped: tag }), 2000);
+/**
+ * Records that the user does not want to be asked about `tag` again: an
+ * explicit choice, so the lock is waited for longer (10 s, without blocking).
+ * False if it couldn't be saved.
+ */
+export async function skipVersion(path: string, tag: string, waitMs = 10_000): Promise<boolean> {
+  try {
+    return await updateCache(path, (c) => ({ ...c, skipped: tag }), waitMs);
+  } catch {
+    return false;
+  }
 }
 
 // ------------------------------------------------------------ the check
@@ -554,12 +562,27 @@ function checkRuns(staged: string, tag: string): void {
   if (got !== `termium ${displayVersion(tag)}`) throw new Error(`the downloaded termium says "${got}", not termium ${displayVersion(tag)}; nothing was changed`);
 }
 
-/** The version a termium binary reports (`termium X.Y.Z`), or null. */
-export function binaryVersion(exe: string): string | null {
+/** The version a termium reports (`termium X.Y.Z`), or null: a binary, or the argv that runs one (bun and the script). */
+export function binaryVersion(exe: string | string[]): string | null {
   try {
-    const r = Bun.spawnSync([exe, "--version"], { stdout: "pipe", stderr: "ignore", timeout: 20_000 });
+    const r = Bun.spawnSync([...(Array.isArray(exe) ? exe : [exe]), "--version"], { stdout: "pipe", stderr: "ignore", timeout: 20_000 });
     const m = r.stdout.toString().trim().match(/^termium (\S+)$/);
     return r.exitCode === 0 && m ? m[1]! : null;
+  } catch {
+    return null;
+  }
+}
+
+/** binaryVersion without blocking (for the session server). */
+export async function binaryVersionAsync(argv: string[]): Promise<string | null> {
+  try {
+    const p = Bun.spawn([...argv, "--version"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+    const timer = setTimeout(() => p.kill(), 20_000);
+    const out = await new Response(p.stdout).text();
+    const code = await p.exited;
+    clearTimeout(timer);
+    const m = out.trim().match(/^termium (\S+)$/);
+    return code === 0 && m ? m[1]! : null;
   } catch {
     return null;
   }

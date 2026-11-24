@@ -369,18 +369,18 @@ export async function runClient(o: ClientOptions): Promise<void> {
    * server is gone, this process becomes that termium (exec), which starts
    * the session again with the layout the old server left behind.
    */
-  const restartInto = async (exe?: string, version?: string) => {
+  const restartInto = async (run?: string[], version?: string) => {
     process.stdin.pause();
     process.stdin.removeAllListeners("data");
     for (let i = 0; i < 200 && serverPid && pidAlive(serverPid); i++) await Bun.sleep(50);
     rmSync(errPath, { force: true });
-    // The binary the session updated (which may not be this terminal's own termium).
-    const argv = exe ? [exe, ...o.restartArgv.slice(o.selfArgv.length)] : o.restartArgv;
-    if (exe && version) {
-      const got = binaryVersion(exe);
+    // The termium the session says to restart into (which may not be this terminal's own).
+    const argv = run ? [...run, ...o.restartArgv.slice(o.selfArgv.length)] : o.restartArgv;
+    if (run && version) {
+      const got = binaryVersion(run);
       if (got !== version) {
         console.error(
-          `termium: couldn't restart: ${exe} is ${got ? `termium ${got}` : "not a working termium"}, not the termium ${version} the update installed. ` +
+          `termium: couldn't restart: ${run.join(" ")} is ${got ? `termium ${got}` : "not a working termium"}, not the termium ${version} that was installed. ` +
             `Run termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`} within 10 minutes and its spaces and tabs reopen.`,
         );
         process.exit(1);
@@ -779,12 +779,14 @@ export async function runClient(o: ClientOptions): Promise<void> {
           return void leave(0, `[detached (from session ${o.name})]`);
         case "takeover":
           return void leave(0, `[detached (session ${o.name} was attached from another terminal)]`);
-        case "restart":
+        case "restart": {
+          const run = Array.isArray(m.argv) && m.argv.length && m.argv.every((a: unknown) => typeof a === "string") ? (m.argv as string[]) : undefined;
           return void leave(
             0,
-            `[restarting session ${o.name} into the updated termium${typeof m.exe === "string" ? ` (${m.exe})` : ""}]`,
-            () => restartInto(typeof m.exe === "string" ? m.exe : undefined, typeof m.version === "string" ? m.version : undefined),
+            `[restarting session ${o.name} into the updated termium${run ? ` (${run.join(" ")})` : ""}]`,
+            () => restartInto(run, typeof m.version === "string" ? m.version : undefined),
           );
+        }
         case "error": {
           let msg = `termium: ${m.message ?? "the session ended with an error"}`;
           // Refused before it ever answered: a session of another termium version
@@ -834,6 +836,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     url: o.url,
     starter: child?.pid,
     updateCheck: o.updateCheck,
+    argv: o.selfArgv,
   } satisfies Hello);
   for (const ev of pending.splice(0)) send({ t: "input", ev });
   // The server answers an attach at once (before it draws anything).
