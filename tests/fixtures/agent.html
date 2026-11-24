@@ -17,6 +17,8 @@
 <form id=f3 onsubmit="event.preventDefault(); window.f3sub = 1"><input id=mover aria-label="Mover field" oninput="queueMicrotask(() => document.getElementById('other').focus())"></form>
 <form id=f4 onsubmit="event.preventDefault(); window.f4sub = 1"><input id=other aria-label="Other field"></form>
 <button id=alerter onclick="alert('clicked')">Alert me</button>
+<form id=f5 onsubmit="event.preventDefault(); window.f5sub = document.getElementById('pick').value"><select id=pick aria-label="Pick one"><option value=a>Ay</option><option value=b>Bee</option></select></form>
+<div style="position:relative;display:inline-block"><button id=under onclick="window.underClicked = 1">Under button</button><div id=cover onclick="window.coverClicked = 1" style="position:absolute;inset:0;background:rgba(0,0,0,0.1)"></div></div>
 <p id=notes-label>Notes</p><div id=ed contenteditable role=textbox aria-labelledby=notes-label style="min-height:2em;border:1px solid"></div>
 <div id=host></div>
 <script>document.getElementById('host').attachShadow({mode: 'open'}).innerHTML = '<label>Shadow field <input id=sin></label>';</script>

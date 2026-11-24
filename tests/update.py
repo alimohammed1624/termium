@@ -284,6 +284,20 @@ try:
     check("--no-update-check: no check, no badge", len(HITS) == n and not update_ui(fl_t), HITS[n:])
     stop("t4"); fl_t.close()
 
+    # ------------------------------------------------ the answer shows at once, even while another termium holds the cache
+    cl_cache = os.path.join(tmp, "st-clock", "termium", "update-check.json")
+    os.makedirs(os.path.dirname(cl_cache), exist_ok=True)
+    holder = subprocess.Popen(["bun", "-e", f"const b = await import({json.dumps(os.path.join(ROOT, 'src', 'browser.ts'))}); "
+                               f"console.log(b.lockFile({json.dumps(cl_cache + '.lock')})); await Bun.sleep(8000); b.unlockFile({json.dumps(cl_cache + '.lock')});"],
+                              stdout=subprocess.PIPE, text=True)
+    holder.stdout.readline()
+    cl = term(cur_bin, "-s", "clock", "--incognito", PAGE, state="st-clock")
+    cl.wait_text("termium test page", 40)
+    t0 = time.time()
+    shown = cl.wait_for(lambda: badge(cl), 6)
+    check(f"with the cache locked, the newer release still shows at once ({time.time() - t0:.1f}s after the page)", shown and time.time() - t0 < 3, cl.line(1))
+    holder.wait(); stop("clock")
+
     # ------------------------------------------------ detaching stops a check under way: nothing is written after
     ab = term(cur_bin, "-s", "abort", "--incognito", PAGE, state="st-abort", env={"TERMIUM_UPDATE_URL": f"{BASE}/slow"})
     ab.wait_text("termium test page", 40); time.sleep(1)
@@ -762,6 +776,23 @@ try:
     check("...and the update completes", sv.wait_for(lambda: f"updated to termium {NEXT}" in sv.text(), 60), sv.text()[-400:])
     stop("slowv")
 
+    # ------------------------------------------------ updated again from a shell (same place, newer still): r runs that one
+    inst_nv = os.path.join(tmp, "inst-nv"); os.makedirs(inst_nv)
+    shutil.copy(cur_bin, os.path.join(inst_nv, "termium"))
+    LATEST["tag"] = f"v{NEXT}"
+    nv = term(os.path.join(inst_nv, "termium"), "-s", "nv", "--incognito", PAGE, state="st-nv")
+    nv.wait_for(lambda: notice(nv), 40)
+    open_box(nv); nv.key("u")
+    nv.wait_for(lambda: f"updated to termium {NEXT}" in nv.text(), 60)
+    nv.key("escape")
+    r = cli(os.path.join(inst_nv, "termium"), "update", state="st-nv", TERMIUM_UPDATE_URL=f"{BASE}/latest/v{LATER}")
+    old_pid = server_pid("nv")
+    open_box(nv); nv.key("r")
+    check("updated to a newer release again from a shell: r restarts into that one",
+          r.returncode == 0 and nv.wait_for(lambda: server_pid("nv") not in (None, old_pid), 30) and f"(termium {LATER})" in ls_row("nv", "st-nv"),
+          (r.returncode, r.stdout[-200:], output(nv)[-200:], ls_row("nv", "st-nv")))
+    stop("nv")
+
     # ------------------------------------------------ a relative --browser survives a restart from another directory
     helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
     bdir = os.path.join(tmp, "bdir"); os.makedirs(bdir)
@@ -993,7 +1024,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "nv", "clock", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

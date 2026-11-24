@@ -96,6 +96,7 @@ try:
     skill = r.stdout
     fm = re.match(r"---\n(.*?)\n---\n", skill, re.S)
     fields = dict(l.split(": ", 1) for l in fm.group(1).splitlines() if ": " in l) if fm else {}
+    check("help lists every exit status (ctl's 5, check-update's 2)", "5 partly done" in cli("ctl", "--help").stdout and "2: bad usage" in cli("--help").stdout)
     check("--skill prints a SKILL.md with YAML frontmatter (name, description)",
           r.returncode == 0 and fields.get("name") == "termium" and len(fields.get("description", "")) > 40, skill[:200])
     known = {"tabs", "open", "select", "close", "snapshot", "text", "click", "type", "key", "scroll", "shot", "eval", "wait", "dialog"}
@@ -237,6 +238,11 @@ try:
     h.key("ctrl+l"); h.key("ctrl+a"); h.type("draft"); time.sleep(0.3)
     r = ctl_json("open", f"{BASE}/page.html?bg=1", "--new-tab")
     h.type("X"); time.sleep(0.5)
+    rp = ctl("open", f"{BASE}/page.html?bgplain=1", "--new-tab")
+    check("...and the plain output says so too", "opened in the background" in rp.stdout, rp.stdout)
+    for t in ctl_json("tabs"):
+        if "bgplain" in t["url"]:
+            ctl("close", str(t["id"]), "--force")
     check("open --new-tab while the person edits the address: opened in the background, said so; their draft intact",
           "background" in r and "draftX" in h.line(2) and [t["active"] for t in ctl_json("tabs")] == [True, False], (r, h.line(2)))
     h.key("escape"); ctl("close", str(r.get("id"))); time.sleep(2)
@@ -339,13 +345,24 @@ try:
     for t in ctl_json("tabs"):
         if "after-alert" in t["url"]:
             ctl("close", str(t["id"]), "--force")
-    # scroll waits while the person is busy (help open here) on their tab.
+    # scroll waits while the person is busy (help open here) on their tab; scrolling to an element too.
     ctl("eval", "scrollTo(0, 0)")
+    bottom_id = ref(ctl("snapshot").stdout, "heading", "A heading whose id starts with termium-")
     h.key("ctrl+b"); h.key("question"); time.sleep(0.5)
     r = ctl("scroll", "down", "260", "--timeout", "1")
-    check("scroll while the person reads help on that tab: waits, then exit 4, not scrolled",
-          r.returncode == 4 and page_value("scrollY") == 0, (r.returncode, r.stderr, page_value("scrollY")))
+    r2 = ctl("scroll", bottom_id, "down", "--timeout", "1")
+    check("scroll (and scroll to an element) while the person reads help on that tab: waits, then exit 4, not scrolled at all",
+          r.returncode == 4 and r2.returncode == 4 and page_value("scrollY") == 0, (r.returncode, r2.returncode, r2.stderr, page_value("scrollY")))
     h.key("escape"); time.sleep(1.6)
+    # A select with --submit: the choice, then its own form.
+    snap = ctl("snapshot").stdout
+    r = ctl("type", ref(snap, "combobox", "Pick one"), "Bee", "--submit")
+    check("type into a select with --submit: chosen, and its form submitted", r.returncode == 0 and page_value("window.f5sub") == "b", (r.returncode, r.stderr))
+    # An element something covers: not clicked (nor the cover), saying what covers it.
+    r = ctl("click", ref(snap, "button", "Under button"))
+    check("click on a covered element: exit 1 naming the cover, nothing clicked",
+          r.returncode == 1 and "covered by div#cover" in r.stderr and page_value("[window.underClicked, window.coverClicked]") == [None, None],
+          (r.returncode, r.stderr, page_value("[window.underClicked, window.coverClicked]")))
 
     # --- a queued command whose time runs out is answered at once, and never runs
     hang = socket.socket(); hang.bind(("127.0.0.1", 0)); hang.listen(8)  # accepts nothing: a page that never loads
@@ -556,6 +573,25 @@ try:
     check("detached: a viewport another client holds only briefly still gives way to 1280x800",
           json.loads(r.stdout or "[]") == [444, 333] and wait_until(lambda: page_value("[innerWidth, innerHeight]", session="bg") == [1280, 800], 10),
           (r.stdout, page_value("[innerWidth, innerHeight]", session="bg")))
+    # close re-checks its time and the person after its (slow) unsaved-changes probe, just before closing.
+    sp_ = Term(["bun", main, "-s", "slowp", "--incognito", f"{BASE}/agent.html"], cwd=ROOT, env=dict(ENV, TERMIUM_TEST_SLOW_PROBE_MS="2000"))
+    sp_.wait_text("Agent fixture", 30); sp_.wait_idle(0.8, 10); time.sleep(1.6)
+    other = ctl_json("open", f"{BASE}/page.html?probe=1", "--new-tab", "--background", session="slowp").get("id")
+    t0 = time.time()
+    r = ctl("close", str(other), "--timeout", "0.5", session="slowp")
+    check(f"close whose time runs out during its probe: exit 4, tab kept ({time.time() - t0:.1f}s)",
+          r.returncode == 4 and any(t["id"] == other for t in ctl_json("tabs", session="slowp")), (r.returncode, r.stderr))
+    mine = ctl_json("tabs", session="slowp")[0]["id"]
+    closer = subprocess.Popen(["bun", main, "ctl", "-s", "slowp", "close", str(mine), "--timeout", "10"], cwd=ROOT, env=dict(os.environ, **ENV),
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.8)
+    sp_.key("ctrl+l"); sp_.key("ctrl+a"); sp_.type("draft during probe"); time.sleep(0.3)
+    out, err = closer.communicate(timeout=30)
+    check("close of the person's tab when they start editing during the probe: exit 4, tab and draft intact",
+          closer.returncode == 4 and "draft during probe" in sp_.line(2) and any(t["id"] == mine for t in ctl_json("tabs", session="slowp")),
+          (closer.returncode, err, sp_.line(2)))
+    sp_.close()
+
     # A detached page that another client resized, then let go: back to its size (1280x800 here).
     bg_url = json.loads(cli("devtools", "bg", "--json").stdout or "{}").get("browserURL", "")
     r = ext("viewport", bg_url, "agent.html", "500", "400", "2")
@@ -611,7 +647,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("watch", "bg", "race", "blank", "rest", "dbg", "heldp"):
+    for name in ("watch", "bg", "race", "blank", "rest", "dbg", "heldp", "slowp"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)
