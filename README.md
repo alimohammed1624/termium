@@ -215,8 +215,9 @@ termium update           # update to it (a release binary only)
   write to the binary's folder.
 - **Restarting.** A running session keeps running the old version until
   it restarts. After `u`, the box offers `r`: restart now. The session
-  closes its browser and starts again from the new binary in the same
-  terminal, with its spaces, tabs, splits and zoom: pages reload from
+  closes its browser and starts again from the binary the update replaced
+  (the session's own, whichever termium the attached terminal runs) in the
+  same terminal, with its spaces, tabs, splits and zoom: pages reload from
   their addresses, logins survive in the profile (not with
   `--incognito`), anything typed into a page and not saved is lost, so if
   a page may have unsaved changes (or a download is running) termium asks
@@ -231,6 +232,8 @@ termium update           # update to it (a release binary only)
   otherwise it's kept and termium says so. Two updates at once
   (two sessions, or a shell) take turns, and never replace a newer
   termium with an older one.
+- **Older copies.** A terminal whose termium is older than the session's
+  (another copy was updated) is told so when it detaches.
 - **Sessions of older termiums.** A session started by termium 0.2.0 (before
   an update) can't restart itself or keep its pages across a restart: when
   a newer termium attaches to it, it says so in the shell and asks, once

@@ -438,6 +438,20 @@ try:
     k.key("ctrl+b"); k.key("shift+u")
     check("...and Ctrl+B U says it was skipped", k.wait_for(lambda: "was skipped" in k.line(2), 5) and not box_open(k), k.line(2))
     stop("skip2")
+
+    # ------------------------------------------------ skipped in another session: withdrawn here on the next attach
+    LATEST["tag"] = f"v{NEXT}"
+    sx = term(cur_bin, "-s", "skx", "--incognito", PAGE, state="st-skx")
+    check("skip elsewhere: offered in one session", sx.wait_for(lambda: notice(sx), 40))
+    sx.key("ctrl+b"); sx.key("d"); exit_code(sx)
+    sy = term(cur_bin, "-s", "sky", "--incognito", PAGE, state="st-skx")
+    sy.wait_for(lambda: notice(sy), 40); open_box(sy); sy.key("s")
+    check("skip elsewhere: skipped in another", sy.wait_for(lambda: (cache("st-skx") or {}).get("skipped") == f"v{NEXT}", 5), cache("st-skx"))
+    stop("sky")
+    sx2 = term(cur_bin, "attach", "skx", state="st-skx")
+    sx2.wait_text("termium test page", 15); time.sleep(2)
+    check("skip elsewhere: the first session withdraws its offer on re-attach", not notice(sx2) and badge(sx2), (sx2.line(1), sx2.line(2)))
+    stop("skx")
     LATEST["tag"] = f"v{NEXT}"
 
     # ------------------------------------------------ a failed restart keeps its snapshot; a plain retry reopens it as it was
@@ -490,6 +504,17 @@ try:
     check("restart snapshot: partly reopened, it's kept and says so",
           rf4.wait_for(lambda: "Not all pages reopened" in rf4.line(2), 40) and "kept space" in rf4.text() and os.path.exists(rpath), (rf4.line(2), os.path.exists(rpath)))
     stop("rf4")
+    # A restored page whose site is unreachable keeps its address (shown, reloadable, saved again).
+    unreachable = "http://127.0.0.1:9/unreachable.html"
+    gone = {"spaces": [{"name": "kept space", "active": 0, "tabs": [{"root": {"url": unreachable}, "focus": 0, "zoomed": False}]}],
+            "activeSpace": 0, "sidebar": True, "zoom": 1}
+    rpath = raw_snapshot("rf5", {"incognito": True, "scale": None, "search": "https://duckduckgo.com/?q=%s"}, gone)
+    rf5 = term(cur_bin, "-s", "rf5", state="st-rf")
+    check("restart snapshot: an unreachable page keeps its address", rf5.wait_for(lambda: "127.0.0.1:9/unreachable.html" in rf5.line(2), 40), rf5.line(2))
+    check("restart snapshot: ...and counts as reopened (the snapshot goes)", rf5.wait_for(lambda: not os.path.exists(rpath), 10))
+    rf5.key("ctrl+r"); time.sleep(3)
+    check("restart snapshot: ...and still has it after a reload", "127.0.0.1:9/unreachable.html" in rf5.line(2), rf5.line(2))
+    stop("rf5")
 
     # ------------------------------------------------ u: update, then r: restart into it (layout kept)
     inst = os.path.join(tmp, "inst"); os.makedirs(inst)
@@ -535,6 +560,31 @@ try:
     check("r: no notice and no badge (it's up to date now)", not notice(u) and "↑" not in u.line(1) and "↻" not in u.line(1), u.line(1))
     check("r: the restore file is gone", not os.path.exists(os.path.join(sockdir, "upd.restore")))
     stop("upd")
+
+    # ------------------------------------------------ the session's binary is updated and restarted into, whoever's terminal is attached
+    inst_a = os.path.join(tmp, "inst-a"); os.makedirs(inst_a)
+    inst_b = os.path.join(tmp, "inst-b"); os.makedirs(inst_b)
+    shutil.copy(cur_bin, os.path.join(inst_a, "termium")); shutil.copy(cur_bin, os.path.join(inst_b, "termium"))
+    ta = term(os.path.join(inst_a, "termium"), "-s", "two", "--incognito", PAGE, state="st-two")
+    ta.wait_text("termium test page", 40)
+    ta.key("ctrl+b"); ta.key("d"); exit_code(ta)
+    tb = term(os.path.join(inst_b, "termium"), "attach", "two", state="st-two")
+    tb.wait_for(lambda: notice(tb), 30)
+    two_pid = server_pid("two")
+    open_box(tb); tb.key("u")
+    check("two copies: the update replaces the session's binary (A), and says which",
+          tb.wait_for(lambda: f"updated to termium {NEXT}" in tb.text(), 60) and "inst-a" in tb.text(), tb.text()[-500:])
+    ver = lambda d: subprocess.run([os.path.join(d, "termium"), "--version"], capture_output=True, text=True).stdout.strip()
+    check("two copies: A is the new release, B (the attached terminal's) untouched", ver(inst_a) == f"termium {NEXT}" and ver(inst_b) == f"termium {CUR}", (ver(inst_a), ver(inst_b)))
+    open_box(tb); tb.key("r")
+    check("two copies: r restarts from A", tb.wait_for(lambda: "inst-a" in output(tb) and "restarting session two" in output(tb), 15) and
+          tb.wait_for(lambda: server_pid("two") not in (None, two_pid), 30) and tb.wait_for(lambda: f"Restarted: termium {CUR} → {NEXT}" in tb.text(), 40), output(tb)[-300:])
+    check("two copies: ls shows the session runs the new termium", f"(termium {NEXT})" in ls_row("two", "st-two"), ls_row("two", "st-two"))
+    tb.key("ctrl+b"); tb.key("d"); exit_code(tb)
+    tc = term(os.path.join(inst_b, "termium"), "attach", "two", state="st-two")
+    tc.wait_text("termium test page", 20); tc.key("ctrl+b"); tc.key("d")
+    check("two copies: the older copy attaching says it's older than the session", exit_code(tc) == 0 and f"is older than the one session \"two\" runs ({NEXT})" in output(tc), output(tc)[-300:])
+    stop("two")
 
     # ------------------------------------------------ two updaters at once never downgrade
     for i in range(3):
@@ -644,7 +694,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "rf", "rf2", "rf3", "rf4", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

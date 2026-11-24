@@ -28,8 +28,8 @@ All notable changes to termium are documented here. The format follows
 - Restart into an update: a running session keeps the old version until
   it restarts; `r` restarts it from the new binary in the same terminal,
   reopening its spaces, tabs and splits (kept for the next start, with
-  the launch options it had, unless every page reopened). It asks first
-  if a page may have unsaved changes. After
+  the launch options it had, unless every page reopened) from the binary
+  the update replaced. It asks first if a page may have unsaved changes. After
   `termium update` from a shell, the next attach offers the same. Attaching to a session of termium 0.2.0 says it runs
   the older version and offers to restart it (its pages close).
 - `termium check-update` prints one line (exit 0 up to date, 100 newer
