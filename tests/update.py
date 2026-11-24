@@ -35,7 +35,7 @@ def shot(t, name):
         t.shot(os.path.join(SHOTS, name))
 CUR = json.load(open(os.path.join(ROOT, "package.json")))["version"]
 maj, mnr, pat = map(int, CUR.split("."))
-NEXT, BAD, LATER = f"{maj}.{mnr}.{pat + 1}", f"{maj}.{mnr}.{pat + 2}", f"{maj}.{mnr}.{pat + 3}"
+NEXT, BAD, LATER, SCRIPT = (f"{maj}.{mnr}.{pat + n}" for n in (1, 2, 3, 4))
 TARGET = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[os.uname().machine] + "-unknown-linux-gnu"
 ASSET = f"termium-{TARGET}.tar.gz"
 
@@ -83,6 +83,11 @@ old_bin = build("0.2.0", os.path.join(tmp, "build", "v0.2.0", "termium"), tag="v
 package(next_bin, f"v{NEXT}")
 package(next_bin, f"v{BAD}", good=False)
 package(later_bin, f"v{LATER}")
+# A release whose "binary" is a shell script that answers --version (with a matching checksum).
+RAN = os.path.join(tmp, "script-ran")
+script = os.path.join(tmp, "build", "script", "termium"); os.makedirs(os.path.dirname(script))
+open(script, "w").write(f'#!/bin/sh\ntouch {RAN}\necho "termium {SCRIPT}"\n'); os.chmod(script, 0o755)
+package(script, f"v{SCRIPT}")
 sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
 
 # ---- the fake GitHub
@@ -336,6 +341,14 @@ try:
     time.sleep(3)
     check("re-attach: no new check, no repeated notice", len(HITS) == n and not notice(b), HITS[n:])
     check("Ctrl+B U offers it again on demand", open_box(b))
+    # Taken over while the box is open: the new terminal types into the page.
+    y = term(cur_bin, "attach", "offer", state="st-offer")
+    check("a takeover with the box open starts without it", y.wait_text("termium test page", 15) and y.wait_for(lambda: not box_open(y), 5))
+    y.type("s")
+    check("...its first keys reach the page, and answer nothing",
+          y.wait_for(lambda: page_eval("termiumState().inp", prof) == "sul usual pastedx!s", 5) and (cache("st-offer") or {}).get("skipped") is None,
+          (page_eval("termiumState().inp", prof), cache("st-offer")))
+    open_box(y)
     # A takeover by a terminal that opted out: no update UI at all, even with the box open.
     c = term(cur_bin, "attach", "offer", "--no-update-check", state="st-offer", cols=120, rows=36)
     check("an opted-out takeover shows the page", c.wait_text("termium test page", 15))
@@ -378,24 +391,63 @@ try:
     x.key("escape")
     check("mismatch: Esc closes", x.wait_for(lambda: "update failed" not in x.text() and not box_open(x), 5))
     stop("bad"); x.close()
+
+    # ------------------------------------------------ a release that isn't a native binary is refused, never run
+    LATEST["tag"] = f"v{SCRIPT}"
+    inst = os.path.join(tmp, "inst-script"); os.makedirs(inst)
+    shutil.copy(cur_bin, os.path.join(inst, "termium"))
+    before = sha(os.path.join(inst, "termium"))
+    r = cli(os.path.join(inst, "termium"), "update")
+    check("a script posing as termium (matching checksum) is refused with the update-by-hand command",
+          r.returncode == 1 and "doesn't hold a termium binary for this machine" in r.stderr and "install.sh" in r.stderr, (r.returncode, r.stderr))
+    check("...it never ran, and the binary is untouched", not os.path.exists(RAN) and sha(os.path.join(inst, "termium")) == before and os.listdir(inst) == ["termium"])
     LATEST["tag"] = f"v{NEXT}"
 
-    # ------------------------------------------------ a failed restart keeps its snapshot for the next try
+    # ------------------------------------------------ "later" holds for the session when a newer release replaced the offer
+    os.makedirs(os.path.join(tmp, "st-later", "termium"), exist_ok=True)
+    json.dump({"checked_at": 1, "latest": f"v{NEXT}", "skipped": None}, open(os.path.join(tmp, "st-later", "termium", "update-check.json"), "w"))
+    LATEST["tag"] = f"v{LATER}"
+    lt = term(cur_bin, "-s", "later", "--incognito", PAGE, state="st-later")
+    check("later: the cached release is replaced by the newer one found", lt.wait_for(lambda: notice(lt) and LATER in lt.line(2), 40), lt.line(2))
+    open_box(lt); lt.key("l")
+    check("later: l closes it", lt.wait_for(lambda: not notice(lt) and not box_open(lt), 5))
+    lt.key("ctrl+b"); lt.key("d"); exit_code(lt)
+    lt2 = term(cur_bin, "attach", "later", state="st-later")
+    lt2.wait_text("termium test page", 15); time.sleep(3)
+    check("later: not offered again on re-attach", not notice(lt2) and f"↑ v{LATER}" in lt2.line(1), (lt2.line(1), lt2.line(2)))
+    stop("later")
+    LATEST["tag"] = f"v{NEXT}"
+
+    # ------------------------------------------------ a failed restart keeps its snapshot; a plain retry reopens it as it was
     layout = {"spaces": [{"name": "kept space", "active": 0, "tabs": [{"root": {"url": PAGE}, "focus": 0, "zoomed": False}]}],
               "activeSpace": 0, "sidebar": True, "zoom": 1}
     os.makedirs(sockdir, mode=0o700, exist_ok=True)
-    rpath = os.path.join(sockdir, "rf.restore")
-    with open(rpath, "w") as f:
-        json.dump({"v": 1, "at": int(time.time() * 1000), "from": CUR, "layout": layout,
-                   "launch": {"incognito": True, "scale": None, "search": "https://duckduckgo.com/?q=%s"}}, f)
-    os.chmod(rpath, 0o600)
-    fz = term(cur_bin, "-s", "rf", "--incognito", "--browser", "/no/such/browser", state="st-rf")
+    def snapshot(name, profile):
+        path = os.path.join(sockdir, f"{name}.restore")
+        with open(path, "w") as f:
+            json.dump({"v": 1, "at": int(time.time() * 1000), "from": CUR, "layout": layout,
+                       "launch": {"profile": profile, "incognito": False, "scale": None, "search": "https://duckduckgo.com/?q=%s"}}, f)
+        os.chmod(path, 0o600)
+        return path
+    def ls_row(name, state):
+        out = subprocess.run([cur_bin, "ls"], env=dict(os.environ, **env_for(state)), capture_output=True, text=True).stdout
+        return next((l for l in out.splitlines() if l.startswith(name + " ")), "")
+    prof5 = os.path.join(tmp, "prof-resume")
+    rpath = snapshot("rf", prof5)
+    fz = term(cur_bin, "-s", "rf", state="st-rf", env={"TERMIUM_BROWSER": "/no/such/browser"})
     exit_code(fz, 20)
     check("restart snapshot: kept when the session fails to start", os.path.exists(rpath), output(fz)[-200:])
-    rf = term(cur_bin, "-s", "rf", "--incognito", state="st-rf")
-    check("restart snapshot: the next start reopens it", rf.wait_for(lambda: "kept space" in rf.text() and "termium test page" in rf.text(), 40), rf.text()[:300])
+    rf = term(cur_bin, "-s", "rf", state="st-rf")
+    check("restart snapshot: a plain retry reopens it", rf.wait_for(lambda: "kept space" in rf.text() and "termium test page" in rf.text(), 40), rf.text()[:300])
+    check("restart snapshot: ...under its saved profile", os.path.realpath(prof5) in ls_row("rf", "st-rf"), ls_row("rf", "st-rf"))
     check("restart snapshot: ...and only then removes it", rf.wait_for(lambda: not os.path.exists(rpath), 5))
     stop("rf")
+    rpath = snapshot("rf2", os.path.join(tmp, "prof-resume2"))
+    rf2 = term(cur_bin, "-s", "rf2", "--incognito", state="st-rf")
+    check("restart snapshot: started with other options, it says the snapshot is kept",
+          rf2.wait_for(lambda: "Snapshot kept (it wasn't --incognito)" in rf2.line(2), 40), rf2.line(2))
+    check("restart snapshot: ...keeps it, and starts as asked", os.path.exists(rpath) and "(incognito)" in ls_row("rf2", "st-rf") and "kept space" not in rf2.text(), ls_row("rf2", "st-rf"))
+    stop("rf2")
 
     # ------------------------------------------------ u: update, then r: restart into it (layout kept)
     inst = os.path.join(tmp, "inst"); os.makedirs(inst)
@@ -504,6 +556,10 @@ try:
         check("0.2.0: the old termium starts its session", l0.wait_text("termium test page", 40))
         old_pid = server_pid("legacy")
         l0.key("ctrl+b"); l0.key("d"); exit_code(l0)
+        lq = term(cur_bin, "attach", "legacy", "--no-update-check", state="st-legacy")
+        check("0.2.0: with --no-update-check, no question", lq.wait_text("termium test page", 20) and "[y/N]" not in output(lq), output(lq)[-300:])
+        lq.key("ctrl+b"); lq.key("d")
+        check("0.2.0: ...and no restart instructions on detach", exit_code(lq) == 0 and "termium kill legacy" not in output(lq), output(lq)[-300:])
         l1 = term(cur_bin, "attach", "legacy", state="st-legacy")
         check(f"0.2.0: attaching from {CUR} says the session runs 0.2.0 and asks to restart it",
               l1.wait_for(lambda: f"runs termium 0.2.0, older than this termium ({CUR})" in output(l1) and "[y/N]" in output(l1), 10), output(l1)[-400:])
@@ -531,7 +587,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "rf", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "rf", "rf2", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

@@ -192,13 +192,17 @@ termium update           # update to it (a release binary only)
   while nothing else is open there (no dialog, address editing, help).
   The notice never takes the keyboard: everything you type or paste goes
   to the page as usual. To answer it, press `Ctrl+B U` or click the notice
-  or the badge: a box opens with `u` update now, `l` later (ask again when
+  or the badge: a box opens with `u` update now, `l` later (not offered
+  again in this session unless a newer release comes out; asked again when
   the session restarts) and `s` skip this version (never offered again;
-  the badge stays). Any other key closes the box and goes on as usual, and
+  the badge stays). A terminal that attaches or takes over always starts
+  typing into the page: an open box, help or address editing is closed. Any other key closes the box and goes on as usual, and
   a paste closes it and reaches the page.
 - **Updating.** `u` (or `termium update` from a shell) downloads this
   platform's archive and `SHA256SUMS` from the release, checks the
-  archive's SHA-256, runs the new binary's `--version` and renames it over
+  archive's SHA-256, checks that it holds a native executable for this
+  machine (ELF or Mach-O, right CPU, about the right size; nothing else is
+  ever run), runs the new binary's `--version` and renames it over
   the running binary (symlinks resolved; written beside it first, so the
   old one is never half-replaced). On any failure nothing changes and
   termium shows the `install.sh` command to update by hand. termium
@@ -215,20 +219,25 @@ termium update           # update to it (a release binary only)
   `Esc` leaves it for later (`Ctrl+B U` offers it again; the badge shows
   `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
   (from the new binary) offers the same restart, as a notice. If a
-  restart fails to start the session, its spaces and tabs are kept for the
-  next start of that session (within 10 minutes). Two updates at once
+  restart fails to start the session, its spaces and tabs are kept: the
+  next `termium` (or `termium -s NAME`) within 10 minutes starts it with
+  the profile and options it had and reopens them; started with other
+  options (another `--profile`, say), the snapshot is kept and termium
+  says so. Two updates at once
   (two sessions, or a shell) take turns, and never replace a newer
   termium with an older one.
 - **Sessions of older termiums.** A session started by termium 0.2.0 (before
   an update) can't restart itself or keep its pages across a restart: when
   a newer termium attaches to it, it says so in the shell and asks, once
   per session, whether to restart it now (its pages close; logins stay in
-  the profile), and reminds you how when you detach. A session started by
+  the profile), and reminds you how when you detach (not with the
+  opt-outs below). A session started by
   a termium whose session protocol differs can't be attached; termium says
   so and how to end it (`termium kill NAME`).
 - **Turning it off.** `--no-update-check`, `TERMIUM_NO_UPDATE_CHECK=1`,
   or a set `CI` variable (empty, `0` and `false` don't count) turn off the
-  check and all update news (badge, notice, box) for that terminal, even
+  check and all update news (badge, notice, box, the question about older
+  sessions) for that terminal, even
   when it takes over a session another terminal had them in. termium has no config
   file, so there's no config option. `termium ls`, `kill`, `--version`
   and `--help` never go online. `termium check-update` checks on demand

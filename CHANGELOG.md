@@ -21,13 +21,14 @@ All notable changes to termium are documented here. The format follows
   release archive for this platform, verifies it against `SHA256SUMS` and
   replaces the binary in place (never for a run from source, nor when its
   folder isn't writable; on any failure, the `install.sh` command to
-  update by hand). Concurrent updates take turns under a lock and never
-  replace a newer binary with an older one.
+  update by hand). Only a native executable for this machine is accepted.
+  Concurrent updates take turns under a lock and never replace a newer
+  binary with an older one; the update cache is changed under a lock too.
 - Restart into an update: a running session keeps the old version until
   it restarts; `r` restarts it from the new binary in the same terminal,
-  reopening its spaces, tabs and splits (kept for the next start if the
-  restart fails). After `termium update` from a shell, the next attach
-  offers the same. Attaching to a session of termium 0.2.0 says it runs
+  reopening its spaces, tabs and splits (kept for the next start, with
+  the profile and options it had, if the restart fails). After
+  `termium update` from a shell, the next attach offers the same. Attaching to a session of termium 0.2.0 says it runs
   the older version and offers to restart it (its pages close).
 - `termium check-update` prints one line (exit 0 up to date, 100 newer
   release available, 1 could not check).
@@ -36,6 +37,9 @@ All notable changes to termium are documented here. The format follows
 - `termium ls` says which termium a session runs when it isn't this one.
 
 ### Changed
+- A terminal that attaches or takes over a session starts typing into the
+  page: the address bar, help or a yes/no question left open by the
+  previous terminal is closed.
 - Attaching to a session of a termium that speaks another session
   protocol says how to end it (`termium kill NAME`).
 
