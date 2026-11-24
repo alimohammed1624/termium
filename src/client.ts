@@ -186,8 +186,9 @@ export async function runClient(o: ClientOptions): Promise<void> {
 
   // A session started by an older termium from before 0.3.0 (before an
   // update) can't say so itself, nor restart: ask here, once per server.
+  // (Update news, this included, is off with the opt-outs.)
   let legacyNote = "";
-  if (sock) {
+  if (sock && o.updateCheck) {
     const info = await sessionInfo(o.name).catch(() => null);
     if (info && !info.unresponsive && typeof info.version === "string" && !info.restarts && isNewer(o.version, info.version)) {
       const restartCmd = `termium kill ${o.name} && termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`}`;

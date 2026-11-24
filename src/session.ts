@@ -297,6 +297,16 @@ export function takeRestore(name: string, dir?: string): Restore | null {
   return r;
 }
 
+/** Why `r` can't be reopened by a session started with `launch` (null if it can). */
+export function restoreConflict(r: Restore, launch: { browser?: string; profile?: string; incognito: boolean }): string | null {
+  if (!!r.launch.incognito !== !!launch.incognito) return r.launch.incognito ? "it was --incognito" : "it wasn't --incognito";
+  if (!r.launch.incognito && (r.launch.profile ?? null) !== (launch.profile ?? null)) {
+    return r.launch.profile ? `it used --profile ${r.launch.profile}` : "it used the session's own profile";
+  }
+  if ((r.launch.browser ?? null) !== (launch.browser ?? null)) return r.launch.browser ? `it used --browser ${r.launch.browser}` : "it used the default browser";
+  return null;
+}
+
 export function writeRestore(name: string, r: Restore, dir?: string): void {
   const path = restorePath(name, dir);
   rmSync(path, { force: true });

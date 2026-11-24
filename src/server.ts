@@ -35,6 +35,7 @@ import {
   sessionPaths,
   sweepGraphicsFiles,
   readRestore,
+  restoreConflict,
   restorePath,
   writeRestore,
   type Restore,
@@ -315,7 +316,14 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   writeFileSync(paths.pid, `${process.pid}\n`, { mode: 0o600 });
   // Restarted (into an updated termium): what the session had open.
   // (Removed once it's reopened: a restart that fails before then keeps it for the next try.)
-  const restore = readRestore(name);
+  let restore = readRestore(name);
+  // Started with other launch options than the snapshot's (another profile,
+  // say): it isn't reopened under them, nor removed; the user is told.
+  const conflict = restore ? restoreConflict(restore, args) : null;
+  if (restore && conflict) {
+    log(`keeping the restart snapshot: ${conflict}`);
+    restore = null;
+  }
   if (restore) log(`restoring ${restore.layout.spaces.length} space(s) saved by termium ${restore.from}`);
 
   await sweepTemp();
@@ -485,6 +493,12 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
             : `Restarted: termium ${version}`
           : undefined;
         if (await app.start(args.url, restore?.layout, notice)) rmSync(restorePath(name), { force: true });
+        if (conflict) {
+          app.showToast(
+            `Snapshot kept (${conflict}); start it that way within 10 minutes to reopen its spaces and tabs`,
+            10_000,
+          );
+        }
       } catch (e) {
         await shutdown(1, e);
         return;

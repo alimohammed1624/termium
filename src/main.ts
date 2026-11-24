@@ -254,8 +254,11 @@ async function main(): Promise<void> {
       return runServer(args.session, args, VERSION);
     case "open":
     case "attach": {
-      if (args.restore) {
-        // Restarting: the session starts again as it was started before.
+      // A restart's snapshot waiting for this session (a restart now, or
+      // one that failed to start): unless other launch options are given,
+      // a session started now starts as it was before, and reopens it.
+      // (Given other ones, the server keeps the snapshot and says so.)
+      if (args.command === "open" && !args.launchFlags.length) {
         const r = readRestore(args.session);
         if (r) {
           args.browser = r.launch.browser;

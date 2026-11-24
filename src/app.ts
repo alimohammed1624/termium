@@ -1254,8 +1254,13 @@ export class App {
   attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string }): void {
     if (t.cwd) this.cwd = t.cwd;
     // Nothing half-typed on the previous terminal carries over (a pending
-    // Ctrl+B prefix would turn this one's first key into a command).
+    // Ctrl+B prefix would turn this one's first key into a command), nor
+    // anything it had open that takes keys (the update box, help, address
+    // editing, a yes/no question): this terminal starts typing into the
+    // page. (A page's own dialog or file chooser stays: the page waits on it.)
     this.resetInput();
+    if (this.mode === "update" || this.mode === "help") this.mode = "normal";
+    if (this.prompt && (this.prompt.kind === "url" || this.prompt.kind === "rename" || this.prompt.kind === "confirm")) this.prompt = null;
     this.attached = true;
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
@@ -2166,7 +2171,13 @@ export class App {
   private updatesShown = false;
   /** What there is to answer or know (an offer, an update under way, its outcome, a restart due). */
   private updateBox: UpdateBox | null = null;
-  /** Offers made in this session's life: each is made once. */
+  /**
+   * The newest release offered in this session's life: a release is offered
+   * once, and after that only a newer one is (whether the first was
+   * answered "later" or replaced in the notice by a newer one).
+   */
+  private lastOffered: string | null = null;
+  /** Installed versions a restart was offered for. */
   private offered = new Set<string>();
   private badgeHit: [number, number] | null = null;
   private noticeHit: [number, number] | null = null;
@@ -2194,16 +2205,17 @@ export class App {
     }
     const box = this.updateBox;
     if (box?.state === "offer") {
-      // A newer tag replaces the one being offered.
+      // A newer tag replaces the one being offered (and counts as offered).
       if (box.tag !== tag && isNewer(tag, box.tag)) {
         box.tag = tag;
+        this.lastOffered = tag;
         this.queueChrome();
       }
       return;
     }
     if (box) return; // an update under way (or done) isn't interrupted
-    if (!offer || this.offered.has(`offer:${tag}`)) return;
-    this.offered.add(`offer:${tag}`);
+    if (!offer || (this.lastOffered && !isNewer(tag, this.lastOffered))) return;
+    this.lastOffered = tag;
     this.updateBox = { tag, state: "offer" };
     this.queueChrome();
   }
