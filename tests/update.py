@@ -586,6 +586,57 @@ try:
     check("two copies: the older copy attaching says it's older than the session", exit_code(tc) == 0 and f"is older than the one session \"two\" runs ({NEXT})" in output(tc), output(tc)[-300:])
     stop("two")
 
+    # ------------------------------------------------ a newer termium that attached once is what a restart runs
+    inst_o = os.path.join(tmp, "inst-old"); os.makedirs(inst_o)
+    inst_n = os.path.join(tmp, "inst-new"); os.makedirs(inst_n)
+    shutil.copy(cur_bin, os.path.join(inst_o, "termium")); shutil.copy(next_bin, os.path.join(inst_n, "termium"))
+    for sess, remove in (("nw", False), ("nw2", True)):
+        t1 = term(os.path.join(inst_o, "termium"), "-s", sess, "--incognito", PAGE, state="st-nw")
+        t1.wait_text("termium test page", 40); t1.key("ctrl+b"); t1.key("d"); exit_code(t1)
+        t2 = term(os.path.join(inst_n, "termium"), "attach", sess, state="st-nw")
+        t2.wait_text("termium test page", 20); time.sleep(2); t2.key("ctrl+b"); t2.key("d"); exit_code(t2)
+        if remove:
+            os.remove(os.path.join(inst_n, "termium"))
+        t3 = term(os.path.join(inst_o, "termium"), "attach", sess, state="st-nw")
+        old_pid = server_pid(sess)
+        check(f"{sess}: an older terminal is offered the restart into the newer termium that attached", t3.wait_for(lambda: f"termium {NEXT} is installed" in t3.line(2), 20), t3.line(2))
+        open_box(t3); t3.key("r")
+        if not remove:
+            check(f"{sess}: r restarts it from that newer binary", t3.wait_for(lambda: "inst-new" in output(t3), 15) and
+                  t3.wait_for(lambda: server_pid(sess) not in (None, old_pid), 30) and t3.wait_for(lambda: "Restarted:" in t3.text(), 40), output(t3)[-300:])
+            check(f"{sess}: ls shows it runs the newer termium", f"(termium {NEXT})" in ls_row(sess, "st-nw"), ls_row(sess, "st-nw"))
+        else:
+            check(f"{sess}: that binary is gone: no restart, and it says so", t3.wait_for(lambda: "Can't restart" in t3.line(2), 15) and server_pid(sess) == old_pid
+                  and "↻" not in t3.line(1), (t3.line(1), t3.line(2)))
+        stop(sess)
+    shutil.copy(next_bin, os.path.join(inst_n, "termium"))
+
+    # ------------------------------------------------ a skip is reported saved only once it is
+    sk_cache = os.path.join(tmp, "st-sklock", "termium", "update-check.json")
+    def hold_lock(seconds):
+        os.makedirs(os.path.dirname(sk_cache), exist_ok=True)
+        h = subprocess.Popen(["bun", "-e", f"const b = await import({json.dumps(os.path.join(ROOT, 'src', 'browser.ts'))}); "
+                              f"console.log(b.lockFile({json.dumps(sk_cache + '.lock')})); await Bun.sleep({seconds * 1000}); b.unlockFile({json.dumps(sk_cache + '.lock')});"],
+                             stdout=subprocess.PIPE, text=True)
+        h.stdout.readline()
+        return h
+    sk = term(cur_bin, "-s", "sklock", "--incognito", PAGE, state="st-sklock")
+    sk.wait_for(lambda: notice(sk), 40)
+    holder = hold_lock(14)
+    open_box(sk); sk.key("s")
+    check("skip, cache locked throughout: says it couldn't be saved", sk.wait_for(lambda: "couldn't save it" in sk.line(2), 16) and
+          (cache("st-sklock") or {}).get("skipped") is None, (sk.line(2), cache("st-sklock")))
+    holder.wait()
+    stop("sklock")
+    sk = term(cur_bin, "-s", "sklock", "--incognito", PAGE, state="st-sklock")
+    check("skip, not saved: offered again in the next session", sk.wait_for(lambda: notice(sk), 40))
+    holder = hold_lock(3)
+    open_box(sk); sk.key("s")
+    check("skip, cache locked a while: saved once free, then says so", sk.wait_for(lambda: "skipped: not offered again" in sk.line(2), 12) and
+          (cache("st-sklock") or {}).get("skipped") == f"v{NEXT}", (sk.line(2), cache("st-sklock")))
+    holder.wait()
+    stop("sklock")
+
     # ------------------------------------------------ two updaters at once never downgrade
     for i in range(3):
         cc = os.path.join(tmp, f"inst-race{i}"); os.makedirs(cc)
@@ -694,7 +745,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

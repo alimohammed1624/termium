@@ -48,8 +48,9 @@ All notable changes to termium are documented here. The format follows
 ### Fixed
 - After re-attaching at another size, the first picture of a page could
   be one of the old shape (the browser's first frame after a resize can
-  carry the new size in its metadata but the old picture); frames that
-  don't have the viewport's shape are dropped.
+  carry the new size in its metadata but the old picture). Right after a
+  resize, until a frame of the new shape comes (2 s at most), frames of
+  another shape are dropped.
 
 ## [0.2.0] - 2026-11-24
 

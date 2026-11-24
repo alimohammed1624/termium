@@ -196,7 +196,8 @@ termium update           # update to it (a release binary only)
   or the badge: a box opens with `u` update now, `l` later (not offered
   again in this session unless a newer release comes out; asked again when
   the session restarts) and `s` skip this version (never offered again;
-  the badge stays). Only those letters act: `Esc` closes the box, and
+  the badge stays; if another termium keeps the update cache locked for
+  10 s, it holds for this session only, and termium says so). Only those letters act: `Esc` closes the box, and
   any other key (Enter and Space included) closes it and goes on to the
   page. A terminal that attaches or takes over always starts typing into
   the page: an open box, help or address editing is closed. Any other key closes the box and goes on as usual, and
@@ -223,7 +224,10 @@ termium update           # update to it (a release binary only)
   a page may have unsaved changes (or a download is running) termium asks
   first, as `Ctrl+Q` does. `l` leaves it for later (`Ctrl+B U` offers it
   again; the badge shows `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
-  (from the new binary) offers the same restart, as a notice. If a
+  (from the new binary) offers the same restart, as a notice, and the
+  restart runs that newer binary whichever terminal presses `r` (once it's
+  checked to still be there and report that version; if not, there's no
+  restart and termium says so). If a
   restart fails to start the session, its spaces and tabs are kept: the
   next `termium` (or `termium -s NAME`) within 10 minutes starts it with
   the profile and options it had and reopens them; started with any other
