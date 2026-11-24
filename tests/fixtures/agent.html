@@ -8,6 +8,8 @@
 <label for=pw>Secret</label> <input id=pw type=password>
 <label for=city>City</label> <input id=city>
 <label for=offsel>Frozen list</label> <select id=offsel disabled><option value=a>Apple</option><option value=b>Banana</option></select>
+<input id=jumpy aria-label="Jumpy later" onfocus="queueMicrotask(() => document.getElementById('city').focus())">
+<input id=jumpnow aria-label="Jumpy now" onfocus="document.getElementById('city').focus()">
 <button id=go type=submit>Greet</button>
 </form>
 <p id=out>nobody yet</p>

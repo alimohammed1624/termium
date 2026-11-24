@@ -283,6 +283,36 @@ try:
     check("type into an input inside a shadow root works", r.returncode == 0 and
           page_value("document.getElementById('host').shadowRoot.getElementById('sin').value") == "in the shadow", (r.returncode, r.stderr))
 
+    # --- a command that started runs to its end or stops itself, saying how far it got; nothing goes on after the reply
+    snap = ctl("snapshot").stdout
+    city_id = ref(snap, "textbox", "City")
+    ctl("type", city_id, ""); ctl("click", city_id); time.sleep(1.6)
+    r = ctl("key", *(["x"] * 3000), "--timeout", "0.15")
+    m = re.search(r"pressed (\d+) of 3000 keys", r.stderr)
+    n_now = len(page_value("document.getElementById('city').value") or "")
+    time.sleep(2)
+    n_later = len(page_value("document.getElementById('city').value") or "")
+    check("key with a timeout too short for 3000 keys: stops, says how many it pressed, and none land after",
+          r.returncode == 4 and m and int(m.group(1)) == n_now == n_later and 0 < n_later < 3000, (r.returncode, r.stderr[:200], n_now, n_later))
+    ctl("type", city_id, ""); time.sleep(1.6)
+    r = ctl("type", city_id, "late text", "--timeout", "0.05")
+    v_now = page_value("document.getElementById('city').value"); time.sleep(2)
+    v_later = page_value("document.getElementById('city').value")
+    check("type with a tiny timeout: either typed (exit 0) or nothing typed (exit 4), and nothing changes after",
+          v_now == v_later and ((r.returncode == 0 and v_later == "late text") or (r.returncode == 4 and "nothing was typed" in r.stderr and v_later == "")),
+          (r.returncode, r.stderr, v_now, v_later))
+    ctl("type", city_id, "")
+    # The page moves focus away: as the field gets it, or a moment later.
+    jl, jn = ref(snap, "textbox", "Jumpy later"), ref(snap, "textbox", "Jumpy now")
+    r = ctl("type", jl, "TWELVE CHARS")
+    check("type into a field whose page moves focus a moment later: the text still goes into it (and says so truthfully)",
+          r.returncode == 0 and page_value("[document.getElementById('jumpy').value, document.getElementById('city').value]") == ["TWELVE CHARS", ""],
+          (r.returncode, r.stderr, page_value("[document.getElementById('jumpy').value, document.getElementById('city').value]")))
+    r = ctl("type", jn, "NOT HERE")
+    check("type into a field that hands focus elsewhere at once: exit 1 naming why, nothing typed anywhere",
+          r.returncode == 1 and page_value("[document.getElementById('jumpnow').value, document.getElementById('city').value]") == ["", ""],
+          (r.returncode, r.stderr, page_value("[document.getElementById('jumpnow').value, document.getElementById('city').value]")))
+
     # --- a queued command whose time runs out is answered at once, and never runs
     hang = socket.socket(); hang.bind(("127.0.0.1", 0)); hang.listen(8)  # accepts nothing: a page that never loads
     HANG = f"http://127.0.0.1:{hang.getsockname()[1]}/never"
@@ -448,6 +478,11 @@ try:
     check("start on a profile another browser holds: fails saying why (not 'without answering')",
           r.returncode != 0 and "without answering" not in r.stderr and len(r.stderr.strip()) > 20, (r.returncode, r.stderr))
 
+    # A short override (let go 0.4 s after setting it): the page still gets its size back.
+    r = ext("viewport", json.loads(cli("devtools", "bg", "--json").stdout or "{}").get("browserURL", ""), "agent.html", "444", "333", "0.4")
+    check("detached: a viewport another client holds only briefly still gives way to 1280x800",
+          json.loads(r.stdout or "[]") == [444, 333] and wait_until(lambda: page_value("[innerWidth, innerHeight]", session="bg") == [1280, 800], 10),
+          (r.stdout, page_value("[innerWidth, innerHeight]", session="bg")))
     # A detached page that another client resized, then let go: back to its size (1280x800 here).
     bg_url = json.loads(cli("devtools", "bg", "--json").stdout or "{}").get("browserURL", "")
     r = ext("viewport", bg_url, "agent.html", "500", "400", "2")
@@ -456,6 +491,12 @@ try:
           (r.stdout, page_value("[innerWidth, innerHeight]", session="bg")))
     r = cli("kill", "bg")
     check("kill ends it", r.returncode == 0 and server_pid("bg") is None, (r.returncode, r.stderr))
+    # kill takes a session's restart snapshot with it (running or not).
+    os.makedirs(sockdir, exist_ok=True)
+    snap_path = os.path.join(sockdir, "gone.restore")
+    open(snap_path, "w").write("{}"); os.chmod(snap_path, 0o600)
+    r = cli("kill", "gone")
+    check("kill removes a session's restart snapshot", r.returncode == 0 and not os.path.exists(snap_path) and "snapshot" in r.stderr, (r.returncode, r.stderr))
     # Started without a URL: wait load is done at once.
     cli("start", "-s", "blank", "--incognito")
     r = ctl("wait", "load", "--timeout", "5", session="blank")

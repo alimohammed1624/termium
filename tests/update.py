@@ -734,6 +734,34 @@ try:
           and not os.path.exists(os.path.join(tmp, "data-b", "termium", "profiles", "renv")), (starts[-1:], ls_row("renv", "st-renv")))
     stop("renv")
 
+    # ------------------------------------------------ a browser chosen by name (on that shell's PATH) survives a restart from a shell without it
+    os.symlink(helium, os.path.join(edir, "helium-review"))
+    n1 = term(os.path.join(inst_o, "termium"), "-s", "rname", "--incognito", "--browser", "helium-review", PAGE, state="st-rname",
+              env={"PATH": edir + os.pathsep + os.environ["PATH"]})
+    n1.wait_text("termium test page", 40); n1.key("ctrl+b"); n1.key("d"); exit_code(n1)
+    n2 = term(os.path.join(inst_n, "termium"), "attach", "rname", state="st-rname")
+    n2.wait_for(lambda: f"termium {NEXT} is installed" in n2.line(2), 20)
+    old_pid = server_pid("rname")
+    open_box(n2); n2.key("r")
+    check("--browser NAME: a restart from a shell without it on PATH still finds it",
+          n2.wait_for(lambda: server_pid("rname") not in (None, old_pid), 30) and n2.wait_for(lambda: "Restarted:" in n2.text(), 40), output(n2)[-300:])
+    stop("rname")
+
+    # ------------------------------------------------ the session keeps answering while an update checks the new binary
+    inst_sv = os.path.join(tmp, "inst-slowv"); os.makedirs(inst_sv)
+    shutil.copy(cur_bin, os.path.join(inst_sv, "termium"))
+    sv = term(os.path.join(inst_sv, "termium"), "-s", "slowv", "--incognito", PAGE, state="st-slowv", env={"TERMIUM_TEST_VERSION_DELAY_MS": "3000"})
+    sv.wait_for(lambda: notice(sv), 40)
+    open_box(sv); sv.key("u")
+    sv.wait_for(lambda: "verifying" in sv.text() or "installing" in sv.text(), 30)
+    t0 = time.time()
+    r = subprocess.run([cur_bin, "ctl", "-s", "slowv", "tabs", "--timeout", "2"], env=dict(os.environ, **env_for("st-slowv")),
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+    took = time.time() - t0
+    check(f"while the new binary is being checked (3 s), the session answers agents ({took:.1f}s)", r.returncode == 0 and took < 2, (r.returncode, r.stderr))
+    check("...and the update completes", sv.wait_for(lambda: f"updated to termium {NEXT}" in sv.text(), 60), sv.text()[-400:])
+    stop("slowv")
+
     # ------------------------------------------------ a relative --browser survives a restart from another directory
     helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
     bdir = os.path.join(tmp, "bdir"); os.makedirs(bdir)
@@ -965,7 +993,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

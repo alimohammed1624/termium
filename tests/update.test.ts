@@ -227,25 +227,31 @@ test("the binary comes out of a release archive", () => {
   expect(() => extractBinary(gzipSync(Buffer.alloc(1024, 1)), target)).toThrow();
 });
 
-test("installing replaces the binary atomically and leaves nothing behind", () => {
+test("installing replaces the binary atomically and leaves nothing behind (without blocking)", async () => {
   const dir = tempDir();
   const exe = join(dir, "termium");
   writeFileSync(exe, "old");
   chmodSync(exe, 0o755);
-  installBinary(new TextEncoder().encode("new binary"), exe);
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 5);
+  await installBinary(new TextEncoder().encode("new binary"), exe, async () => {
+    await Bun.sleep(100); // a slow check (running the staged binary): the event loop keeps going
+  });
+  clearInterval(timer);
+  expect(ticks).toBeGreaterThan(5);
   expect(readFileSync(exe, "utf8")).toBe("new binary");
   expect(statSync(exe).mode & 0o777).toBe(0o755);
   expect(readdirSync(dir)).toEqual(["termium"]);
   // A check that refuses the staged file leaves the old binary alone, and no temporary file.
-  expect(() =>
+  await expect(
     installBinary(new TextEncoder().encode("bad"), exe, () => {
       throw new Error("doesn't run here");
     }),
-  ).toThrow("doesn't run here");
+  ).rejects.toThrow("doesn't run here");
   expect(readFileSync(exe, "utf8")).toBe("new binary");
   expect(readdirSync(dir)).toEqual(["termium"]);
   // An unwritable place fails cleanly.
-  expect(() => installBinary(new TextEncoder().encode("x"), join(dir, "no-such-dir", "termium"))).toThrow(/cannot replace/);
+  await expect(installBinary(new TextEncoder().encode("x"), join(dir, "no-such-dir", "termium"))).rejects.toThrow(/cannot replace/);
   expect(readdirSync(dir)).toEqual(["termium"]);
 });
 
