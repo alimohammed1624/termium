@@ -121,10 +121,19 @@ The port changes each time the session starts: ask `termium devtools`.
   small viewport at 2x, say): check `eval "[innerWidth, innerHeight,
   devicePixelRatio]"` rather than assuming. When a person attaches, pages
   take their pane sizes.
-- While the person at the terminal is editing the address, answering a
-  prompt or reading help, `select` waits until they're done (it never
-  throws their edit away); every command also takes `--tab N` to act on a
-  tab without showing it.
+- The person at the terminal comes first. While they're busy (editing
+  the address, answering a prompt or dialog, reading help, or typing: for
+  a moment after each key), `select` waits, and `open` (navigating),
+  `click`, `type`, `key` and `close` wait if they'd act on the tab they're
+  on; past `--timeout` that's exit 4 and nothing was done. `open
+  --new-tab` then opens the tab in the background and says so
+  (`background` in `--json`). Every command takes `--tab N` to act on
+  another tab without showing it.
+- Commands that act (open, select, close, click, type, key, scroll,
+  dialog) run one at a time per session, in order: several agents (or
+  parallel calls) never interleave their typing.
+- A session still starting (opening its tabs after a restart) makes a
+  command wait for it, up to `--timeout` (then exit 4, "still starting").
 - In a session's first seconds, Helium's content blocker may abort a
   DevTools client's first navigation (`net::ERR_ABORTED`): retry it
   (`termium ctl open` retries by itself).

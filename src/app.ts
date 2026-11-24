@@ -150,7 +150,7 @@ interface Space {
 }
 
 type Placement =
-  | { kind: "tab"; space: Space; index: number; editUrl: boolean; url?: string; background?: boolean }
+  | { kind: "tab"; space: Space; index: number; editUrl: boolean; url?: string; background?: boolean; agent?: boolean }
   | { kind: "split"; tab: Tab; next: Page; dir: Dir; editUrl: boolean; url?: string }
   | { kind: "replace"; old: Page; url: string };
 
@@ -597,8 +597,11 @@ export class App {
 
   /** The person at the terminal is in the middle of something (address bar, a prompt, help, a key prefix...). */
   humanBusy(): boolean {
-    return this.attached && (this.mode !== "normal" || !!this.prompt);
+    return this.attached && (this.mode !== "normal" || !!this.prompt || Date.now() - this.lastKeyAt < 1500);
   }
+
+  /** When the person last pressed a key (typing into a page counts: it's busy for a moment after). */
+  private lastKeyAt = 0;
 
   /** A page address is termium's own placeholder for a blank page (not a real #termium-... fragment). */
   isPlaceholder(url: string): boolean {
@@ -904,7 +907,8 @@ export class App {
       const tab: Tab = { id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false };
       const index = Math.min(placement.index, space.tabs.length);
       space.tabs.splice(index, 0, tab);
-      if (placement.background) {
+      // An agent's tab opens in the background while the person is busy (checked as it arrives).
+      if (placement.background || (placement.agent && this.humanBusy())) {
         if (space.active >= index && space.tabs.length > 1) space.active++;
       } else {
         space.active = index;
@@ -1268,9 +1272,16 @@ export class App {
    */
   private terminalGen = 0;
   /** A ticket for async work started now; `ticket.valid()` is false once another terminal attached (or this one left). */
-  ticket(): { valid: () => boolean } {
+  ticket(opts: { sameUi?: boolean } = { sameUi: true }): { valid: () => boolean } {
     const gen = this.terminalGen;
-    return { valid: () => gen === this.terminalGen && this.attached };
+    // With sameUi, it's also void once the person has opened anything since
+    // (started editing the address, a prompt, help...): what they're doing
+    // now isn't replaced by a question they asked earlier.
+    const mode = this.mode;
+    const prompt = this.prompt;
+    return {
+      valid: () => gen === this.terminalGen && this.attached && (!opts.sameUi || (mode === this.mode && prompt === this.prompt)),
+    };
   }
 
   private async requestQuit(): Promise<void> {
@@ -1663,6 +1674,7 @@ export class App {
     if (page.sizeCheck) return;
     page.sizeCheck = setTimeout(async () => {
       page.sizeCheck = undefined;
+      if (!this.attached && this.pages.has(page.sessionId)) return void this.keepDetachedSize(page);
       const css = page.css;
       if (!css || !this.geom.has(page) || !this.pages.has(page.sessionId)) return;
       if (page.actual) return void this.checkForeign(page);
@@ -1673,6 +1685,24 @@ export class App {
       this.opts.log(`page ${page.num}: resized to ${size.w}x${size.h} by another client; restoring ${css.w}x${css.h}`);
       this.reassertViewport(page);
     }, 150);
+  }
+
+  /**
+   * No terminal attached: a page keeps the size it had (its last pane's, or
+   * 1280x800 if it never had one). Another DevTools client letting go of its
+   * own size leaves it at the headless window's: that size is put back.
+   */
+  private async keepDetachedSize(page: Page): Promise<void> {
+    const css = page.css;
+    const want = css ? { width: css.w, height: css.h, deviceScaleFactor: css.dsf } : DETACHED_VIEWPORT;
+    const size = await this.pageSize(page);
+    if (!size || this.attached || (Math.abs(size.w - want.width) <= 1 && Math.abs(size.h - want.height) <= 1)) return;
+    if (Date.now() - (page.reassertedAt ?? 0) < 1000) return;
+    page.reassertedAt = Date.now();
+    this.opts.log(`page ${page.num}: resized to ${size.w}x${size.h} while detached; restoring ${want.width}x${want.height}`);
+    await this.cdp
+      .send("Emulation.setDeviceMetricsOverride", { ...DETACHED_VIEWPORT, ...want, mobile: false }, page.sessionId)
+      .catch(() => {});
   }
 
   /** Sends the page its viewport again (another DevTools client changed it). */
@@ -1878,10 +1908,15 @@ export class App {
     // come: its metadata says another size, or it already gives the new size
     // but the picture has the old shape. Such frames are dropped; the right
     // one follows. Outside that window, every frame is shown.
+    // (While another DevTools client holds the page at its own size, frames
+    // of that size are right too: termium trying its own size now and then
+    // mustn't freeze the pane.)
     const recent = Date.now() - (page.viewportAt ?? 0) < 2000;
-    if (page.awaitingShape && (!recent || (page.css && frameFits(p.data, page.css)))) page.awaitingShape = false;
-    const otherSize = !!(page.css && m && (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1));
-    if (page.css && recent && (otherSize || (page.awaitingShape && !frameFits(p.data, page.css)))) {
+    const sizes = page.css ? [page.css, ...(page.actual ? [page.actual] : [])] : [];
+    const fits = sizes.some((s) => frameFits(p.data, s));
+    if (page.awaitingShape && (!recent || fits)) page.awaitingShape = false;
+    const otherSize = !!(m && sizes.length && sizes.every((s) => Math.abs(m.deviceWidth - s.w) > 1 || Math.abs(m.deviceHeight - s.h) > 1));
+    if (page.css && recent && (otherSize || (page.awaitingShape && !fits))) {
       this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
       return;
     }
@@ -2613,7 +2648,7 @@ export class App {
         } else if (combo === "s") {
           this.skippedTag = box.tag;
           this.closeUpdate(true);
-          const t = this.ticket();
+          const t = this.ticket({ sameUi: false });
           void this.opts.update?.skip(box.tag).then((saved) =>
             t.valid() && this.updatesShown && this.showToast(
               saved
@@ -2820,6 +2855,7 @@ export class App {
       void this.requestQuit();
       return;
     }
+    if (ev.type === "key" && ev.event !== "release") this.lastKeyAt = Date.now();
     if (!this.ready || this.holds.size > 0) {
       this.early.push(ev);
       return;
@@ -3756,7 +3792,9 @@ export class App {
   agentNewTab(url: string, background: boolean): Promise<Page | null> {
     const space = this.space ?? this.spaces[0];
     if (!space) return Promise.resolve(null);
-    return this.placePage({ kind: "tab", space, index: space.active + 1, editUrl: false, url, background });
+    // A new tab must never take the person's address-bar draft or keystrokes:
+    // while they're busy it opens in the background (the caller says so).
+    return this.placePage({ kind: "tab", space, index: space.active + 1, editUrl: false, url, background, agent: true });
   }
 
   /** Navigates a page (a crashed or hung one is replaced, as from the address bar). */

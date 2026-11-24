@@ -190,7 +190,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
   let legacyNote = "";
   if (sock && o.updateCheck) {
     const info = await sessionInfo(o.name).catch(() => null);
-    if (info && !info.unresponsive && typeof info.version === "string" && !info.restarts && isNewer(o.version, info.version)) {
+    if (info && !info.unresponsive && !info.refused && typeof info.version === "string" && !info.restarts && isNewer(o.version, info.version)) {
       const restartCmd = `termium kill ${o.name} && termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`}`;
       legacyNote =
         `termium: session "${o.name}" runs termium ${info.version}, older than this termium (${o.version}), until it restarts. ` +
@@ -912,6 +912,10 @@ export async function sessionInfo(name: string): Promise<any | null> {
       if (f.type === 1 && f.msg?.t === "info") {
         info = f.msg;
         finish();
+      } else if (f.type === 1 && f.msg?.t === "bye" && f.msg?.reason === "error") {
+        // It answered, but won't talk to this termium (another session protocol).
+        info = { refused: String(f.msg.message ?? "it refused this termium"), version: f.msg.version, pid: lockHolder(p.lock) ?? readPid(name) };
+        finish();
       }
     });
     sock.on("data", (c: Buffer) => {
@@ -954,6 +958,7 @@ export async function listSessions(): Promise<void> {
     const info = await sessionInfo(name);
     if (!info) continue;
     if (info.unresponsive) rows.push([name, String(info.pid ?? "?"), "not responding", "", ""]);
+    else if (info.refused) rows.push([name, String(info.pid ?? "?"), "another termium", "", info.version ? `(termium ${info.version})` : ""]);
     else {
       // A session started by another termium (before an update, say) says which.
       const other = info.version && info.version !== VERSION ? `  (termium ${info.version})` : "";

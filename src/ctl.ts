@@ -277,6 +277,7 @@ export async function request(name: string, req: CtlRequest, waitMs = (req.timeo
   const info = await sessionInfo(name).catch(() => null);
   if (!info) fail(`no session "${name}" (start one without a terminal: termium start${name === DEFAULT_SESSION ? "" : ` -s ${name}`})`, EXIT.noSession);
   if (info.unresponsive) fail(`session "${name}" isn't responding${info.pid ? ` (pid ${info.pid})` : ""}`, EXIT.failed);
+  if (info.refused) fail(`${info.refused}\n  End it (termium kill ${name}) and start it again with this termium.`, EXIT.failed);
   if (info.ctl !== true) {
     fail(
       `session "${name}" runs termium ${info.version ?? "(older)"}, which has no agent control. ` +
@@ -293,6 +294,16 @@ export async function request(name: string, req: CtlRequest, waitMs = (req.timeo
       fail(`session "${name}" didn't answer within ${Math.round(waitMs / 1000)}s`, EXIT.timeout);
     }, waitMs);
     const reader = new FrameReader((f) => {
+      if (f.type === 1 && f.msg?.t === "bye" && f.msg?.reason === "error" && !done) {
+        // Refused (a termium speaking another session protocol, say): its reason, not "no answer".
+        done = true;
+        clearTimeout(timer);
+        sock.destroy();
+        fail(
+          `${String(f.msg.message ?? `session "${name}" refused the request`)}\n  End it (termium kill ${name}) and start it again with this termium.`,
+          EXIT.failed,
+        );
+      }
       if (f.type !== 1 || f.msg?.t !== "ctl" || done) return;
       done = true;
       clearTimeout(timer);

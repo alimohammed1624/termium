@@ -77,8 +77,6 @@ interface Args extends LaunchOptions {
   /** The launch options given, by flag, for the "already running" message. */
   launchFlags: string[];
   noUpdateCheck: boolean;
-  /** Start the session again as it was before a restart (internal: see client.ts restartInto). */
-  restore: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -87,7 +85,6 @@ function parseArgs(argv: string[]): Args {
     session: DEFAULT_SESSION,
     launchFlags: [],
     noUpdateCheck: false,
-    restore: false,
     url: null,
     incognito: false,
     scale: null,
@@ -133,7 +130,9 @@ function parseArgs(argv: string[]): Args {
         sessionGiven = true;
         break;
       case "--no-update-check": args.noUpdateCheck = true; break;
-      case "--restore": args.restore = true; break;
+      // Older termiums (0.3.0 pre-releases) restarted with --restore; a
+      // restart snapshot is reopened whenever one is waiting, so it means nothing now.
+      case "--restore": break;
       case "--browser": {
         // A path (not a name looked up on PATH) is made absolute: the session
         // may restart from another directory.
@@ -296,7 +295,7 @@ async function main(): Promise<void> {
         const r = readRestore(args.session);
         if (r) Object.assign(args, savedLaunch(r.launch));
       }
-      const restartArgv = [...selfArgv(), "--session", args.session, "--restore"];
+      const restartArgv = [...selfArgv(), "--session", args.session];
       if (args.noUpdateCheck) restartArgv.push("--no-update-check");
       return runClient({
         name: args.session,

@@ -25,6 +25,9 @@ export class CtlError extends Error {
 /** Exit statuses of `termium ctl` (also in the skill). */
 export const EXIT = { ok: 0, failed: 1, usage: 2, noSession: 3, timeout: 4 } as const;
 
+/** Commands that act on pages or tabs: a session runs these one at a time (see onCtl in server.ts). */
+export const ACTING = new Set(["open", "select", "close", "click", "type", "key", "scroll", "dialog"]);
+
 export interface CtlRequest {
   cmd: string;
   /** Page number to act on; the focused page if absent. */
@@ -104,25 +107,10 @@ class Agent {
         return this.open(req, timeoutMs);
       case "select": {
         const page = this.page(req.tab, true);
-        // The person at the terminal is editing the address, answering a
-        // prompt or reading help: the switch waits until they're done, so
-        // their edit isn't thrown away nor their keys sent to another page.
-        const deadline = Date.now() + timeoutMs - 300;
-        const t0 = Date.now();
-        while (this.app.humanBusy()) {
-          if (Date.now() > deadline) {
-            throw new CtlError(
-              "the person at the terminal is busy (editing the address, a prompt or help); tab not switched. " +
-                "Commands take --tab N to act on a tab without showing it",
-              EXIT.timeout,
-            );
-          }
-          await Bun.sleep(100);
-          if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
-        }
+        const waited = await this.personFree(null, timeoutMs, "tab not switched");
+        if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
         this.app.agentSelect(page);
         this.note(`showing tab ${page.num}`);
-        const waited = Date.now() - t0;
         return waited > 150 ? { ...this.describe(page), waitedForPerson: waited } : this.describe(page);
       }
       case "close":
@@ -150,6 +138,32 @@ class Agent {
       default:
         throw new CtlError(`unknown command "${req.cmd}"`, EXIT.usage);
     }
+  }
+
+  // ------------------------------------------------------------ the person
+
+  /**
+   * The one guard for anything an agent does that changes what the person
+   * sees or where their keys go: while they're busy (editing the address,
+   * a prompt, a dialog, help or the update box, or typing: busy for a
+   * moment after each key), it waits, up to the command's timeout (then
+   * exit 4, nothing done). With `page`, only if that's the page they're on.
+   * Returns how long it waited.
+   */
+  private async personFree(page: Page | null, timeoutMs: number, what: string): Promise<number> {
+    const t0 = Date.now();
+    const deadline = t0 + timeoutMs - 300;
+    while (this.app.humanBusy() && (!page || page === this.app.activePage())) {
+      if (Date.now() > deadline) {
+        throw new CtlError(
+          `the person at the terminal is busy (typing, or editing the address, a prompt or help); ${what}. ` +
+            "Try again, or act on another tab with --tab N",
+          EXIT.timeout,
+        );
+      }
+      await Bun.sleep(100);
+    }
+    return Date.now() - t0;
   }
 
   // ------------------------------------------------------------ pages
@@ -195,18 +209,23 @@ class Agent {
     const url = this.app.resolveUrl(String(req.url ?? ""));
     if (!url) throw new CtlError("open needs a URL", EXIT.usage);
     let page: Page;
+    // A new tab asked for in front opens behind while the person is busy (it never takes their keys).
+    let held = false;
     if (req.newTab) {
       const created = await this.app.agentNewTab(url, !!req.background);
       if (!created) throw new CtlError("couldn't open a tab");
       page = created;
-      this.note(`opened ${url} in tab ${page.num}`);
+      held = !req.background && this.app.activePage() !== page;
+      this.note(`opened ${url} in tab ${page.num}${held ? " (in the background: you're busy)" : ""}`);
     } else {
       page = this.page(req.tab);
+      await this.personFree(page, timeoutMs, "not navigated");
       this.app.agentNavigate(page, url);
       this.note(`going to ${url}`);
     }
     if (req.wait !== false) await this.waitLoad(page, Date.now() + timeoutMs - 500, true);
-    const t = this.describe(page);
+    const t: Record<string, unknown> = { ...this.describe(page) };
+    if (held) t.background = "the person at the terminal was busy: opened in the background, not shown";
     if (/^chrome-error:/.test(await this.evalValue(page, "location.href").catch(() => ""))) {
       throw new CtlError(`tab ${page.num}: couldn't load ${url} (${t.title || "error page"})`);
     }
@@ -215,6 +234,7 @@ class Agent {
 
   private async close(req: CtlRequest): Promise<unknown> {
     const page = this.page(req.tab, true);
+    await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not closed");
     const t = this.describe(page);
     this.app.agentClose(page, !!req.force);
     this.note(`closing tab ${page.num}`);
@@ -419,12 +439,14 @@ class Agent {
     const count = req.double ? 2 : 1;
     if (req.xy) {
       const page = this.page(req.tab);
+      await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
       const [x, y] = req.xy;
       await this.mouseClick(page, x, y, button, count);
       this.note(`clicked at ${Math.round(x)},${Math.round(y)}`);
       return { tab: page.num, x, y };
     }
     const { page, node } = this.element(req.ref);
+    await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
     const { x, y } = await this.centre(page, node);
     // Something else on top (a cookie banner, an overlay) would take the click: say so.
     const objectId = await this.objectOf(page, node);
@@ -451,9 +473,12 @@ class Agent {
       page,
       objectId,
       `function () {
-        // Never the field's value (it may be a password): its names only.
-        const t = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("placeholder") || this.getAttribute("name"))) ||
-          (this.tagName === "INPUT" || this.tagName === "TEXTAREA" || this.tagName === "SELECT" ? "" : (this.innerText || "").trim());
+        // Never anything typed into it (a field's value, an editable's text):
+        // its names only; an editable element is never named by its content.
+        const editable = this.tagName === "INPUT" || this.tagName === "TEXTAREA" || this.tagName === "SELECT" || this.isContentEditable ||
+          (this.closest && this.closest("[contenteditable]:not([contenteditable=false])"));
+        const t = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("placeholder") || this.getAttribute("name") ||
+          (editable ? this.getAttribute("role") : ""))) || (editable ? "" : (this.innerText || "").trim());
         return this.tagName ? this.tagName.toLowerCase() + (t ? ' "' + String(t).replace(/\\s+/g, " ").slice(0, 40) + '"' : "") : "element";
       }`,
     ).catch(() => "element");
@@ -465,11 +490,16 @@ class Agent {
     const text = String(req.text ?? "");
     const sid = page.sessionId;
     const objectId = await this.objectOf(page, node);
+    await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "nothing was typed");
+    // Named before anything is typed, from its names only.
+    const label = await this.label(page, objectId);
     await this.centre(page, node).catch(() => {}); // scrolled into view, where the watcher sees it
     const kind = await this.callOn(
       page,
       objectId,
       `function (append, text) {
+        // Disabled or read-only, nothing is changed, whatever the element.
+        if (this.disabled || (this.closest && this.closest("fieldset:disabled"))) return { field: true, refused: "it's disabled" };
         if (this.tagName === "SELECT") {
           const opt = [...this.options].find((o) => o.value === text || o.label.trim() === text || o.text.trim() === text);
           if (!opt) return { select: false, options: [...this.options].map((o) => o.label.trim() || o.value).slice(0, 50) };
@@ -483,14 +513,16 @@ class Agent {
         if (!field && !this.isContentEditable) return { field: false };
         const ac = String(this.getAttribute("autocomplete") || "").toLowerCase();
         const secret = this.type === "password" || /(^|\\s)(cc-|one-time-code|current-password|new-password)/.test(ac);
-        if (this.disabled || this.closest("fieldset:disabled")) return { field: true, refused: "it's disabled", secret };
         if (field && this.readOnly) return { field: true, refused: "it's read-only", secret };
         if (field && this.tagName === "INPUT" && !/^(|text|search|url|tel|email|password|number)$/i.test(this.type)) {
           return { field: true, refused: \`it's an input of type \${this.type}\`, secret };
         }
         this.focus();
-        // Typing goes wherever focus is: it must be this field (or inside it).
-        if (!(doc.activeElement === this || this.contains(doc.activeElement))) return { field: true, refused: "it won't take focus", secret };
+        // Typing goes wherever focus is: it must be this field (or inside it),
+        // looking through shadow roots (a field in one focuses its host).
+        let active = doc.activeElement;
+        while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
+        if (!(active === this || this.contains(active))) return { field: true, refused: "it won't take focus", secret };
         if (field) {
           const end = this.value.length;
           try { append ? this.setSelectionRange(end, end) : this.select(); } catch { if (!append) this.select && this.select(); }
@@ -518,7 +550,7 @@ class Agent {
     else if (!req.append) await this.pressKey(page, "Delete");
     if (req.submit) await this.pressKey(page, "Enter");
     // What was typed is never shown (nor is a password field's name worth the risk).
-    this.note(kind.secret ? "typed into a password field" : `typed into ${await this.label(page, objectId)}`);
+    this.note(kind.secret ? "typed into a password field" : `typed into ${label}`);
     return { tab: page.num, ref: req.ref, typed: text.length };
   }
 
@@ -539,6 +571,7 @@ class Agent {
     if (!keys.length) throw new CtlError("key needs a key, such as Enter, Tab, ctrl+a or ArrowDown", EXIT.usage);
     for (const k of keys) parseKey(k); // all valid before any is pressed
     const page = this.page(req.tab);
+    await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "no keys pressed");
     for (const k of keys) await this.pressKey(page, k);
     this.note(`pressed ${keys.join(" ")}`);
     return { tab: page.num, keys };
@@ -592,7 +625,8 @@ class Agent {
       const fresh = !navigation || page.navStarted === 0;
       const state = fresh ? await this.evalValue(page, "[document.readyState, location.href]").catch(() => null) : null;
       // (termium's own blank page isn't loaded yet; a page's real #termium-... fragment is.)
-      const complete = state?.[0] === "complete" && !this.app.isPlaceholder(String(state?.[1] ?? ""));
+      // (A page opened blank, as a session started without a URL has, is loaded when not navigating.)
+      const complete = state?.[0] === "complete" && (!navigation || !this.app.isPlaceholder(String(state?.[1] ?? "")));
       if (complete && !page.loading) return;
       // A same-document navigation (only the #fragment changed) never says it stopped loading.
       if (complete) {

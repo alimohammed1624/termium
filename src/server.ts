@@ -11,7 +11,7 @@ import { createServer, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { App } from "./app";
-import { CtlError, runCtl, type CtlRequest } from "./agent";
+import { ACTING, CtlError, EXIT, runCtl, type CtlRequest } from "./agent";
 import {
   clearOwner,
   findBrowser,
@@ -839,15 +839,35 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   // terminal (if any) keeps its screen and input, and sees what the agent
   // does to the pages.
   const ctlConns = new Set<Conn>();
+  /**
+   * Commands that act (move focus, type, click, open, switch or close tabs)
+   * run one at a time, in order: two agents' `type`s never interleave their
+   * focus and text. Reading ones (tabs, snapshot, text, shot, eval, wait)
+   * don't wait their turn.
+   */
+  let ctlQueue: Promise<unknown> = Promise.resolve();
   const onCtl = async (c: Conn, req: CtlRequest) => {
     const reply = (msg: object) => void c.end({ t: "ctl", ...msg });
     if (shuttingDown) return reply({ ok: false, code: 1, error: `session "${name}" is ending` });
     // An agent counts as using the session: it isn't ended for want of a terminal.
     everAttached = true;
     try {
-      if (!app) await startApp(lastHello ?? {});
+      // Still starting (a restart reopening its tabs, say): wait for it, as long as the command may take.
+      const budget = Math.min(Math.max(Number(req?.timeoutMs) || 30_000, 1000), 10 * 60_000);
+      const started = await Promise.race([startApp(lastHello ?? {}).then(() => true), Bun.sleep(budget).then(() => false)]);
+      if (!started && !shuttingDown) return reply({ ok: false, code: EXIT.timeout, error: `session "${name}" is still starting; try again` });
       if (!app || !appReady || !cdp || shuttingDown) return reply({ ok: false, code: 1, error: `session "${name}" couldn't start its browser` });
-      const result = await runCtl(app, cdp, req, { devtools: browser?.devtools ?? null, log });
+      const a = app;
+      const d = cdp;
+      const run = () => runCtl(a, d, req, { devtools: browser?.devtools ?? null, log });
+      let result: unknown;
+      if (ACTING.has(String(req?.cmd))) {
+        const turn = ctlQueue.then(run, run);
+        ctlQueue = turn.catch(() => {});
+        result = await turn;
+      } else {
+        result = await run();
+      }
       reply({ ok: true, result });
     } catch (e: any) {
       const code = e instanceof CtlError ? e.code : 1;
@@ -855,6 +875,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       reply({ ok: false, code, error: e?.message ?? String(e) });
     }
   };
+
 
   const onClose = (c: Conn) => {
     ctlConns.delete(c);
