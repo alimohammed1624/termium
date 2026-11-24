@@ -162,8 +162,7 @@ try:
                              "--directory", os.path.join(ROOT, "tests", "fixtures")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
     hprof = os.path.join(tmp, "hidpi")
-    hd = Term(["bun", main, "--profile", hprof, f"http://127.0.0.1:{hport}/anim.html"], cwd=ROOT, cols=100, rows=30, cell_w=20, cell_h=40,
-              env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+    hd = Term(["bun", main, "--profile", hprof, f"http://127.0.0.1:{hport}/anim.html"], cwd=ROOT, cols=100, rows=30, cell_w=20, cell_h=40)
     def viewport():
         r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), hprof, "[innerWidth, innerHeight, devicePixelRatio]"],
                            capture_output=True, text=True, timeout=20)
@@ -229,8 +228,7 @@ try:
                               "--directory", os.path.join(ROOT, "tests", "fixtures")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
     qprof = os.path.join(tmp, "samesite")
-    q = Term(["bun", main, "--profile", qprof, f"http://127.0.0.1:{hport}/samesite.html?port={hport2}"], cwd=ROOT,
-             env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+    q = Term(["bun", main, "--profile", qprof, f"http://127.0.0.1:{hport}/samesite.html?port={hport2}"], cwd=ROOT)
     q.wait_frames(1, 25); time.sleep(5)
     def q_state():
         r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), qprof, "window.termiumState ? termiumState() : null"],
@@ -252,7 +250,7 @@ try:
     dprof = os.path.join(tmp, "datap")
     dp = Term(["bun", main, "--profile", dprof,
                "data:text/html,<input id=i autofocus onpaste=\"event.preventDefault(); this.value = event.clipboardData.getData('text').toUpperCase()\">"],
-              cwd=ROOT, env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+              cwd=ROOT)
     dp.wait_frames(1, 25); time.sleep(4)
     dp.click(222 + 30, 40 + 15); time.sleep(0.3)
     dp.paste("hello paste"); time.sleep(1.0)
@@ -265,7 +263,7 @@ try:
     fprof = os.path.join(tmp, "datapf")
     inner = "<input id=j autofocus onpaste=&quot;event.preventDefault(); this.value = event.clipboardData.getData('text').toUpperCase()&quot;>"
     fp = Term(["bun", main, "--profile", fprof, f'data:text/html,<iframe id=f srcdoc="{inner}" width=300 height=60></iframe>'],
-              cwd=ROOT, env={"TERMIUM_TEST_DEVTOOLS_PORT": "1"})
+              cwd=ROOT)
     fp.wait_frames(1, 25); time.sleep(4)
     fp.click(222 + 40, 40 + 25); time.sleep(0.3)
     fp.paste("token"); time.sleep(1.0)

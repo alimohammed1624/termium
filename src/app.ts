@@ -44,6 +44,8 @@ import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Ste
 // ---------------------------------------------------------------- model
 
 export interface Page {
+  /** A short number for the page, unique in the session. */
+  num: number;
   targetId: string;
   sessionId: string;
   url: string;
@@ -91,6 +93,24 @@ export interface Page {
   awaitingShape?: boolean;
   /** Screencast starts that failed in a row (retried a while). */
   castRetries?: number;
+  /** When termium last put its viewport back after another DevTools client changed it. */
+  reassertedAt?: number;
+  /** A navigation of its main frame has started and not yet committed (its old document still answers). */
+  navigating?: boolean;
+  /** A size check after a resize, pending (see sizeChanged). */
+  sizeCheck?: ReturnType<typeof setTimeout>;
+  /**
+   * The page's size in CSS px while another DevTools client holds it at
+   * one of its own (see holdsForeignSize): frames are drawn stretched to
+   * the pane, and the mouse is mapped to match.
+   */
+  actual?: { w: number; h: number };
+  /** Checks, while `actual` is set, whether that client has let go. */
+  foreignTimer?: ReturnType<typeof setInterval>;
+  /** termium's viewport failed to take this many times in a row (a page busy loading can miss it). */
+  foreignTries?: number;
+  loadingTries?: number;
+  foreignPolls?: number;
 }
 
 interface Tab {
@@ -318,6 +338,7 @@ export class App {
   private nextTabId = 1;
   private nextSpaceId = 1;
   private nextMarker = 1;
+  private nextPageNum = 1;
   private placements = new Map<string, Placement>(); // by marker
   /** Keys whose keydown went to a page, and which page, so the keyup follows it. */
   private pageKeysDown = new Map<string, { page: Page; ev: KeyEvent }>();
@@ -363,8 +384,20 @@ export class App {
       this.queueChrome();
     });
     cdp.on("Page.screencastFrame", (p, sid) => this.onFrame(p, sid));
+    // Whoever resized it: termium, or another DevTools client (see sizeChanged).
+    cdp.on("Page.frameResized", (_p, sid) => {
+      const page = sid ? this.pages.get(sid) : undefined;
+      if (page) this.sizeChanged(page);
+    });
     cdp.on("Page.frameStartedLoading", (p, sid) => this.setLoading(sid, p.frameId, true));
     cdp.on("Page.frameStoppedLoading", (p, sid) => this.setLoading(sid, p.frameId, false));
+    const navigating = (on: boolean) => (p: any, sid?: string) => {
+      const page = sid ? this.pages.get(sid) : undefined;
+      if (page && (p.frameId ?? p.frame?.id) === page.targetId) page.navigating = on;
+    };
+    cdp.on("Page.frameStartedNavigating", navigating(true));
+    cdp.on("Page.frameNavigated", navigating(false));
+    cdp.on("Page.frameStoppedLoading", navigating(false));
     cdp.on("Page.navigatedWithinDocument", (p, sid) => {
       const page = sid ? this.pages.get(sid) : undefined;
       if (page && p.frameId === page.targetId) void this.refreshInfo(page);
@@ -728,6 +761,7 @@ export class App {
     }
 
     const page: Page = {
+      num: 0, // numbered below, once it's known to stay
       targetId: targetInfo.targetId,
       sessionId,
       url: targetInfo.url,
@@ -778,6 +812,7 @@ export class App {
       placement = { kind: "tab", space, index, editUrl: false, background };
     }
 
+    page.num = this.nextPageNum++;
     this.pages.set(sessionId, page);
     this.byTarget.set(page.targetId, page);
 
@@ -847,6 +882,7 @@ export class App {
 
   private onGone(page: Page | undefined): void {
     if (!page) return;
+    this.clearForeign(page);
     if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
@@ -1515,9 +1551,13 @@ export class App {
   private async applyViewport(page: Page): Promise<void> {
     const sid = page.sessionId;
     const want = page.css;
+    // Applied before, but another DevTools client (an agent's Puppeteer or
+    // Playwright) may have changed it meanwhile: checked again.
+    if (want && sameSize(page.appliedCss, want) && !(await this.viewportIs(page, want))) page.appliedCss = null;
     if (want && !sameSize(page.appliedCss, want)) {
       page.viewportAt = Date.now();
       page.awaitingShape = true;
+      let took = false;
       for (let attempt = 0; attempt < 4; attempt++) {
         await this.cdp.send("Emulation.setDeviceMetricsOverride", {
           width: want.w,
@@ -1529,10 +1569,12 @@ export class App {
           screenHeight: Math.max(want.h + 120, 1080),
         }, sid);
         // A busy page can drop the change: confirm it and send it again if not.
-        if (await this.viewportIs(page, want)) break;
+        if ((took = await this.viewportIs(page, want))) break;
         await Bun.sleep(80 * (attempt + 1));
       }
       page.appliedCss = want;
+      if (!took) await this.holdsForeignSize(page, want);
+      else this.clearForeign(page);
       // (window.outerWidth/outerHeight stay at the headless window's size:
       // resizing that window shrinks the captured frames. See README.)
     }
@@ -1548,6 +1590,108 @@ export class App {
       await this.cdp.send("Page.startScreencast", { format: "png", maxWidth: cast.w, maxHeight: cast.h, everyNthFrame: 1 }, sid);
       page.appliedCast = cast;
     }
+  }
+
+  /**
+   * The page was resized. If it's shown and no longer termium's size,
+   * another DevTools client changed it (Puppeteer's default 800x600,
+   * setViewport, or its override going away as it disconnects): termium
+   * puts its own back (see holdsForeignSize for when that client's
+   * override holds). Hidden pages are checked when they're shown.
+   */
+  private sizeChanged(page: Page): void {
+    if (page.sizeCheck) return;
+    page.sizeCheck = setTimeout(async () => {
+      page.sizeCheck = undefined;
+      const css = page.css;
+      if (!css || !this.geom.has(page) || !this.pages.has(page.sessionId)) return;
+      if (page.actual) return void this.checkForeign(page);
+      const size = await this.pageSize(page);
+      if (!size || (Math.abs(size.w - css.w) <= 1 && Math.abs(size.h - css.h) <= 1) || page.css !== css) return;
+      if (Date.now() - (page.reassertedAt ?? 0) < 1000) return;
+      page.reassertedAt = Date.now();
+      this.opts.log(`page ${page.num}: resized to ${size.w}x${size.h} by another client; restoring ${css.w}x${css.h}`);
+      this.reassertViewport(page);
+    }, 150);
+  }
+
+  /** Sends the page its viewport again (another DevTools client changed it). */
+  private reassertViewport(page: Page): void {
+    page.appliedCss = null;
+    page.queuedKey = null;
+    if (this.geom.has(page)) this.showPage(page);
+  }
+
+  /** The page's size as it reports it, in CSS px (null if it doesn't answer). */
+  private async pageSize(page: Page): Promise<{ w: number; h: number } | null> {
+    const probe = this.cdp
+      .send("Runtime.evaluate", { expression: "[innerWidth, innerHeight]", returnByValue: true }, page.sessionId)
+      .then((r) => {
+        const [w, h] = (r?.result?.value ?? []) as number[];
+        return typeof w === "number" && typeof h === "number" ? { w, h } : null;
+      })
+      .catch(() => null);
+    return Promise.race([probe, Bun.sleep(1000).then(() => null)]);
+  }
+
+  /**
+   * termium's viewport didn't take: another DevTools client holds the page
+   * at its own size (its override outranks termium's while it stays
+   * connected, and the screencast doesn't say so). The page is shown at
+   * that size, stretched to the pane, with the mouse mapped to match,
+   * until that client lets go; then termium's size is put back.
+   */
+  private async holdsForeignSize(page: Page, want: { w: number; h: number }): Promise<void> {
+    const size = await this.pageSize(page);
+    if (!size || (Math.abs(size.w - want.w) <= 1 && Math.abs(size.h - want.h) <= 1)) return this.clearForeign(page);
+    // A page busy loading can miss it too (its old document answers, at the
+    // old size): tried again a moment later, and while it's loading, again
+    // until it has loaded (up to 15 s).
+    if (!page.actual) {
+      const loading = page.loading || page.navigating || page.navStarted !== 0;
+      if (loading) page.loadingTries = (page.loadingTries ?? 0) + 1;
+      else page.foreignTries = (page.foreignTries ?? 0) + 1;
+      if (loading ? page.loadingTries! <= 30 : page.foreignTries! < 2) {
+        setTimeout(() => {
+          if (this.pages.has(page.sessionId) && !page.actual) this.reassertViewport(page);
+        }, 500);
+        return;
+      }
+    }
+    page.foreignTries = page.loadingTries = 0;
+    const known = page.actual;
+    page.actual = size;
+    if (known && known.w === size.w && known.h === size.h) return;
+    this.opts.log(`page ${page.num}: another DevTools client holds it at ${size.w}x${size.h}`);
+    if (page === this.focused) this.showToast(`Another DevTools client set this page to ${size.w}x${size.h}; termium's size comes back when it disconnects`, 5000);
+    page.foreignTimer ??= setInterval(() => void this.checkForeign(page), 1500);
+  }
+
+  private async checkForeign(page: Page): Promise<void> {
+    // Gone, or no longer shown (it's checked again when it is).
+    if (!this.pages.has(page.sessionId) || !this.geom.has(page) || !page.css) return this.clearForeign(page);
+    const size = await this.pageSize(page);
+    const css = page.css;
+    if (!size || !page.actual) return;
+    if (Math.abs(size.w - css.w) <= 1 && Math.abs(size.h - css.h) <= 1) {
+      this.opts.log(`page ${page.num}: back to termium's size`);
+      this.clearForeign(page);
+    } else if (size.w !== page.actual.w || size.h !== page.actual.h) {
+      // That client let go (or changed it again): termium's size, if it takes.
+      this.opts.log(`page ${page.num}: now ${size.w}x${size.h}; restoring ${css.w}x${css.h}`);
+      page.actual = size;
+      this.reassertViewport(page);
+    } else if ((page.foreignPolls = (page.foreignPolls ?? 0) + 1) % 4 === 0) {
+      // Unchanged: tried again now and then all the same, in case it was let go unseen.
+      this.reassertViewport(page);
+    }
+  }
+
+  private clearForeign(page: Page): void {
+    if (page.foreignTimer) clearInterval(page.foreignTimer);
+    page.foreignTimer = undefined;
+    page.actual = undefined;
+    page.foreignTries = page.loadingTries = page.foreignPolls = 0;
   }
 
   /** Whether the page reports the viewport it was given (unknown, e.g. a page in a dialog, counts as yes). */
@@ -1676,8 +1820,8 @@ export class App {
     // one follows. Outside that window, every frame is shown.
     const recent = Date.now() - (page.viewportAt ?? 0) < 2000;
     if (page.awaitingShape && (!recent || (page.css && frameFits(p.data, page.css)))) page.awaitingShape = false;
-    if (page.css && recent && ((m && (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1)) ||
-        (page.awaitingShape && !frameFits(p.data, page.css)))) {
+    const otherSize = !!(page.css && m && (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1));
+    if (page.css && recent && (otherSize || (page.awaitingShape && !frameFits(p.data, page.css)))) {
       this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
       return;
     }
@@ -3403,8 +3547,10 @@ export class App {
     if (!g || !page.css) return;
     const devW = g.content.cols * this.cellW;
     const devH = g.content.rows * this.cellH;
-    const x = Math.max(0, Math.min(page.css.w - 1, ((px - (g.content.col - 1) * this.cellW) * page.css.w) / devW));
-    const y = Math.max(0, Math.min(page.css.h - 1, ((py - (g.content.row - 1) * this.cellH) * page.css.h) / devH));
+    // The page's real size: another DevTools client may hold it at its own (see onFrame).
+    const size = page.actual ?? page.css;
+    const x = Math.max(0, Math.min(size.w - 1, ((px - (g.content.col - 1) * this.cellW) * size.w) / devW));
+    const y = Math.max(0, Math.min(size.h - 1, ((py - (g.content.row - 1) * this.cellH) * size.h) / devH));
     const modifiers = modBits(ev.mods);
     const sid = page.sessionId;
     const send = (params: object) => this.cdp.send("Input.dispatchMouseEvent", params, sid).catch(() => {});

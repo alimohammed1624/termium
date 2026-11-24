@@ -85,7 +85,7 @@ def state(match="page.html"):
     return None
 
 t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "--profile", profile], cols=160, rows=45, cwd=ROOT,
-         env={"TERMIUM_TEST_DEVTOOLS_PORT": "1", "TERMIUM_DOWNLOAD_DIR": dl_dir})
+         env={"TERMIUM_DOWNLOAD_DIR": dl_dir})
 try:
     # 1. starts with the URL bar focused; type a URL
     check("starts with the URL bar focused", t.wait_for(lambda: not t.screen.cursor.hidden and t.screen.cursor.y == 1, 20))

@@ -1,7 +1,6 @@
 // Test helper: evaluate an expression in every page of a running termium's
-// browser and print JSON. termium talks to its browser over a pipe; tests
-// start it with TERMIUM_TEST_DEVTOOLS_PORT=1 so the browser also opens a
-// DevTools port (found through the profile's DevToolsActivePort).
+// browser and print JSON, through the browser's DevTools port (every
+// session has one, on loopback; found through the profile's DevToolsActivePort).
 // Usage: bun tests/support/cdp-eval.ts <profile-dir> <expression>
 import { readFileSync } from "node:fs";
 const [profile, expr] = process.argv.slice(2);

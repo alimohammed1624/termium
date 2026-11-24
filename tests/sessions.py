@@ -25,7 +25,7 @@ tmp = tempfile.mkdtemp(prefix="tss-")
 rt = os.path.join(tmp, "run"); os.makedirs(rt)
 prof = os.path.join(tmp, "profile")
 TMPD = os.path.join(tmp, "t"); os.makedirs(TMPD)  # the servers' temp dir: leftovers are looked for only here
-ENV = {"XDG_RUNTIME_DIR": rt, "TERMIUM_TEST_DEVTOOLS_PORT": "1", "TMPDIR": TMPD,
+ENV = {"XDG_RUNTIME_DIR": rt, "TMPDIR": TMPD,
        "XDG_DATA_HOME": os.path.join(tmp, "data"), "XDG_STATE_HOME": os.path.join(tmp, "state")}
 sockdir = os.path.join(rt, "termium")
 

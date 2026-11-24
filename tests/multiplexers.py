@@ -31,7 +31,7 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="termium-mux
 os.makedirs(OUT, exist_ok=True)
 tmp = tempfile.mkdtemp(prefix="tmx-")
 rt = os.path.join(tmp, "run"); os.makedirs(rt)
-ENV = {"XDG_RUNTIME_DIR": rt, "TERMIUM_TEST_DEVTOOLS_PORT": "1",
+ENV = {"XDG_RUNTIME_DIR": rt,
        "XDG_DATA_HOME": os.path.join(tmp, "data"), "XDG_STATE_HOME": os.path.join(tmp, "state")}
 # herdr runs from a home of its own: a fresh default config (as a new user has
 # it), and its sessions live there, never next to the user's.

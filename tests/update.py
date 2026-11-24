@@ -140,7 +140,7 @@ TMPD = os.path.join(tmp, "t"); os.makedirs(TMPD)
 sockdir = os.path.join(rt, "termium")
 def env_for(state, **extra):
     e = {"XDG_RUNTIME_DIR": rt, "XDG_DATA_HOME": os.path.join(tmp, "data"), "XDG_STATE_HOME": os.path.join(tmp, state),
-         "TMPDIR": TMPD, "TERMIUM_TEST_DEVTOOLS_PORT": "1", "CI": "", "TERMIUM_NO_UPDATE_CHECK": "",
+         "TMPDIR": TMPD, "CI": "", "TERMIUM_NO_UPDATE_CHECK": "",
          "TERMIUM_UPDATE_URL": f"{BASE}/latest", "TERMIUM_UPDATE_DOWNLOAD_URL": f"{BASE}/dl"}
     e.update(extra)
     return e

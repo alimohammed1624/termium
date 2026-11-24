@@ -347,10 +347,32 @@ export interface LaunchedBrowser {
   cdp: CDP;
   /** The browser's main process (the launcher may be a wrapper script). */
   browserPid: number;
+  /** Its DevTools endpoint for other programs (agents, Puppeteer...), on loopback; null if it never said. */
+  devtools: DevToolsEndpoint | null;
+}
+
+export interface DevToolsEndpoint {
+  port: number;
+  /** The browser target's WebSocket path, "/devtools/browser/<id>". */
+  path: string;
+}
+
+/** The endpoint the browser wrote to <profile>/DevToolsActivePort (port, then the browser's WebSocket path). */
+export function readDevToolsPort(profileDir: string): DevToolsEndpoint | null {
+  try {
+    const [port, path] = readFileSync(join(profileDir, "DevToolsActivePort"), "utf8").split("\n");
+    const n = Number(port);
+    if (!Number.isInteger(n) || n <= 0 || n > 65535 || !path?.startsWith("/devtools/browser/")) return null;
+    return { port: n, path: path.trim() };
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Starts the browser headless with DevTools on a private pipe. Its own
+ * Starts the browser headless with DevTools on a private pipe (termium's
+ * own connection) and on a loopback port that agents and tools can attach
+ * to (see `termium devtools`). Its own
  * output goes straight to `logPath`: piping it through our event loop could
  * fill the pipe and freeze the browser while we're busy writing frames.
  * `tmpDir`, if given, becomes the browser's TMPDIR (removed by the caller).
@@ -382,9 +404,14 @@ export async function launchBrowser(
     // Crash dumps stay with this profile rather than the user's own Helium config.
     `--crash-dumps-dir=${join(profileDir, "crashes")}`,
   ];
-  // Tests inspect pages over a DevTools port; termium itself never uses one.
-  if (process.env.TERMIUM_TEST_DEVTOOLS_PORT) args.push("--remote-debugging-port=0");
+  // A DevTools port for other programs (agents, Puppeteer, Playwright,
+  // chrome-devtools-mcp): any free port, on loopback only. termium itself
+  // keeps using the pipe.
+  args.push("--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1");
   args.push("about:blank");
+  // The port is read from this file once the browser is up: one left by an
+  // earlier run must not be mistaken for it.
+  rmSync(join(profileDir, "DevToolsActivePort"), { force: true });
 
   appendFileSync(logPath, `\n--- ${new Date().toISOString()} ${args.join(" ")}\n`);
   const logStart = statSync(logPath).size;
@@ -432,7 +459,10 @@ export async function launchBrowser(
     exited.catch(() => {});
     timeout.catch(() => {});
     writeOwner(profileDir, [...new Set([browserPid, proc.pid])]);
-    return { proc, cdp, browserPid };
+    // Written as the port opens, which may be just after the pipe answers.
+    let devtools: DevToolsEndpoint | null = null;
+    for (let i = 0; i < 100 && !(devtools = readDevToolsPort(profileDir)); i++) await Bun.sleep(50);
+    return { proc, cdp, browserPid, devtools };
   } catch (e) {
     proc.kill(9);
     exited.catch(() => {});
