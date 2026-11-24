@@ -733,6 +733,60 @@ try:
     holder.wait()
     stop("sklock")
 
+    # ------------------------------------------------ agents: termium start and ctl never check nor show update news
+    def agent(binary, *args, state, timeout=90, **extra):
+        # No terminal, as an agent's tool call.
+        return subprocess.run([binary, *args], env=dict(os.environ, **env_for(state, **extra)), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=timeout, start_new_session=True)
+    n = len(HITS)
+    r = agent(cur_bin, "start", "-s", "ag", "--incognito", PAGE, state="st-ag")
+    r2 = agent(cur_bin, "ctl", "-s", "ag", "tabs", state="st-ag")
+    r3 = agent(cur_bin, "ctl", "-s", "ag", "open", f"{BASE}/fixtures/reader.html", state="st-ag")
+    time.sleep(4)
+    check("agents: termium start and ctl work, and never check for updates", r.returncode == 0 and r2.returncode == 0 and r3.returncode == 0 and len(HITS) == n,
+          (r.returncode, r.stderr[-200:], r2.returncode, r2.stderr[-200:], r3.returncode, HITS[n:]))
+    at = term(cur_bin, "attach", "ag", state="st-ag")
+    check("agents: ...a terminal attaching later gets the check and the notice", at.wait_for(lambda: notice(at), 30) and len(HITS) == n + 1, (at.line(2), HITS[n:]))
+    open_box(at)
+    r4 = agent(cur_bin, "ctl", "-s", "ag", "tabs", state="st-ag")
+    time.sleep(1)
+    check("agents: a ctl request isn't an attach: the box the terminal opened stays open, no new check",
+          r4.returncode == 0 and box_open(at) and len(HITS) == n + 1, (r4.returncode, at.line(2), HITS[n:]))
+    at.key("escape")
+    stop("ag")
+
+    # ------------------------------------------------ restart keeps tabs other DevTools clients opened, on a new endpoint
+    inst_c = os.path.join(tmp, "inst-ctl"); os.makedirs(inst_c)
+    shutil.copy(cur_bin, os.path.join(inst_c, "termium"))
+    ac = term(os.path.join(inst_c, "termium"), "-s", "agr", "--incognito", PAGE, state="st-agr")
+    ac.wait_text("termium test page", 40)
+    def endpoint():
+        d = agent(os.path.join(inst_c, "termium"), "devtools", "agr", state="st-agr")
+        return d.stdout.strip() if d.returncode == 0 else None
+    before = endpoint()
+    ext = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "create", before or "", f"{BASE}/fixtures/reader.html?ext=1"],
+                         capture_output=True, text=True, timeout=30)
+    check("restart with agents: a DevTools client opens a tab", ext.returncode == 0 and ac.wait_for(lambda: "2" in ac.line(1) and "reader" in ac.line(1).lower(), 15),
+          (before, ext.stderr[-200:], ac.line(1)))
+    ac.wait_for(lambda: notice(ac), 30)
+    open_box(ac); ac.key("u")
+    ac.wait_for(lambda: f"updated to termium {NEXT}" in ac.text(), 60)
+    old_pid = server_pid("agr")
+    open_box(ac); ac.key("r")
+    check("restart with agents: the session restarts", ac.wait_for(lambda: server_pid("agr") not in (None, old_pid), 30) and
+          ac.wait_for(lambda: "Restarted:" in ac.text(), 40), output(ac)[-200:])
+    after = endpoint()
+    def page_urls(url):
+        import urllib.request
+        try:
+            return [p["url"] for p in json.load(urllib.request.urlopen(f"{url}/json/list", timeout=5)) if p.get("type") == "page"]
+        except Exception as e:
+            return [repr(e)]
+    check("restart with agents: the DevTools endpoint is back, on its new port, and termium devtools reports it",
+          after and after != before and any("page.html" in u for u in page_urls(after)), (before, after, page_urls(after) if after else None))
+    check("restart with agents: the tab the DevTools client opened is reopened", ac.wait_for(lambda: any("ext=1" in u for u in page_urls(after)), 20), page_urls(after))
+    stop("agr")
+
     # ------------------------------------------------ two updaters at once never downgrade
     for i in range(3):
         cc = os.path.join(tmp, f"inst-race{i}"); os.makedirs(cc)
@@ -854,7 +908,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "sk2", "relb", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "sk2", "relb", "ag", "agr", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)
