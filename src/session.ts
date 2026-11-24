@@ -12,7 +12,7 @@
 //               client to send {t:"ack", seq} once its terminal took the
 //               text, which paces the browser's screencast.
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -235,4 +235,70 @@ export class FrameReader {
     }
     if (this.start === this.end) this.start = this.end = 0;
   }
+}
+
+// ------------------------------------------------------------ restarts
+//
+// Restarting a session (into an updated termium) closes its browser and
+// starts a new server: the old one leaves the session's layout and launch
+// options in <name>.restore in the socket directory (private to this user,
+// usually tmpfs), and the next server of that name reopens it and removes
+// the file. Pages reload from their URLs; logins survive in the profile.
+
+/** A pane tree as saved for a restart: leaves are page URLs ("" for a blank page). */
+export type SavedNode = { url: string } | { dir: "h" | "v"; ratio: number; a: SavedNode; b: SavedNode };
+
+export interface SavedLayout {
+  spaces: { name: string; active: number; tabs: { root: SavedNode; focus: number; zoomed: boolean }[] }[];
+  activeSpace: number;
+  sidebar: boolean;
+  zoom: number;
+}
+
+export interface Restore {
+  v: 1;
+  /** When it was written (ms): an old file is ignored. */
+  at: number;
+  /** The termium version that wrote it. */
+  from: string;
+  launch: { browser?: string; profile?: string; incognito: boolean; scale: number | null; search: string };
+  layout: SavedLayout;
+}
+
+/** How long a restore file is good for. */
+const RESTORE_MAX_AGE_MS = 10 * 60 * 1000;
+
+export function restorePath(name: string, dir = socketDir()): string {
+  return join(dir, `${name}.restore`);
+}
+
+/** The restore file for `name` if there's a recent one (left in place). */
+export function readRestore(name: string, dir?: string): Restore | null {
+  try {
+    const r = JSON.parse(readFileSync(restorePath(name, dir), "utf8"));
+    if (r?.v !== 1 || !r.layout || !Array.isArray(r.layout.spaces) || !r.launch) return null;
+    if (!(Date.now() - Number(r.at) < RESTORE_MAX_AGE_MS)) return null;
+    return r as Restore;
+  } catch {
+    return null;
+  }
+}
+
+/** Reads and removes the restore file for `name` (null if none, or too old). */
+export function takeRestore(name: string, dir?: string): Restore | null {
+  let path: string;
+  try {
+    path = restorePath(name, dir);
+  } catch {
+    return null;
+  }
+  const r = readRestore(name, dir);
+  rmSync(path, { force: true });
+  return r;
+}
+
+export function writeRestore(name: string, r: Restore, dir?: string): void {
+  const path = restorePath(name, dir);
+  rmSync(path, { force: true });
+  writeFileSync(path, JSON.stringify(r), { mode: 0o600, flag: "wx" });
 }

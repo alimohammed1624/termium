@@ -9,6 +9,7 @@ import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lockHolder, pidAlive } from "./browser";
+import { VERSION } from "./version";
 import { InputParser, type InputEvent } from "./input";
 import type { Hello } from "./server";
 import { stateDir } from "./server";
@@ -24,6 +25,7 @@ import {
   sessionPaths,
   socketDir,
   sweepErrFiles,
+  DEFAULT_SESSION,
   GRAPHICS_FILE_PREFIX,
   graphicsDir,
   sweepGraphicsFiles,
@@ -41,6 +43,10 @@ export interface ClientOptions {
   /** argv that starts the session server. */
   serverArgv: string[];
   version: string;
+  /** Wants update news from the session (no --no-update-check, TERMIUM_NO_UPDATE_CHECK or CI). */
+  updateCheck: boolean;
+  /** argv that runs the termium on disk to start this session again after a restart (see "restart" below). */
+  restartArgv: string[];
 }
 
 function fail(msg: string, code = 2): never {
@@ -283,8 +289,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
   let serverPid = 0;
 
   let leaving = false;
-  /** Gives the terminal back and exits, saying why. */
-  const leave = async (code: number, message?: string) => {
+  /** Gives the terminal back and exits, saying why (or, with `then`, runs that instead of exiting). */
+  const leave = async (code: number, message?: string, then?: () => Promise<void>) => {
     if (leaving) return;
     leaving = true;
     await Promise.race([drained(), Bun.sleep(500)]);
@@ -295,7 +301,29 @@ export async function runClient(o: ClientOptions): Promise<void> {
     if (message) (code === 0 ? console.log : console.error)(message);
     conn?.destroy();
     graphicsFiles.clear();
+    if (then) await then();
     process.exit(code);
+  };
+
+  /**
+   * The session ended to restart into the termium now on disk: once its
+   * server is gone, this process becomes that termium (exec), which starts
+   * the session again with the layout the old server left behind.
+   */
+  const restartInto = async () => {
+    process.stdin.pause();
+    process.stdin.removeAllListeners("data");
+    for (let i = 0; i < 200 && serverPid && pidAlive(serverPid); i++) await Bun.sleep(50);
+    rmSync(errPath, { force: true });
+    try {
+      process.execve!(o.restartArgv[0]!, o.restartArgv, process.env);
+    } catch (e: any) {
+      console.error(
+        `termium: couldn't restart (${e?.message ?? e}). Run \`termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`}\` ` +
+          `within 10 minutes and its spaces and tabs reopen.`,
+      );
+      process.exit(1);
+    }
   };
 
   process.stdin.setRawMode(true);
@@ -674,8 +702,20 @@ export async function runClient(o: ClientOptions): Promise<void> {
           return void leave(0, `[detached (from session ${o.name})]`);
         case "takeover":
           return void leave(0, `[detached (session ${o.name} was attached from another terminal)]`);
-        case "error":
-          return void leave(code || 1, `termium: ${m.message ?? "the session ended with an error"}`);
+        case "restart":
+          return void leave(0, `[restarting session ${o.name} into the updated termium]`, restartInto);
+        case "error": {
+          let msg = `termium: ${m.message ?? "the session ended with an error"}`;
+          // Refused before it ever answered: a session of another termium version
+          // (one started before an update, say).
+          if (!welcomed && /can't talk to this termium/.test(String(m.message))) {
+            msg +=
+              `\n  It was started by another version of termium (before an update?). To use termium ${o.version}, ` +
+              `end it first: termium kill ${o.name}   (its pages close), then run termium again. ` +
+              `Or start another session: termium -s NAME`;
+          }
+          return void leave(code || 1, msg);
+        }
         default:
           return void leave(code);
       }
@@ -712,6 +752,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     // A session we just started opens the URL itself.
     url: o.url,
     starter: child?.pid,
+    updateCheck: o.updateCheck,
   } satisfies Hello);
   for (const ev of pending.splice(0)) send({ t: "input", ev });
   // The server answers an attach at once (before it draws anything).
@@ -772,6 +813,22 @@ async function sessionInfo(name: string): Promise<any | null> {
   });
 }
 
+/** Running sessions and the termium version each runs (for `termium update`). */
+export async function runningSessions(): Promise<{ name: string; version: string | null }[]> {
+  let dir: string;
+  try {
+    dir = socketDir();
+  } catch {
+    return [];
+  }
+  const found: { name: string; version: string | null }[] = [];
+  for (const name of sessionNames(dir)) {
+    const info = await sessionInfo(name);
+    if (info) found.push({ name, version: typeof info.version === "string" ? info.version : null });
+  }
+  return found;
+}
+
 export async function listSessions(): Promise<void> {
   let dir: string;
   try {
@@ -785,7 +842,11 @@ export async function listSessions(): Promise<void> {
     const info = await sessionInfo(name);
     if (!info) continue;
     if (info.unresponsive) rows.push([name, String(info.pid ?? "?"), "not responding", "", ""]);
-    else rows.push([name, String(info.pid), info.attached ? "attached" : "detached", `${info.pages} page${info.pages === 1 ? "" : "s"}`, info.profile]);
+    else {
+      // A session started by another termium (before an update, say) says which.
+      const other = info.version && info.version !== VERSION ? `  (termium ${info.version})` : "";
+      rows.push([name, String(info.pid), info.attached ? "attached" : "detached", `${info.pages} page${info.pages === 1 ? "" : "s"}`, info.profile + other]);
+    }
   }
   if (rows.length === 0) {
     console.error("termium: no sessions");

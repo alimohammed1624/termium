@@ -25,8 +25,32 @@ import {
 } from "./browser";
 import { CDP } from "./cdp";
 import type { InputEvent } from "./input";
-import { DEFAULT_SESSION, FrameReader, PROTOCOL, dial, jsonFrame, outputFrame, sessionPaths, sweepGraphicsFiles } from "./session";
+import {
+  DEFAULT_SESSION,
+  FrameReader,
+  PROTOCOL,
+  dial,
+  jsonFrame,
+  outputFrame,
+  sessionPaths,
+  sweepGraphicsFiles,
+  takeRestore,
+  writeRestore,
+  type Restore,
+} from "./session";
 import { setSink } from "./terminal";
+import {
+  MAX_AGE_MS,
+  cachePath,
+  cachedNewer,
+  checkAndCache,
+  displayVersion,
+  isNewer,
+  loadCache,
+  selfUpdate,
+  selfUpdateBlocker,
+  skipVersion,
+} from "./update";
 
 export interface LaunchOptions {
   url: string | null;
@@ -57,6 +81,8 @@ export interface Hello {
   via?: string;
   /** Open this in a new tab (attaching to a session that's already running). */
   url?: string | null;
+  /** This terminal wants update news: the session checks for a newer termium while it's attached. */
+  updateCheck?: boolean;
   /**
    * Pid of the server this client started, if any: that server opened the
    * URL itself (so it's not opened twice), and only that one may be
@@ -286,6 +312,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     die(`session "${name}" is already running`, 3);
   }
   writeFileSync(paths.pid, `${process.pid}\n`, { mode: 0o600 });
+  // Restarted (into an updated termium): what the session had open.
+  const restore = takeRestore(name);
+  if (restore) log(`restoring ${restore.layout.spaces.length} space(s) saved by termium ${restore.from}`);
 
   await sweepTemp();
   let profile: string;
@@ -337,7 +366,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     rmSync(paths.pid, { force: true });
   };
 
-  const shutdown = async (code: number, err?: unknown, requester?: Conn) => {
+  const shutdown = async (code: number, err?: unknown, requester?: Conn, reason?: "restart") => {
     if (shuttingDown) return;
     shuttingDown = true;
     if (app) app.closingAll = true;
@@ -380,7 +409,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     unlockProfile(profile);
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
     rmSync(browserTmp, { recursive: true, force: true });
-    const bye = { t: "bye", reason: err ? "error" : "exited", code, message: err ? (err instanceof Error ? err.message : String(err)) : undefined };
+    const bye = { t: "bye", reason: err ? "error" : (reason ?? "exited"), code, message: err ? (err instanceof Error ? err.message : String(err)) : undefined };
     await Promise.all([client?.end(bye), requester && requester !== client ? requester.end(bye) : undefined]);
     process.exit(code);
   };
@@ -426,6 +455,19 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         quit: () => void shutdown(0),
         detach: () => detachClient("detached"),
         log,
+        version,
+        update: {
+          blocker: () => selfUpdateBlocker(),
+          start: (tag) => void runSelfUpdate(tag),
+          skip: (tag) => {
+            try {
+              skipVersion(cacheFile, tag);
+            } catch (e) {
+              log(`update: can't save the skipped version: ${e}`);
+            }
+          },
+          restart: () => restartSession(),
+        },
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
       app.attach(terminalOf(lastHello ?? h));
@@ -433,7 +475,12 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       log(`start ${bin} dsf=${app.dsf}`);
       for (const ev of pending.splice(0)) app.handle(ev); // buffered by the app until ready
       try {
-        await app.start(args.url);
+        const notice = restore
+          ? restore.from !== version
+            ? `Restarted: termium ${restore.from} → ${version}`
+            : `Restarted: termium ${version}`
+          : undefined;
+        await app.start(args.url, restore?.layout, notice);
       } catch (e) {
         await shutdown(1, e);
         return;
@@ -441,7 +488,102 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       appReady = true;
       app.flushEarlyInput();
       for (const url of pendingUrls.splice(0)) app.openTab(url);
+      // The UI is up: now look for a newer termium (never before, never in the way).
+      if (client && lastHello) updatesOnAttach(lastHello);
     })());
+
+  // ------------------------------------------------------------ updates
+  //
+  // The session owns the update check, its cache and the update box, so
+  // they happen once however many times terminals attach: the check runs
+  // when an interactive terminal attaches (and the UI is up), at most once
+  // a day while one stays attached, never while detached; each offer is
+  // made once in a session's life.
+  const cacheFile = cachePath(logDir);
+  let wantsUpdates = false;
+  let checking = false;
+  let lastCheck = 0;
+  let updating = false;
+  /** The version a self-update installed (this session runs the old one until it restarts). */
+  let installed: string | null = null;
+
+  const runCheck = async () => {
+    if (checking || !client || !wantsUpdates || !appReady || shuttingDown) return;
+    if (lastCheck && Date.now() - lastCheck < MAX_AGE_MS) return;
+    checking = true;
+    lastCheck = Date.now();
+    try {
+      const r = await checkAndCache(cacheFile, version);
+      if (!r.ok) {
+        log(`update check: ${r.error}`);
+        return;
+      }
+      if (isNewer(r.tag, version)) {
+        log(`update check: termium ${displayVersion(r.tag)} is available`);
+        app?.updateAvailable(r.tag, loadCache(cacheFile)?.skipped !== r.tag);
+      }
+    } finally {
+      checking = false;
+    }
+  };
+  setInterval(() => void runCheck(), 60 * 60 * 1000).unref?.();
+
+  /** A terminal attached (and the UI is up): what's known at once, then a check if one is due. */
+  const updatesOnAttach = (h: Hello) => {
+    if (!app) return;
+    wantsUpdates = h.updateCheck === true;
+    app.setUpdatesShown(wantsUpdates);
+    // That terminal runs a newer termium: it's installed, and this session runs the old one.
+    if (typeof h.version === "string") app.newerInstalled(h.version);
+    if (installed) app.newerInstalled(installed);
+    if (!wantsUpdates) return;
+    const c = loadCache(cacheFile);
+    const tag = cachedNewer(c, version);
+    if (tag) app.updateAvailable(tag, c?.skipped !== tag);
+    void runCheck();
+  };
+
+  const runSelfUpdate = async (tag: string) => {
+    if (updating) return;
+    updating = true;
+    log(`updating to ${tag}`);
+    try {
+      await selfUpdate(tag, version, (step) => app?.updateStep(step));
+      installed = displayVersion(tag);
+      log(`updated the termium binary to ${tag}`);
+      app?.updateDone(tag, null);
+    } catch (e: any) {
+      log(`update to ${tag} failed: ${e?.message ?? e}`);
+      app?.updateDone(tag, e?.message ?? String(e));
+    } finally {
+      updating = false;
+    }
+  };
+
+  /**
+   * Restarts the session into the termium now on disk: its layout and
+   * launch options are left for the next server (see writeRestore), the
+   * browser is closed, and the attached client starts that server.
+   */
+  const restartSession = () => {
+    if (!app || shuttingDown) return;
+    if (!client) return;
+    const r: Restore = {
+      v: 1,
+      at: Date.now(),
+      from: version,
+      launch: { browser: args.browser, profile: args.profile, incognito: args.incognito, scale: args.scale, search: args.search },
+      layout: app.layoutSnapshot(),
+    };
+    try {
+      writeRestore(name, r);
+    } catch (e: any) {
+      app.showToast(`Can't restart: ${e?.message ?? e}`, 5000);
+      return;
+    }
+    log("restarting into the updated termium");
+    void shutdown(0, undefined, undefined, "restart");
+  };
 
   let lastHello: Hello | null = null;
   let appReady = false;
@@ -456,7 +598,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           t: "bye",
           reason: "error",
           code: 1,
-          message: `session "${name}" runs termium ${version}, which can't talk to this termium${h.version ? ` (${h.version})` : ""}. Use the same version, or another session name (-s).`,
+          message: `session "${name}" runs termium ${version}, which can't talk to this termium${h.version ? ` (${h.version})` : ""}.`,
+          version,
+          protocol: PROTOCOL,
         });
         return;
       }
@@ -527,6 +671,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           if (appReady) app.openTab(h.url);
           else pendingUrls.push(h.url);
         }
+        if (appReady) updatesOnAttach(h);
       }
       return;
     }

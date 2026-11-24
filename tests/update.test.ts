@@ -1,8 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { wrapWords } from "../src/app";
+import { readRestore, takeRestore, writeRestore, type Restore } from "../src/session";
 import {
   UPGRADE_CMD,
   cachedNewer,
@@ -231,4 +233,35 @@ test("installing replaces the binary atomically and leaves nothing behind", () =
   // An unwritable place fails cleanly.
   expect(() => installBinary(new TextEncoder().encode("x"), join(dir, "no-such-dir", "termium"))).toThrow(/cannot replace/);
   expect(readdirSync(dir)).toEqual(["termium"]);
+});
+
+test("restore files: private, read once, ignored when old", () => {
+  const dir = tempDir();
+  const r: Restore = {
+    v: 1,
+    at: Date.now(),
+    from: "0.3.0",
+    launch: { incognito: false, scale: null, search: "https://duckduckgo.com/?q=%s" },
+    layout: {
+      spaces: [{ name: "space 1", active: 0, tabs: [{ root: { dir: "h", ratio: 0.3, a: { url: "https://a.example/" }, b: { url: "" } }, focus: 1, zoomed: false }] }],
+      activeSpace: 0,
+      sidebar: true,
+      zoom: 1,
+    },
+  };
+  writeRestore("work", r, dir);
+  expect(statSync(join(dir, "work.restore")).mode & 0o777).toBe(0o600);
+  expect(readRestore("work", dir)).toEqual(r);
+  expect(takeRestore("work", dir)).toEqual(r);
+  expect(existsSync(join(dir, "work.restore"))).toBe(false);
+  expect(takeRestore("work", dir)).toBeNull();
+  writeRestore("work", { ...r, at: Date.now() - 60 * 60 * 1000 }, dir);
+  expect(takeRestore("work", dir)).toBeNull();
+  expect(existsSync(join(dir, "work.restore"))).toBe(false);
+});
+
+test("box text wraps at words", () => {
+  expect(wrapWords("curl -fsSL https://example.com/install.sh | sh", 30)).toEqual(["curl -fsSL", "https://example.com/install.sh", "| sh"]);
+  expect(wrapWords("abcdefghij", 4)).toEqual(["abcd", "efgh", "ij"]);
+  expect(wrapWords("", 10)).toEqual([]);
 });

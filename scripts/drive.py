@@ -81,6 +81,9 @@ class Term:
         under one temp dir removed on close or when Python exits."""
         self.passthrough = passthrough
         env = dict(env or {})
+        # No update check (GitHub, and an update box taking keys) unless a
+        # test asks for one (tests/update.py, with a fake GitHub).
+        env.setdefault("TERMIUM_NO_UPDATE_CHECK", "1")
         self.own_runtime = "XDG_RUNTIME_DIR" not in env
         self.own_root = None
         if self.own_runtime or "XDG_DATA_HOME" not in env or "XDG_STATE_HOME" not in env:

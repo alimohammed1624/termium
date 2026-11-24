@@ -5,15 +5,27 @@
 // background server process owning the browser (src/server.ts). It starts
 // the session first if it isn't running.
 
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import pkg from "../package.json" with { type: "json" };
-import { killSession, listSessions, runClient } from "./client";
-import { runServer, type LaunchOptions } from "./server";
-import { DEFAULT_SESSION, validSessionName } from "./session";
+import { killSession, listSessions, runClient, runningSessions } from "./client";
+import { runServer, stateDir, type LaunchOptions } from "./server";
+import { DEFAULT_SESSION, readRestore, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
 import { DEFAULT_SEARCH } from "./text";
-
-const VERSION: string = pkg.version;
+import {
+  UPGRADE_CMD,
+  cachePath,
+  checkAndCache,
+  checkEnabled,
+  compiledBinary,
+  displayVersion,
+  isNewer,
+  report,
+  selfUpdate,
+  selfUpdateBlocker,
+  stepLabel,
+} from "./update";
+import { VERSION } from "./version";
 
 const HELP = `termium ${VERSION}: a Chromium (Helium) browser in your terminal
 
@@ -23,6 +35,10 @@ Usage:
   termium attach [name]        attach to a running session
   termium ls                   list sessions
   termium kill [name]          end a session (stops its browser)
+  termium check-update         check for a newer termium release (exit 0: up to date,
+                               100: one is available, 1: could not check)
+  termium update               update termium to the latest release (exit 0: updated or
+                               already up to date, 1: failed)
 
 Options:
   -s, --session <name>  session to use (default: "${DEFAULT_SESSION}")
@@ -32,6 +48,8 @@ Options:
   --incognito           use a throwaway profile that is deleted when the session ends
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)
+  --no-update-check     don't check GitHub for a newer termium, nor offer to update
+                        (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help
   -V, --version         show the version
 
@@ -40,13 +58,16 @@ Ctrl+B d detaches (the browser keeps running); Ctrl+Q ends the session.
 Needs a terminal with the kitty graphics protocol, such as Ghostty, kitty or WezTerm
 (inside tmux: set -g allow-passthrough on). Press Ctrl+B then ? inside termium for keys.`;
 
-type Command = "open" | "attach" | "ls" | "kill" | "server";
+type Command = "open" | "attach" | "ls" | "kill" | "server" | "check-update" | "update";
 
 interface Args extends LaunchOptions {
   command: Command;
   session: string;
   /** The launch options given, by flag, for the "already running" message. */
   launchFlags: string[];
+  noUpdateCheck: boolean;
+  /** Start the session again as it was before a restart (internal: see client.ts restartInto). */
+  restore: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -54,6 +75,8 @@ function parseArgs(argv: string[]): Args {
     command: "open",
     session: DEFAULT_SESSION,
     launchFlags: [],
+    noUpdateCheck: false,
+    restore: false,
     url: null,
     incognito: false,
     scale: null,
@@ -67,6 +90,8 @@ function parseArgs(argv: string[]): Args {
   else if (first === "ls" || first === "list") args.command = "ls";
   else if (first === "kill") args.command = "kill";
   else if (first === "__server") args.command = "server";
+  else if (first === "check-update") args.command = "check-update";
+  else if (first === "update") args.command = "update";
   if (args.command !== "open") i = 1;
   const flag = (f: string) => {
     if (!args.launchFlags.includes(f)) args.launchFlags.push(f);
@@ -92,6 +117,8 @@ function parseArgs(argv: string[]): Args {
         args.session = value();
         sessionGiven = true;
         break;
+      case "--no-update-check": args.noUpdateCheck = true; break;
+      case "--restore": args.restore = true; break;
       case "--browser": args.browser = value(); flag("--browser"); break;
       case "--profile": args.profile = resolve(value()); flag("--profile"); break;
       case "--incognito": args.incognito = true; flag("--incognito"); break;
@@ -118,6 +145,7 @@ function parseArgs(argv: string[]): Args {
           break;
         }
         if (args.command === "ls") fail(`ls takes no arguments`);
+        if (args.command === "check-update" || args.command === "update") fail(`${args.command} takes no arguments`);
         if (args.url) fail("only one URL may be given");
         args.url = a;
     }
@@ -125,7 +153,7 @@ function parseArgs(argv: string[]): Args {
   if (!validSessionName(args.session)) fail(`bad session name "${args.session}" (letters, digits, . _ -; up to 64)`);
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
   if (args.incognito && args.profile) fail("--incognito and --profile can't be used together");
-  if ((args.command === "attach" || args.command === "kill" || args.command === "ls") && args.launchFlags.length) {
+  if (args.command !== "open" && args.command !== "server" && args.launchFlags.length) {
     fail(`${args.launchFlags.join(", ")} only apply when starting a session`);
   }
   return args;
@@ -136,11 +164,22 @@ function fail(msg: string): never {
   process.exit(2);
 }
 
+/** How to run this termium again: the binary, or bun and the script when run from source. */
+function selfArgv(): string[] {
+  // Compiled, Bun.main is inside the binary's virtual filesystem; from
+  // source it's the script to run with bun. The binary's real path, so a
+  // restart after an update runs the new one wherever a symlink points.
+  if (!compiledBinary()) return [process.execPath, Bun.main];
+  try {
+    return [realpathSync(process.execPath)];
+  } catch {
+    return [process.execPath];
+  }
+}
+
 /** How to start this same termium as a session server. */
 function serverArgv(a: Args): string[] {
-  // Compiled, Bun.main is inside the binary's virtual filesystem; from
-  // source it's the script to run with bun.
-  const argv = [process.execPath, ...(Bun.main.startsWith("/$bunfs") || Bun.main.startsWith("B:/~BUN") ? [] : [Bun.main])];
+  const argv = selfArgv();
   argv.push("__server", "--session", a.session);
   if (a.browser) argv.push("--browser", a.browser);
   if (a.profile) argv.push("--profile", a.profile);
@@ -151,9 +190,59 @@ function serverArgv(a: Args): string[] {
   return argv;
 }
 
+/** `termium check-update`: checks now (ignoring the opt-outs), refreshes the cache, prints one line. */
+async function checkUpdate(): Promise<never> {
+  const r = await checkAndCache(cachePath(stateDir()), VERSION);
+  const { line, code } = report(r, VERSION);
+  (r.ok ? console.log : console.error)(line);
+  process.exit(code);
+}
+
+/** `termium update`: replaces this termium with the latest release. */
+async function update(): Promise<never> {
+  const r = await checkAndCache(cachePath(stateDir()), VERSION);
+  if (!r.ok) {
+    console.error(`termium: could not check for updates: ${r.error}`);
+    process.exit(1);
+  }
+  if (!isNewer(r.tag, VERSION)) {
+    console.log(`termium ${VERSION} is up to date`);
+    process.exit(0);
+  }
+  const next = displayVersion(r.tag);
+  const blocker = selfUpdateBlocker();
+  if (blocker) {
+    console.error(`termium ${next} is available (you have ${VERSION}), but this termium can't update itself: ${blocker}.`);
+    console.error(`Update by hand:\n  ${UPGRADE_CMD}`);
+    process.exit(1);
+  }
+  console.log(`Updating termium ${VERSION} → ${next}`);
+  try {
+    await selfUpdate(r.tag, VERSION, (step) => console.log(`  ${stepLabel(step)}`));
+  } catch (e: any) {
+    console.error(`termium: update failed: ${e?.message ?? e}`);
+    console.error(`Update by hand:\n  ${UPGRADE_CMD}`);
+    process.exit(1);
+  }
+  console.log(`Updated to termium ${next}.`);
+  const old = (await runningSessions()).filter((s) => s.version !== next);
+  if (old.length) {
+    const names = old.map((s) => s.name).join(", ");
+    console.log(
+      `Running session${old.length === 1 ? "" : "s"} (${names}) keep${old.length === 1 ? "s" : ""} running the old termium until restarted: ` +
+        `attach (termium attach NAME) and press r when asked, which reopens its spaces and tabs; or end it with termium kill NAME.`,
+    );
+  }
+  process.exit(0);
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   switch (args.command) {
+    case "check-update":
+      return checkUpdate();
+    case "update":
+      return update();
     case "ls":
       return listSessions();
     case "kill":
@@ -161,7 +250,20 @@ async function main(): Promise<void> {
     case "server":
       return runServer(args.session, args, VERSION);
     case "open":
-    case "attach":
+    case "attach": {
+      if (args.restore) {
+        // Restarting: the session starts again as it was started before.
+        const r = readRestore(args.session);
+        if (r) {
+          args.browser = r.launch.browser;
+          args.profile = r.launch.profile;
+          args.incognito = !!r.launch.incognito;
+          args.scale = r.launch.scale ?? null;
+          args.search = r.launch.search || args.search;
+        }
+      }
+      const restartArgv = [...selfArgv(), "--session", args.session, "--restore"];
+      if (args.noUpdateCheck) restartArgv.push("--no-update-check");
       return runClient({
         name: args.session,
         mode: args.command === "attach" ? "attach" : "auto",
@@ -169,7 +271,10 @@ async function main(): Promise<void> {
         launchFlags: args.launchFlags,
         serverArgv: serverArgv(args),
         version: VERSION,
+        updateCheck: checkEnabled(args.noUpdateCheck),
+        restartArgv,
       });
+    }
   }
 }
 

@@ -38,6 +38,8 @@ import {
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
+import type { SavedLayout, SavedNode } from "./session";
+import { UPGRADE_CMD, displayVersion, isNewer, stepLabel, type Step } from "./update";
 
 // ---------------------------------------------------------------- model
 
@@ -117,7 +119,41 @@ type Prompt =
   | { kind: "dialog"; edit: LineEdit; page: Page }
   | { kind: "confirm"; tag: "quit" | "close"; edit: LineEdit; message: string; onYes: () => void };
 
-type Mode = "normal" | "prefix" | "resize" | "spaces" | "help";
+type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
+
+/**
+ * The update box: the offer (update now, later, skip), the update's
+ * progress, then restart; or why it failed and how to update by hand.
+ * "installed": a newer termium is on disk (updated from the shell) while
+ * this session still runs the old one.
+ */
+interface UpdateBox {
+  tag: string;
+  state: "offer" | "working" | "done" | "failed" | "installed";
+  step?: Step;
+  error?: string;
+  /** When it was put on screen. */
+  shownAt: number;
+  /** Shown on its own (not asked for): keys right after it appears weren't meant for it. */
+  auto: boolean;
+}
+
+/** What the session server does for the update box. */
+export interface UpdateHooks {
+  /** Why `u` can't update this termium (run from source, folder not writable…), or null. */
+  blocker(): string | null;
+  /** Download, verify and install release `tag` (reported back through updateStep/updateDone). */
+  start(tag: string): void;
+  /** Never offer `tag` again. */
+  skip(tag: string): void;
+  /** Restart the session into the termium on disk, reopening its spaces and tabs. */
+  restart(): void;
+}
+
+/** The update box ignores keys this long after it appears on its own (they were typed for the page). */
+const UPDATE_ARM_MS = 1000;
+/** It appears on its own only once the keyboard and mouse have been idle this long. */
+const UPDATE_IDLE_MS = 3000;
 
 export interface AppOptions {
   scale: number | null; // explicit device scale factor
@@ -129,6 +165,9 @@ export interface AppOptions {
   /** Detaches the terminal; the session keeps running. */
   detach: () => void;
   log: (msg: string) => void;
+  /** The version this session runs. */
+  version: string;
+  update?: UpdateHooks;
 }
 
 // ---------------------------------------------------------------- style
@@ -215,6 +254,7 @@ const HELP: [string, string][] = [
   ["b", "toggle sidebar"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
+  ["U", "update termium / restart into it"],
   ["q", "quit"],
   ["?", "this help"],
 ];
@@ -308,7 +348,7 @@ export class App {
 
   // ---------------------------------------------------------- startup
 
-  async start(initialUrl: string | null): Promise<void> {
+  async start(initialUrl: string | null, restore?: SavedLayout | null, notice?: string): Promise<void> {
     const cdp = this.cdp;
     cdp.on("Target.attachedToTarget", (p, parent) => this.onAttached(p, parent).catch((e) => this.opts.log(String(e))));
     cdp.on("Target.detachedFromTarget", (p) => {
@@ -441,12 +481,96 @@ export class App {
     // targetInfoChanged in this browser, so poll titles once a second.
     this.titlePoll = setInterval(() => void this.pollTitles(), 1000);
     const firstReady = new Promise<void>((r) => (this.onFirstPage = r));
-    await this.createPage({ kind: "tab", space, index: 0, editUrl: !url, url: url ?? undefined });
-    // Input is held back until the first page exists so early keystrokes land in it.
-    await Promise.race([firstReady, Bun.sleep(10_000)]);
+    // Restarted (into an updated termium): the spaces, tabs and splits it had.
+    const restored = restore
+      ? await this.restoreLayout(restore, space).catch((e) => {
+          this.opts.log(`restore: ${e instanceof Error ? e.stack : e}`);
+          return false;
+        })
+      : false;
+    if (!restored) {
+      await this.createPage({ kind: "tab", space, index: 0, editUrl: !url, url: url ?? undefined });
+      // Input is held back until the first page exists so early keystrokes land in it.
+      await Promise.race([firstReady, Bun.sleep(10_000)]);
+    } else if (url) {
+      this.newTab(url);
+    }
     this.onFirstPage = null;
     this.ready = true;
     this.fullRedraw();
+    if (notice) this.showToast(notice, 6000);
+  }
+
+  /** Spaces, tabs and splits with their pages' addresses, for a restart. */
+  layoutSnapshot(): SavedLayout {
+    const node = (n: Node<Page>): SavedNode =>
+      n.kind === "leaf"
+        ? { url: n.item.url.includes(MARKER) || n.item.url === "about:blank" ? "" : n.item.url }
+        : { dir: n.dir, ratio: n.ratio, a: node(n.a), b: node(n.b) };
+    return {
+      spaces: this.spaces.map((s) => ({
+        name: s.name,
+        active: s.active,
+        tabs: s.tabs.map((t) => ({ root: node(t.root), focus: Math.max(0, leaves(t.root).indexOf(t.focused)), zoomed: t.zoomed })),
+      })),
+      activeSpace: this.activeSpace,
+      sidebar: this.sidebar,
+      zoom: this.zoom,
+    };
+  }
+
+  /** Opens a saved layout (pages load from their addresses); false if not a single page came up. */
+  private async restoreLayout(saved: SavedLayout, first: Space): Promise<boolean> {
+    const valid = (n: any, depth = 0): n is SavedNode =>
+      depth < 32 && !!n && typeof n === "object" &&
+      (typeof n.url === "string" || ((n.dir === "h" || n.dir === "v") && valid(n.a, depth + 1) && valid(n.b, depth + 1)));
+    const leftmost = (n: SavedNode): string => ("url" in n ? n.url : leftmost(n.a));
+    const clampInt = (v: unknown, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.floor(Number(v)) || 0));
+    const build = async (n: SavedNode, p: Page, tab: Tab): Promise<void> => {
+      if ("url" in n) return;
+      const url = leftmost(n.b);
+      const q = await this.placePage({ kind: "split", tab, next: p, dir: n.dir, editUrl: false, url: url || undefined });
+      await build(n.a, p, tab);
+      if (q) await build(n.b, q, tab);
+    };
+    const ratios = (n: Node<Page>, s: SavedNode) => {
+      if (n.kind !== "split" || "url" in s) return;
+      const r = Number(s.ratio);
+      if (Number.isFinite(r)) n.ratio = Math.max(0.1, Math.min(0.9, r));
+      ratios(n.a, s.a);
+      ratios(n.b, s.b);
+    };
+    let any = false;
+    for (const [si, ss] of (saved.spaces ?? []).slice(0, 64).entries()) {
+      const space = si === 0 ? first : this.newSpaceModel();
+      if (si > 0) this.spaces.push(space);
+      if (typeof ss?.name === "string" && ss.name.trim()) space.name = ss.name.slice(0, 64);
+      for (const st of (Array.isArray(ss?.tabs) ? ss.tabs : []).slice(0, 200)) {
+        if (!valid(st?.root)) continue;
+        const url = leftmost(st.root);
+        const page = await this.placePage({ kind: "tab", space, index: space.tabs.length, editUrl: false, url: url || undefined, background: true });
+        if (!page) continue;
+        any = true;
+        const tab = this.locate(page)?.tab;
+        if (!tab) continue;
+        await build(st.root, page, tab);
+        ratios(tab.root, st.root);
+        const ls = leaves(tab.root);
+        tab.focused = ls[clampInt(st.focus, 0, ls.length - 1)] ?? tab.focused;
+        tab.zoomed = !!st.zoomed && ls.length > 1;
+      }
+      space.active = clampInt(ss?.active, 0, Math.max(0, space.tabs.length - 1));
+    }
+    // Spaces none of whose pages came back go (the first stays).
+    this.spaces = this.spaces.filter((s, i) => i === 0 || s.tabs.length > 0);
+    if (!any) return false;
+    this.activeSpace = clampInt(saved.activeSpace, 0, this.spaces.length - 1);
+    if (!this.space?.tabs.length) this.activeSpace = Math.max(0, this.spaces.findIndex((s) => s.tabs.length > 0));
+    this.sidebar = saved.sidebar !== false;
+    const z = Number(saved.zoom);
+    if (Number.isFinite(z) && z !== 1) this.zoom = Math.max(0.3, Math.min(5, Math.round(z * 100) / 100));
+    this.relayout();
+    return true;
   }
 
   private onFirstPage: (() => void) | null = null;
@@ -480,9 +604,37 @@ export class App {
 
   // ---------------------------------------------------------- pages
 
+  /** Called once a page created for a placement is in the model (null: it never came). */
+  private placedCallbacks = new Map<string, (page: Page | null) => void>();
+
+  /** Creates a page and waits until it's in place: null if it doesn't come within 10 s. */
+  private placePage(placement: Placement): Promise<Page | null> {
+    return new Promise((resolve) => {
+      let marker = "";
+      const timer = setTimeout(() => {
+        this.placedCallbacks.delete(marker);
+        resolve(null);
+      }, 10_000);
+      marker = this.createPageMarked(placement, (page) => {
+        clearTimeout(timer);
+        resolve(page);
+      });
+    });
+  }
+
   private async createPage(placement: Placement): Promise<void> {
+    await new Promise<void>((resolve) => this.createPageMarked(placement, undefined, resolve));
+  }
+
+  private createPageMarked(placement: Placement, onPlaced?: (page: Page | null) => void, created?: () => void): string {
     const marker = `${MARKER}${this.nextMarker++}`;
+    void this.createTarget(marker, placement, onPlaced).finally(() => created?.());
+    return marker;
+  }
+
+  private async createTarget(marker: string, placement: Placement, onPlaced?: (page: Page | null) => void): Promise<void> {
     this.placements.set(marker, placement);
+    if (onPlaced) this.placedCallbacks.set(marker, onPlaced);
     // The new page takes focus: hold input until it exists so keys typed
     // right after Ctrl+T don't land in the page being left.
     this.holdInput(marker);
@@ -494,6 +646,9 @@ export class App {
       this.placements.delete(marker);
       this.releaseInput(marker);
       this.showToast(`Could not open a page: ${e}`);
+      const cb = this.placedCallbacks.get(marker);
+      this.placedCallbacks.delete(marker);
+      cb?.(null);
     }
   }
 
@@ -660,6 +815,9 @@ export class App {
     }
 
     this.relayout();
+    const placed = marker ? this.placedCallbacks.get(marker) : undefined;
+    if (marker) this.placedCallbacks.delete(marker);
+    placed?.(page);
     await run();
     await setup;
     const target = placement.kind === "replace" ? (placement.url === "about:blank" ? undefined : placement.url) : placement.url;
@@ -1105,6 +1263,8 @@ export class App {
     // Ctrl+B prefix would turn this one's first key into a command).
     this.resetInput();
     this.attached = true;
+    this.lastInputAt = Date.now();
+    if (this.updateBox && this.mode === "update") this.updateBox.shownAt = Date.now();
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
     const shown = new Set(this.tab ? leaves(this.tab.root) : []);
@@ -1161,7 +1321,7 @@ export class App {
 
   /** Sends every visible page's picture again (the client's terminal may have lost them). */
   repaintVisible(): void {
-    if (!this.attached || this.closingAll || this.mode === "help") return;
+    if (!this.attached || this.closingAll || this.covered()) return;
     for (const page of this.geom.keys()) if (page.imageIds.length) this.paint(page);
   }
 
@@ -1524,7 +1684,7 @@ export class App {
   /** Draws the page's latest frame into its pane; false if there was nothing to draw. */
   private paint(page: Page, done?: () => void): boolean {
     const g = this.geom.get(page);
-    if (!g || !page.lastFrame || this.mode === "help" || this.closingAll || page === this.panelPage) return false;
+    if (!g || !page.lastFrame || this.covered() || this.closingAll || page === this.panelPage) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
     if (this.placeholders) return this.paintPlaceholders(page, r, done);
@@ -1622,11 +1782,16 @@ export class App {
     this.redrawing = true;
     try {
       this.drawChrome();
-      if (this.mode !== "help") for (const page of this.geom.keys()) this.paint(page);
+      if (!this.covered()) for (const page of this.geom.keys()) this.paint(page);
     } finally {
       this.redrawing = false;
       out(SYNC_END);
     }
+  }
+
+  /** The pane area shows an overlay (help, the update box), not the pages. */
+  private covered(): boolean {
+    return this.mode === "help" || this.mode === "update";
   }
 
   private drawChrome(): void {
@@ -1641,6 +1806,10 @@ export class App {
     s += this.drawUrlBar(mainCol, mainW);
     if (this.mode === "help") {
       out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
+      return;
+    }
+    if (this.mode === "update") {
+      out(this.sync(s + RESET + this.updateOverlay() + this.cursorSeq()));
       return;
     }
     s += this.drawPaneChrome();
@@ -1687,7 +1856,12 @@ export class App {
     return s;
   }
 
-  private drawTabBar(col: number, w: number): string {
+  private drawTabBar(col: number, full: number): string {
+    // The update badge keeps its place at the right end (shortened, never hidden).
+    const badge = this.badge(full);
+    const bw = badge ? Math.min(width(badge.text), Math.max(0, full - 4)) : 0;
+    const w = full - bw;
+    this.badgeHit = badge && bw ? [col + w, col + full] : null;
     const space = this.space;
     const tabs = space?.tabs ?? [];
     const items = tabs.map((tab, i) => {
@@ -1747,6 +1921,7 @@ export class App {
     if (pad > 0) {
       s += bg(C.crust) + fg(C.overlay) + (pad > width(label) + 1 ? " ".repeat(pad - width(label)) + label : " ".repeat(pad));
     }
+    if (badge && bw) s += RESET + at(1, col + w) + badge.style + truncate(badge.text, bw);
     return s + RESET;
   }
 
@@ -1756,6 +1931,7 @@ export class App {
       case "resize": return " RESIZE ";
       case "spaces": return " SPACES ";
       case "help": return " HELP ";
+      case "update": return " UPDATE ";
       default: return "";
     }
   }
@@ -1848,7 +2024,7 @@ export class App {
 
   private cursorSeq(): string {
     const c = this.promptCursor;
-    if (!c || this.mode === "help") return "\x1b[?25l";
+    if (!c || this.covered()) return "\x1b[?25l";
     return `${at(c.row, c.col)}\x1b[6 q\x1b[?25h`;
   }
 
@@ -1926,12 +2102,28 @@ export class App {
     const keyW = Math.max(...HELP.map(([k]) => width(k)));
     const descW = Math.max(...HELP.map(([, d]) => width(d)));
     const colW = keyW + descW + 6;
-    const fitsOne = HELP.length + 4 <= area.rows;
+    // A newer termium: what it is and how to get it, across the top.
+    const news: [style: string, text: string][] = [];
+    const cur = this.opts.version;
+    if (this.updateInstalled) {
+      news.push([fg(C.yellow) + BOLD, `  restart to update  termium ${cur} → ${displayVersion(this.updateInstalled)}`]);
+      news.push([fg(C.text), "  installed; this session runs the old one until it restarts: Ctrl+B U"]);
+    } else if (this.updateLatest && this.updatesShown) {
+      news.push([fg(C.green) + BOLD, `  update available  termium ${cur} → ${displayVersion(this.updateLatest)}`]);
+      news.push([fg(C.text), "  Ctrl+B U updates, or run:"]);
+    }
+    const cmd = news.length && !this.updateInstalled;
+    const wantW = Math.max(colW, cmd ? width(UPGRADE_CMD) + 4 : 0, ...news.map(([, t]) => width(t) + 2));
+    if (cmd) {
+      for (const l of wrapWords(UPGRADE_CMD, Math.max(1, Math.min(area.cols, wantW) - 4))) news.push([fg(C.blue), `  ${l}`]);
+    }
+    if (news.length) news.push(["", ""]);
+    const fitsOne = HELP.length + news.length + 4 <= area.rows;
     const columns = !fitsOne && area.cols >= colW * 2 + 2 ? 2 : 1;
     const perCol = Math.ceil(HELP.length / columns);
-    const boxW = Math.min(area.cols, colW * columns + 2);
-    const boxH = Math.min(area.rows, perCol + 4);
-    const shown = Math.max(0, Math.min(perCol, boxH - 4)); // entry rows per column that fit
+    const boxW = Math.min(area.cols, Math.max(colW * columns + 2, wantW));
+    const boxH = Math.min(area.rows, perCol + news.length + 4);
+    const shown = Math.max(0, Math.min(perCol, boxH - 4 - news.length)); // entry rows per column that fit
     const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 2));
     const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
     // (With placeholders the overlay's text replaces the cells showing them.)
@@ -1941,6 +2133,8 @@ export class App {
     const hidden = Math.max(0, HELP.length - shown * columns);
     s += at(top, left) + panel + BOLD + fg(C.mauve) + fit(" termium keys", boxW) + RESET;
     s += at(top + 1, left) + panel + fit("", boxW);
+    const newsRows = Math.min(news.length, Math.max(0, boxH - 4));
+    for (let r = 0; r < newsRows; r++) s += at(top + 2 + r, left) + panel + news[r]![0] + fit(news[r]![1], boxW) + RESET;
     for (let r = 0; r < shown; r++) {
       let line = "";
       for (let c = 0; c < columns; c++) {
@@ -1949,11 +2143,366 @@ export class App {
         line += columns === 1 ? text : fit(text, c === 0 ? colW : boxW - colW);
       }
       const heading = columns === 1 && HELP[r]?.[1] === "" && HELP[r]?.[0] !== "";
-      s += at(top + 2 + r, left) + panel + (heading ? fg(C.mauve) : "") + fit(line, boxW) + RESET;
+      s += at(top + 2 + newsRows + r, left) + panel + (heading ? fg(C.mauve) : "") + fit(line, boxW) + RESET;
     }
     s += at(top + boxH - 2, left) + panel + fit("", boxW);
     const footer = hidden > 0 ? `  ${hidden} more: make the terminal taller · any key closes` : "  any key closes";
     s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(footer, boxW) + RESET;
+    return s + RESET;
+  }
+
+  // ---------------------------------------------------------- updates
+
+  /** A newer release (the tab bar's badge), if the attached terminal shows update news. */
+  private updateLatest: string | null = null;
+  /** A newer termium installed on disk: this session runs the old one until it restarts. */
+  private updateInstalled: string | null = null;
+  /** The attached terminal wants update news (it didn't opt out). */
+  private updatesShown = false;
+  private updateBox: UpdateBox | null = null;
+  /** The box waits to appear on its own until nothing else is going on. */
+  private updatePending = false;
+  /** Offers made in this session's life: each is made once. */
+  private offered = new Set<string>();
+  private updateTimer: ReturnType<typeof setInterval> | null = null;
+  private idleCheck = false;
+  /** Last keyboard or mouse input. */
+  private lastInputAt = Date.now();
+  private badgeHit: [number, number] | null = null;
+  /** Why `u` can't update here, worked out when the offer is shown. */
+  private updateBlocker: string | null = null;
+
+  setUpdatesShown(on: boolean): void {
+    if (this.updatesShown === on) return;
+    this.updatesShown = on;
+    this.queueChrome();
+  }
+
+  /** The update check found newer release `tag`; with `offer` (not skipped) the box offers it, once. */
+  updateAvailable(tag: string, offer: boolean): void {
+    if (!isNewer(tag, this.opts.version)) return;
+    if (this.updateInstalled && !isNewer(tag, this.updateInstalled)) return; // that one's installed already
+    if (this.updateLatest !== tag) {
+      this.updateLatest = tag;
+      this.queueChrome();
+    }
+    const box = this.updateBox;
+    if (box?.state === "offer") {
+      // A newer tag replaces the one being offered.
+      if (box.tag !== tag && isNewer(tag, box.tag)) {
+        box.tag = tag;
+        this.redrawUpdate();
+      }
+      return;
+    }
+    if (box) return; // an update under way (or done) isn't interrupted
+    if (!offer || this.offered.has(`offer:${tag}`)) return;
+    this.offered.add(`offer:${tag}`);
+    this.queueUpdateBox({ tag, state: "offer", shownAt: 0, auto: true });
+  }
+
+  /** A terminal running a newer termium attached: that one is installed, and this session runs the old one. */
+  newerInstalled(version: string): void {
+    if (!isNewer(version, this.opts.version)) return;
+    if (this.updateInstalled && !isNewer(version, this.updateInstalled)) return;
+    this.updateInstalled = version;
+    if (this.updateLatest && !isNewer(this.updateLatest, version)) this.updateLatest = null;
+    this.queueChrome();
+    const box = this.updateBox;
+    if (box && box.state !== "offer") return;
+    if (this.offered.has(`installed:${version}`)) return;
+    this.offered.add(`installed:${version}`);
+    const next: UpdateBox = { tag: version, state: "installed", shownAt: Date.now(), auto: true };
+    if (this.mode === "update") {
+      this.updateBox = next;
+      this.redrawUpdate();
+    } else {
+      this.queueUpdateBox(next);
+    }
+  }
+
+  updateStep(step: Step): void {
+    const box = this.updateBox;
+    if (box?.state !== "working") return;
+    box.step = step;
+    this.redrawUpdate();
+  }
+
+  /** The self-update ended: restart offered (or why it failed); reopens the box if it was put away meanwhile. */
+  updateDone(tag: string, error: string | null): void {
+    if (!error) {
+      this.updateInstalled = tag;
+      this.updateLatest = null;
+    }
+    const box: UpdateBox = { tag, state: error ? "failed" : "done", error: error ?? undefined, shownAt: Date.now(), auto: false };
+    this.queueChrome();
+    if (this.mode === "update") {
+      this.updateBox = box;
+      this.redrawUpdate();
+    } else {
+      this.queueUpdateBox(box);
+    }
+  }
+
+  private queueUpdateBox(box: UpdateBox): void {
+    this.updateBox = box;
+    this.updatePending = true;
+    if (!this.updateTimer) {
+      this.updateTimer = setInterval(() => void this.maybeShowUpdate(), 500);
+      this.updateTimer.unref?.();
+    }
+  }
+
+  private stopUpdateTimer(): void {
+    if (this.updateTimer) clearInterval(this.updateTimer);
+    this.updateTimer = null;
+  }
+
+  /** Nothing else is open or going on, and the keyboard and mouse have been idle a while. */
+  private idleForUpdate(): boolean {
+    const page = this.focused;
+    return (
+      this.attached && this.started && this.ready && !this.closingAll && this.mode === "normal" && !this.prompt &&
+      !this.drag && !this.mouseButtons && this.holds.size === 0 && !!page && !page.dialog && !page.fileChooser &&
+      Date.now() - this.lastInputAt >= UPDATE_IDLE_MS
+    );
+  }
+
+  /** A pending box appears once nothing else is open (no dialog, menu, address editing or help). */
+  private async maybeShowUpdate(): Promise<void> {
+    const box = this.updateBox;
+    if (!this.updatePending || !box) {
+      this.updatePending = false;
+      this.stopUpdateTimer();
+      return;
+    }
+    // An offer waits for a terminal that wants update news.
+    if (box.state === "offer" && !this.updatesShown) return;
+    if (this.idleCheck || !this.idleForUpdate()) return;
+    this.idleCheck = true;
+    let menu = true;
+    try {
+      menu = await this.menuOpen(this.focused!);
+    } finally {
+      this.idleCheck = false;
+    }
+    if (menu || !this.idleForUpdate() || this.updateBox !== box || !this.updatePending) return;
+    this.showUpdate(true);
+  }
+
+  /** Whether the page shows one of termium's in-page <select> menus (or doesn't answer). */
+  private menuOpen(page: Page): Promise<boolean> {
+    return Promise.race([
+      this.cdp
+        .send("Runtime.evaluate", { expression: `!!document.querySelector("termium-select")`, returnByValue: true }, page.sessionId)
+        .then((r) => r?.result?.value !== false, () => true),
+      Bun.sleep(500).then(() => true),
+    ]);
+  }
+
+  private showUpdate(auto: boolean): void {
+    const box = this.updateBox;
+    if (!box) return;
+    this.updatePending = false;
+    this.stopUpdateTimer();
+    box.auto = auto;
+    box.shownAt = Date.now();
+    this.updateBlocker = box.state === "offer" ? (this.opts.update ? this.opts.update.blocker() : "updates aren't available here") : null;
+    this.prompt = null;
+    this.mode = "update";
+    this.fullRedraw();
+  }
+
+  /** Puts the box away. An update under way carries on (the box comes back when it's done). */
+  private closeUpdate(): void {
+    if (this.updateBox?.state !== "working") this.updateBox = null;
+    this.updatePending = false;
+    this.stopUpdateTimer();
+    this.mode = "normal";
+    this.fullRedraw();
+  }
+
+  private redrawUpdate(): void {
+    if (this.mode === "update") this.queueChrome();
+  }
+
+  /** Ctrl+B U, or a click on the badge: the box for what's known (restart, offer), else says there's nothing. */
+  private openUpdate(): void {
+    if (!this.updateBox) {
+      if (this.updateInstalled) this.updateBox = { tag: this.updateInstalled, state: "installed", shownAt: 0, auto: false };
+      else if (this.updateLatest) this.updateBox = { tag: this.updateLatest, state: "offer", shownAt: 0, auto: false };
+      else {
+        this.showToast(`termium ${this.opts.version}: no newer release known (termium check-update checks now)`, 5000);
+        return;
+      }
+    }
+    this.showUpdate(false);
+  }
+
+  private updateKey(ev: KeyEvent, combo: string): void {
+    const box = this.updateBox;
+    if (!box) {
+      this.closeUpdate();
+      return;
+    }
+    // A key typed for the page just as the box appeared on its own: the box
+    // steps aside (as "later") and the key goes where it was meant to.
+    if (box.auto && box.state !== "working" && Date.now() - box.shownAt < UPDATE_ARM_MS) {
+      this.closeUpdate();
+      this.onKey(ev);
+      return;
+    }
+    // The prefix works as ever (Ctrl+B d detaches); the box is put away.
+    if (combo === "ctrl+b") {
+      this.closeUpdate();
+      this.mode = "prefix";
+      this.queueChrome();
+      return;
+    }
+    const shown = displayVersion(box.tag);
+    switch (box.state) {
+      case "offer":
+        if ((combo === "u" || combo === "enter") && !this.updateBlocker && this.opts.update) {
+          box.state = "working";
+          box.step = "downloading";
+          this.opts.update.start(box.tag);
+          this.redrawUpdate();
+        } else if (combo === "s") {
+          this.opts.update?.skip(box.tag);
+          this.closeUpdate();
+          this.showToast(`termium ${shown} skipped: not offered again`, 4000);
+        } else if (combo === "l" || combo === "escape" || combo === "q") {
+          this.closeUpdate();
+        }
+        return;
+      case "working":
+        return; // keys wait (Ctrl+B and Ctrl+Q still work)
+      case "done":
+      case "installed":
+        if (combo === "r" || combo === "enter") {
+          this.opts.update?.restart();
+        } else if (combo === "escape" || combo === "l" || combo === "q") {
+          this.closeUpdate();
+          this.showToast(`This session runs termium ${this.opts.version} until it restarts (Ctrl+B U restarts it)`, 5000);
+        }
+        return;
+      case "failed":
+        if (combo === "escape" || combo === "enter" || combo === "q") this.closeUpdate();
+        return;
+    }
+  }
+
+  /** The tab bar's badge: a newer release (↑), or a newer termium installed and waiting for a restart (↻). */
+  private badge(full: number): { text: string; style: string } | null {
+    const short = full < 50;
+    if (this.updateInstalled) {
+      return { text: short ? " ↻ " : ` ↻ v${displayVersion(this.updateInstalled)} `, style: bg(C.crust) + fg(C.yellow) + BOLD };
+    }
+    if (this.updateLatest && this.updatesShown) {
+      return { text: short ? " ↑ " : ` ↑ v${displayVersion(this.updateLatest)} `, style: bg(C.crust) + fg(C.green) + BOLD };
+    }
+    return null;
+  }
+
+  /** The update box, over the (blanked) pane area. */
+  private updateOverlay(): string {
+    const box = this.updateBox;
+    if (!box) return "";
+    const area = this.paneArea();
+    const cur = this.opts.version;
+    const nv = displayVersion(box.tag);
+    const boxW = Math.min(area.cols, 96);
+    const inner = Math.max(1, boxW - 2);
+    type Seg = [style: string, text: string];
+    const lines: Seg[][] = [];
+    const txt = fg(C.text);
+    const key = fg(C.mauve) + BOLD;
+    const ok = fg(C.green) + BOLD;
+    const dim = fg(C.overlay);
+    const add = (...segs: Seg[]) => lines.push(segs);
+    const blank = () => lines.push([]);
+    const wrapped = (style: string, text: string) => {
+      for (const l of wrapWords(text, inner - 1)) add([style, ` ${l}`]);
+    };
+    const choice = (k: string, what: string) => add([key, ` ${k.padEnd(5)}`], [txt, what]);
+    const headline = () => add([ok, ` termium ${nv}`], [txt, ` is available (you have ${cur})`]);
+    const byHand = () => {
+      add([dim, " update by hand:"]);
+      wrapped(fg(C.blue), UPGRADE_CMD);
+    };
+    let title = "";
+    let footer = "";
+    switch (box.state) {
+      case "offer":
+        title = "update available";
+        headline();
+        blank();
+        if (this.updateBlocker) {
+          wrapped(txt, `This termium can't update itself: ${this.updateBlocker}.`);
+          blank();
+          byHand();
+          blank();
+          choice("l", "later: ask again when this session restarts");
+          choice("s", "skip this version");
+          footer = "l later · s skip";
+        } else {
+          choice("u", "update now: download, verify and replace the termium binary");
+          choice("l", "later: ask again when this session restarts");
+          choice("s", "skip this version");
+          footer = "u update · l later · s skip";
+        }
+        break;
+      case "working":
+        title = "updating";
+        headline();
+        blank();
+        add([fg(C.yellow), ` updating to ${nv}: ${stepLabel(box.step ?? "downloading")}`]);
+        footer = "Ctrl+B leaves this box (it comes back when done)";
+        break;
+      case "done":
+      case "installed":
+        title = box.state === "done" ? "updated" : "restart to update";
+        if (box.state === "done") add([ok, ` ✓ updated to termium ${nv}`]);
+        else add([ok, ` termium ${nv}`], [txt, " is installed"]);
+        blank();
+        wrapped(txt, `This session keeps running termium ${cur} until it restarts.`);
+        blank();
+        choice("r", "restart now: reopens your spaces, tabs and splits");
+        add([txt, "       (pages reload; text typed into them is lost)"]);
+        choice("Esc", "later: Ctrl+B U restarts it any time");
+        footer = "r restart · Esc later";
+        break;
+      case "failed":
+        title = "update failed";
+        add([fg(C.red) + BOLD, ` ✗ update to ${nv} failed`]);
+        wrapped(txt, box.error ?? "");
+        blank();
+        byHand();
+        footer = "Esc close";
+        break;
+    }
+    const boxH = Math.min(area.rows, lines.length + 4);
+    const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 2));
+    const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
+    const panel = bg(C.base) + fg(C.text);
+    let s = this.placeholders ? "" : this.deleteOwnImages();
+    for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
+    s += at(top, left) + panel + BOLD + fg(C.mauve) + fit(` ${title}`, boxW) + RESET;
+    s += at(top + 1, left) + panel + fit("", boxW);
+    const shown = Math.max(0, boxH - 4);
+    for (let i = 0; i < shown; i++) {
+      let line = "";
+      let used = 0;
+      for (const [style, text] of lines[i] ?? []) {
+        const t = truncate(text, Math.max(0, boxW - used));
+        if (!t) break;
+        line += panel + style + t + RESET;
+        used += width(t);
+      }
+      s += at(top + 2 + i, left) + line + panel + " ".repeat(Math.max(0, boxW - used)) + RESET;
+    }
+    s += at(top + boxH - 2, left) + panel + fit("", boxW);
+    s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(`  ${footer}`, boxW) + RESET;
     return s + RESET;
   }
 
@@ -1971,6 +2520,7 @@ export class App {
       void this.requestQuit();
       return;
     }
+    if (ev.type !== "focus") this.lastInputAt = Date.now();
     if (!this.ready || this.holds.size > 0) {
       this.early.push(ev);
       return;
@@ -2023,6 +2573,7 @@ export class App {
     }
     const combo = comboOf(ev);
 
+    if (this.mode === "update") return this.updateKey(ev, combo);
     if (this.mode === "help") {
       this.mode = "normal";
       this.fullRedraw();
@@ -2166,6 +2717,7 @@ export class App {
         return this.relayoutAndRedraw();
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
+      case "shift+u": this.openUpdate(); return;
       case "?":
         this.mode = "help";
         this.fullRedraw();
@@ -2626,6 +3178,15 @@ export class App {
       }
       return;
     }
+    if (this.mode === "update") {
+      const box = this.updateBox;
+      if (ev.action !== "press" || box?.state === "working") return;
+      // Like a key: just as the box appeared on its own, the click was meant for the page.
+      const early = !!box?.auto && Date.now() - box.shownAt < UPDATE_ARM_MS;
+      this.closeUpdate();
+      if (early) this.onMouse(ev);
+      return;
+    }
 
     if (this.drag) {
       if (ev.action === "move") return this.dragTo(col, row);
@@ -2676,6 +3237,10 @@ export class App {
       return true;
     }
     if (row === 1) {
+      if (this.badgeHit && col >= this.badgeHit[0] && col < this.badgeHit[1]) {
+        if (ev.button === 0) this.openUpdate();
+        return true;
+      }
       const hit = this.tabHits.find((h) => col >= h.start && col < h.end);
       if (hit) {
         const tab = this.space?.tabs[hit.index];
@@ -2924,3 +3489,29 @@ function displayUrl(page: Page): string {
 }
 
 export { DEFAULT_SEARCH };
+
+/** Words of `text` in lines of at most `w` columns (a longer word is cut). */
+export function wrapWords(text: string, w: number): string[] {
+  const out: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let rest = word;
+    while (width(rest) > w) {
+      if (line) {
+        out.push(line);
+        line = "";
+      }
+      out.push(rest.slice(0, w));
+      rest = rest.slice(w);
+    }
+    if (!rest) continue;
+    if (!line) line = rest;
+    else if (width(line) + 1 + width(rest) <= w) line += " " + rest;
+    else {
+      out.push(line);
+      line = rest;
+    }
+  }
+  if (line) out.push(line);
+  return out;
+}
