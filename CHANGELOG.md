@@ -6,6 +6,35 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Update check: when a terminal attaches, the session asks GitHub for
+  termium's latest release in the background (never delaying anything;
+  silent when offline; 3 s timeout) and caches the answer in
+  `~/.local/state/termium/update-check.json`. A newer release shows
+  `↑ vX.Y.Z` in the tab bar and the upgrade command in `Ctrl+B ?`, and is
+  offered once, when nothing else is open: `u` update now, `l` later,
+  `s` skip this version. `Ctrl+B U` (or a click on the badge) brings the
+  offer back. The session owns the check, so attaching and detaching
+  don't repeat it, and a detached session never checks.
+- Self-update: `u`, or `termium update` from a shell, downloads the
+  release archive for this platform, verifies it against `SHA256SUMS` and
+  replaces the binary in place (never for a run from source, nor when its
+  folder isn't writable; on failure, the `install.sh` command to update
+  by hand).
+- Restart into an update: a running session keeps the old version until
+  it restarts; `r` restarts it from the new binary in the same terminal,
+  reopening its spaces, tabs and splits. After `termium update` from a
+  shell, the next attach offers the same.
+- `termium check-update` prints one line (exit 0 up to date, 100 newer
+  release available, 1 could not check).
+- `--no-update-check`, `TERMIUM_NO_UPDATE_CHECK=1` or a set `CI`
+  variable turn the check off.
+- `termium ls` says which termium a session runs when it isn't this one.
+
+### Changed
+- Attaching to a session of a termium that speaks another session
+  protocol says how to end it (`termium kill NAME`).
+
 ## [0.2.0] - 2026-11-24
 
 ### Added

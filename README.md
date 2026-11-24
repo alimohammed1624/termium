@@ -60,7 +60,8 @@ Options: `--browser <path>` (default: Helium on `PATH`, or
 `~/.local/share/termium/profile`, or `.../profiles/NAME` for a session
 started with `-s NAME`), `--incognito`, `--scale <n>` (device
 pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
-They apply when a session starts.
+They apply when a session starts. `--no-update-check` turns off the
+[update check](#updates).
 
 ### Sessions
 
@@ -148,6 +149,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `b` | show or hide the sidebar |
 | `Ctrl+B` | send Ctrl+B to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
+| `U` | update termium, or restart the session into an installed update |
 | `q` / `?` | quit / show keys |
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
@@ -158,6 +160,72 @@ Ctrl+Backspace (delete word) and Alt/Ctrl+←/→.
 The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
 divider between panes.
+
+### Updates
+
+```sh
+termium check-update     # is there a newer release? (one line)
+termium update           # update to it (a release binary only)
+```
+
+- **The check.** When a terminal attaches, the session asks GitHub for
+  termium's latest release in the background, after the UI is up:
+  `GET https://github.com/alimohammed1624/termium/releases/latest` (the tag
+  is read from the redirect, which is not followed), falling back to
+  `https://api.github.com/repos/alimohammed1624/termium/releases/latest`.
+  The request carries only a `termium/<version>` User-Agent. It never
+  delays anything: failures are silent (offline means no badge) and it
+  gives up after 3 s. The answer is cached in
+  `~/.local/state/termium/update-check.json` (`$XDG_STATE_HOME`); a cached
+  newer release shows at once, then the check refreshes it (a failed check
+  keeps what was cached). Pre-releases are never offered.
+- **Once per session.** The session server owns the check, its cache and
+  the update box, so attaching, detaching and taking over don't repeat
+  them: it checks on the first attach and then at most once a day while a
+  terminal stays attached, never while detached, and offers each release
+  once in a session's life.
+- **What you see.** A newer release shows `↑ vX.Y.Z` at the right end of
+  the tab bar (just `↑` in a narrow terminal), and `Ctrl+B ?` shows the
+  upgrade command. Once, when nothing else is open (no dialog, page menu,
+  address editing or help) and you haven't typed or clicked for 3 s, a box
+  asks: "termium X is available (you have Y)", with `u` update now, `l`
+  later (ask again when the session restarts) and `s` skip this version
+  (never offered again; the badge stays). The box hides the pages while
+  it's open and takes the keyboard, so nothing typed reaches a page
+  unseen; keys typed in the first second after it appears close it and go
+  to the page as meant. `Ctrl+B` still works (the box is put away),
+  `Ctrl+Q` still quits, and `Ctrl+B U` or a click on the badge brings it
+  back.
+- **Updating.** `u` (or `termium update` from a shell) downloads this
+  platform's archive and `SHA256SUMS` from the release, checks the
+  archive's SHA-256, runs the new binary's `--version` and renames it over
+  the running binary (symlinks resolved; written beside it first, so the
+  old one is never half-replaced). On any failure nothing changes and
+  termium shows the `install.sh` command to update by hand. termium
+  refuses to update itself when it runs from source (`bun src/main.ts`, or
+  a `bun install -g` install: use `git pull` or `bun install -g` again),
+  when there is no prebuilt binary for the platform, or when it can't
+  write to the binary's folder.
+- **Restarting.** A running session keeps running the old version until
+  it restarts. After `u`, the box offers `r`: restart now. The session
+  closes its browser and starts again from the new binary in the same
+  terminal, with its spaces, tabs, splits and zoom: pages reload from
+  their addresses, logins survive in the profile (not with
+  `--incognito`), anything typed into a page and not saved is lost.
+  `Esc` leaves it for later (`Ctrl+B U` offers it again; the badge shows
+  `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
+  (from the new binary) offers the same restart. A session started by a
+  termium whose session protocol differs can't be attached; termium says
+  so and how to end it (`termium kill NAME`).
+- **Turning it off.** `--no-update-check`, `TERMIUM_NO_UPDATE_CHECK=1`,
+  or a set `CI` variable (empty, `0` and `false` don't count) turn off the
+  check, the badge and the box for that terminal. termium has no config
+  file, so there's no config option. `termium ls`, `kill`, `--version`
+  and `--help` never go online. `termium check-update` checks on demand
+  (ignoring the opt-outs and refreshing the cache) and exits 0 when up to
+  date, 100 when a newer release is available and 1 when it could not
+  check; `termium update` exits 0 when updated or already up to date and
+  1 on failure.
 
 ### Good to know
 
@@ -266,6 +334,9 @@ sh install.sh
 - A terminal that speaks the kitty graphics protocol.
   [Ghostty](https://ghostty.org) is recommended.
 
+**Update:** `termium update`, or run the install command again (see
+[Updates](#updates)).
+
 **Uninstall:** delete the binary (`rm ~/.local/bin/termium`).
 
 **Release archives by hand.** Each release has these archives plus
@@ -355,6 +426,7 @@ python3 tests/e2e.py /tmp/termium-e2e    # screenshots land there
 python3 tests/lifecycle.py               # second instances, kill -9 recovery, bad terminals
 python3 tests/sessions.py                # detach, re-attach, takeover, ls/kill, dead servers
 python3 tests/multiplexers.py /tmp/mux   # inside a private tmux server and herdr session
+python3 tests/update.py                  # update check and self-update, with a fake GitHub
 ```
 
 `tests/multiplexers.py` needs tmux 3.3 or later (and runs the herdr part
