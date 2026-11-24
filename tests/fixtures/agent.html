@@ -6,9 +6,14 @@
 <label><input type=checkbox id=agree> Agree</label>
 <label for=off>Locked</label> <input id=off disabled>
 <label for=pw>Secret</label> <input id=pw type=password>
+<label for=city>City</label> <input id=city>
+<label for=offsel>Frozen list</label> <select id=offsel disabled><option value=a>Apple</option><option value=b>Banana</option></select>
 <button id=go type=submit>Greet</button>
 </form>
 <p id=out>nobody yet</p>
+<p id=notes-label>Notes</p><div id=ed contenteditable role=textbox aria-labelledby=notes-label style="min-height:2em;border:1px solid"></div>
+<div id=host></div>
+<script>document.getElementById('host').attachShadow({mode: 'open'}).innerHTML = '<label>Shadow field <input id=sin></label>';</script>
 <button id=later onclick="setTimeout(()=>{const d=document.createElement('div');d.id='late';d.textContent='Arrived late';document.body.append(d)},800)">Load later</button>
 <a href="#bottom">Down</a>
 <div style="height:3000px"></div><p id=bottom>Bottom</p>

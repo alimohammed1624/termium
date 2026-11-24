@@ -678,6 +678,20 @@ try:
           "asked from a terminal that's gone; dropped" in rclog and "Restart anyway" not in rb.text() and server_pid("rc") == rc_pid and not update_ui(rb),
           (rb.line(2), server_pid("rc"), rc_pid, rclog[-400:]))
     stop("rc")
+    # The same terminal opens the address bar while its slow probe runs: the question doesn't replace their edit.
+    ra = term(os.path.join(inst_o, "termium"), "-s", "rc2", "--incognito", PAGE, state="st-nw", env={"TERMIUM_TEST_SLOW_PROBE_MS": "3000"})
+    ra.wait_text("termium test page", 40); ra.key("ctrl+b"); ra.key("d"); exit_code(ra)
+    rn = term(os.path.join(inst_n, "termium"), "attach", "rc2", state="st-nw")
+    rn.wait_text("termium test page", 20); time.sleep(2); rn.key("ctrl+b"); rn.key("d"); exit_code(rn)
+    ra = term(os.path.join(inst_o, "termium"), "attach", "rc2", state="st-nw")
+    ra.wait_for(lambda: f"termium {NEXT} is installed" in ra.line(2), 20)
+    rc_pid = server_pid("rc2")
+    open_box(ra); ra.key("r"); time.sleep(0.5)
+    ra.key("ctrl+l"); ra.key("ctrl+a"); ra.type("my draft"); time.sleep(4)
+    ra.key("enter"); time.sleep(2)
+    check("a slow restart question started before the person began editing the address never replaces their edit",
+          "Restart anyway" not in ra.text() and server_pid("rc2") == rc_pid, (ra.line(2), server_pid("rc2"), rc_pid))
+    stop("rc2")
     sk2_cache = os.path.join(tmp, "st-sk2", "termium", "update-check.json")
     sa = term(cur_bin, "-s", "sk2", "--incognito", PAGE, state="st-sk2")
     sa.wait_for(lambda: notice(sa), 40)
@@ -916,7 +930,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "sk2", "relb", "ag", "agr", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

@@ -135,9 +135,10 @@ An agent (Claude Code, Codex, a script) can drive a session while you
 watch it in your terminal, a tmux or herdr pane say: everything it does
 shows as it happens (and is named in the status line as `agent: ...`,
 never with what it typed: a password stays unshown), and it never takes
-over your terminal or keyboard. While you're editing the address bar,
-answering a prompt or reading help, an agent's `select` waits for you to
-finish rather than switching tabs under you.
+over your terminal or keyboard. While you're busy (editing the address
+bar, answering a prompt, reading help, or typing), an agent waits before
+switching tabs or acting on the tab you're on, and a new tab it opens
+stays in the background. Agents' acting commands run one at a time.
 
 ```sh
 termium start -s agent [url]   # start a session without a terminal (returns once it's up)

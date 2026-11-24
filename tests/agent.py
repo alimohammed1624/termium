@@ -78,6 +78,14 @@ def still_running(t):
     except ChildProcessError:
         return False
 
+def wait_until(pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.3)
+    return False
+
 def ref(snapshot, role, name):
     m = re.search(rf'- {role} "{re.escape(name)}" \[(\d+:\d+)\]', snapshot)
     return m.group(1) if m else None
@@ -225,6 +233,56 @@ try:
           and [t["active"] for t in ctl_json("tabs")] == [False, True], (p.returncode, out, err))
     ctl("close", str(second)); ctl("select", str(first))
 
+    # --- a new tab never takes the person's address-bar draft or keystrokes
+    h.key("ctrl+l"); h.key("ctrl+a"); h.type("draft"); time.sleep(0.3)
+    r = ctl_json("open", f"{BASE}/page.html?bg=1", "--new-tab")
+    h.type("X"); time.sleep(0.5)
+    check("open --new-tab while the person edits the address: opened in the background, said so; their draft intact",
+          "background" in r and "draftX" in h.line(2) and [t["active"] for t in ctl_json("tabs")] == [True, False], (r, h.line(2)))
+    h.key("escape"); ctl("close", str(r.get("id"))); time.sleep(2)
+    ctl("eval", "scrollTo(0, 0)"); time.sleep(0.5)
+    box = page_value("(() => { const r = document.getElementById('city').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()")
+    h.click(220 + int(box[0]), 40 + int(box[1])); time.sleep(0.3)
+    opener = subprocess.Popen(["bun", main, "ctl", "-s", "watch", "open", f"{BASE}/agent.html?auto=1", "--new-tab", "--json"], cwd=ROOT,
+                              env=dict(os.environ, **ENV), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for ch in "abcdef":
+        h.type(ch); time.sleep(0.25)
+    out, _ = opener.communicate(timeout=60)
+    time.sleep(0.5)
+    check("the person typing into a page isn't interrupted by a new tab (it opens behind)",
+          page_value("document.getElementById('city').value") == "abcdef" and [t["active"] for t in ctl_json("tabs")][0],
+          (page_value("document.getElementById('city').value"), out[-200:]))
+    ctl("close", str(json.loads(out or "{}").get("id"))); time.sleep(2)
+    ctl("type", name_id, ""); ctl("type", ref(ctl("snapshot").stdout, "textbox", "City"), "")
+
+    # --- agents' typing never interleaves (acting commands run one at a time)
+    snap = ctl("snapshot").stdout
+    city_id = ref(snap, "textbox", "City")
+    mixed = []
+    for _ in range(4):
+        ps = [subprocess.Popen(["bun", main, "ctl", "-s", "watch", "type", fid, txt], cwd=ROOT, env=dict(os.environ, **ENV), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for fid, txt in ((name_id, "AAAAAAAA"), (city_id, "BBBBBBBB"))]
+        for p_ in ps:
+            p_.communicate(timeout=60)
+        mixed.append(page_value("[document.getElementById('name').value, document.getElementById('city').value]"))
+    check("two agents typing into two fields at once: each field gets its own text, every time",
+          all(m == ["AAAAAAAA", "BBBBBBBB"] for m in mixed), mixed)
+
+    # --- what can't be typed into isn't changed; labels never show what was typed; shadow DOM
+    snap = ctl("snapshot").stdout
+    offsel_id, notes_id, shadow_id = ref(snap, "combobox", "Frozen list"), ref(snap, "textbox", "Notes"), ref(snap, "textbox", "Shadow field")
+    r = ctl("type", offsel_id, "Banana")
+    check("type into a disabled select: exit 1, unchanged", r.returncode == 1 and "disabled" in r.stderr
+          and page_value("document.getElementById('offsel').value") == "a", (r.returncode, r.stderr))
+    r = ctl("type", notes_id, "sample-draft")
+    shown = h.wait_for(lambda: "typed into" in h.line(2), 5)
+    check("type into a contenteditable: typed, and the status names it without its text",
+          r.returncode == 0 and page_value("document.getElementById('ed').innerText.trim()") == "sample-draft" and shown and "sample-draft" not in h.text(),
+          (r.returncode, r.stderr, h.line(2)))
+    r = ctl("type", shadow_id, "in the shadow")
+    check("type into an input inside a shadow root works", r.returncode == 0 and
+          page_value("document.getElementById('host').shadowRoot.getElementById('sin').value") == "in the shadow", (r.returncode, r.stderr))
+
     # --- errors and exit statuses
     r = ctl("click", f"{first}:999999")
     check("an element that's gone: exit 1, says to snapshot again", r.returncode == 1 and "snapshot" in r.stderr, (r.returncode, r.stderr))
@@ -257,6 +315,24 @@ try:
     check("...and termium's size comes back once it lets go",
           h.wait_for(lambda: page_value("[innerWidth, innerHeight]") == before, 10), (before, page_value("[innerWidth, innerHeight]")))
     check("termium kept drawing meanwhile", h.frames > f1)
+    # Held for a while on a page that keeps changing: no periodic freezes (termium trying its own size now and then).
+    ctl("open", f"{BASE}/anim.html")
+    time.sleep(2)
+    holder = subprocess.Popen(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "viewport", url, "anim.html", "500", "400", "15"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    holder.stdout.readline(); time.sleep(1)
+    samples = []
+    t_end = time.time() + 12
+    while time.time() < t_end:
+        samples.append((time.time(), h.frames)); time.sleep(0.1)
+    holder.communicate(timeout=30)
+    gaps, last_t, last_f = [], samples[0][0], samples[0][1]
+    for ts, fr in samples:
+        if fr != last_f:
+            gaps.append(ts - last_t); last_t, last_f = ts, fr
+    gaps.append(samples[-1][0] - last_t)
+    check("a viewport held by another client: the pane keeps updating (no freeze over 1 s in 12 s)", max(gaps) < 1.0, round(max(gaps), 2))
+    ctl("open", f"{BASE}/agent.html")
     # The person's own input still works.
     box = page_value("(() => { const r = document.getElementById('name').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()")
     ctl("scroll", "up", "5000")
@@ -281,8 +357,39 @@ try:
     check("ls shows it detached", re.search(r"^bg\s+\d+\s+detached", r.stdout, re.M), r.stdout)
     time.sleep(31)
     check("it isn't ended for want of a terminal", server_pid("bg") is not None)
+    # A detached page that another client resized, then let go: back to its size (1280x800 here).
+    bg_url = json.loads(cli("devtools", "bg", "--json").stdout or "{}").get("browserURL", "")
+    r = ext("viewport", bg_url, "agent.html", "500", "400", "2")
+    check("detached: another client's viewport, once let go, gives way to 1280x800 again",
+          json.loads(r.stdout or "[]") == [500, 400] and wait_until(lambda: page_value("[innerWidth, innerHeight]", session="bg") == [1280, 800], 10),
+          (r.stdout, page_value("[innerWidth, innerHeight]", session="bg")))
     r = cli("kill", "bg")
     check("kill ends it", r.returncode == 0 and server_pid("bg") is None, (r.returncode, r.stderr))
+    # Started without a URL: wait load is done at once.
+    cli("start", "-s", "blank", "--incognito")
+    r = ctl("wait", "load", "--timeout", "5", session="blank")
+    check("wait load on a session started without a URL: done", r.returncode == 0, (r.returncode, r.stderr))
+    cli("kill", "blank")
+    # ctl while a session is still starting (reopening a restart snapshot without a terminal): it waits, never "couldn't start".
+    layout = {"spaces": [{"name": "kept", "active": 0, "tabs": [{"root": {"url": f"{BASE}/agent.html?r={i}"}, "focus": 0, "zoomed": False} for i in range(6)]}],
+              "activeSpace": 0, "sidebar": True, "zoom": 1}
+    rp = os.path.join(sockdir, "rest.restore")
+    json.dump({"v": 1, "at": int(time.time() * 1000), "from": "0.3.0", "layout": layout,
+               "launch": {"incognito": True, "scale": None, "search": "https://duckduckgo.com/?q=%s"}}, open(rp, "w"))
+    os.chmod(rp, 0o600)
+    starter = subprocess.Popen(["bun", main, "start", "-s", "rest"], cwd=ROOT, env=dict(os.environ, **ENV), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    codes = []
+    end = time.time() + 40
+    while time.time() < end and starter.poll() is None:
+        q = ctl("tabs", session="rest")
+        if q.returncode != 3:
+            codes.append((q.returncode, q.stderr.strip()[:80]))
+    starter.communicate(timeout=60)
+    final = ctl_json("tabs", session="rest")
+    check("ctl during a restore waits for it (no 'couldn't start' failures), and sees every tab",
+          all(c == 0 for c, _ in codes) and isinstance(final, list) and len(final) == 6, (codes, final if not isinstance(final, list) else len(final)))
+    cli("kill", "rest")
     # Two starts of one name at once, each with a URL: one session, both URLs open.
     starts = [subprocess.Popen(["bun", main, "start", "-s", "race", "--incognito", f"{BASE}/{f}"], cwd=ROOT, env=dict(os.environ, **ENV),
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
@@ -299,7 +406,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("watch", "bg", "race"):
+    for name in ("watch", "bg", "race", "blank", "rest"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)
