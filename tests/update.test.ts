@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { wrapWords } from "../src/app";
 import { lockFile, unlockFile } from "../src/browser";
-import { readRestore, takeRestore, writeRestore, type Restore } from "../src/session";
+import { restoreConflict, readRestore, takeRestore, writeRestore, type Restore } from "../src/session";
 import {
   UPGRADE_CMD,
   cachedNewer,
@@ -17,6 +17,8 @@ import {
   extractBinary,
   installBinary,
   installRelease,
+  nativeProblem,
+  updateCache,
   isNewer,
   loadCache,
   parseVersion,
@@ -356,3 +358,66 @@ test("two updaters in separate processes: the newer release wins", async () => {
   expect(["0.3.1", "0.3.2"]).toContain(a.trim());
   expect(binaryVersion(exe)).toBe("0.3.2");
 }, 20_000);
+
+test("only a native termium binary for this machine is accepted", () => {
+  const elf = (machine: number, cls = 2, size = 100_000_000) => {
+    const b = Buffer.alloc(size);
+    b.writeUInt32BE(0x7f454c46, 0);
+    b[4] = cls;
+    b[5] = 1;
+    b.writeUInt16LE(2, 16);
+    b.writeUInt16LE(machine, 18);
+    return new Uint8Array(b.buffer, b.byteOffset, b.length);
+  };
+  const macho = (cpu: number) => {
+    const b = Buffer.alloc(100_000_000);
+    b.writeUInt32LE(0xfeedfacf, 0);
+    b.writeUInt32LE(cpu, 4);
+    b.writeUInt32LE(2, 12);
+    return new Uint8Array(b.buffer, b.byteOffset, b.length);
+  };
+  const ref = 95_000_000;
+  expect(nativeProblem(elf(0x3e), "linux", "x64", ref)).toBeNull();
+  expect(nativeProblem(elf(0xb7), "linux", "arm64", ref)).toBeNull();
+  expect(nativeProblem(elf(0xb7), "linux", "x64", ref)).toMatch(/not built for x64/);
+  expect(nativeProblem(elf(0x3e, 1), "linux", "x64", ref)).toMatch(/64-bit/);
+  expect(nativeProblem(elf(0x3e, 2, 2_000_000), "linux", "x64", ref)).toMatch(/size/);
+  expect(nativeProblem(new TextEncoder().encode(`#!/bin/sh\necho "termium 0.3.2"\n${" ".repeat(100)}`), "linux", "x64", ref)).toMatch(/not an ELF/);
+  expect(nativeProblem(macho(0x0100000c), "darwin", "arm64", ref)).toBeNull();
+  expect(nativeProblem(macho(0x01000007), "darwin", "arm64", ref)).toMatch(/not built for arm64/);
+  expect(nativeProblem(elf(0x3e), "darwin", "x64", ref)).toMatch(/Mach-O/);
+  // The real thing: this machine's bun is a native executable.
+  const bun = readFileSync(process.execPath);
+  expect(nativeProblem(bun, process.platform, process.arch, bun.length)).toBeNull();
+});
+
+test("cache changes from several processes at once are never lost", async () => {
+  const p = join(tempDir(), "update-check.json");
+  const mod = join(import.meta.dir, "..", "src", "update.ts");
+  const run = (field: string, prefix: string) =>
+    Bun.spawn(["bun", "-e", `const u = await import(${JSON.stringify(mod)});
+      for (let i = 0; i < 150; i++) u.updateCache(${JSON.stringify(p)}, (c) => ({ ...c, ${field}: "${prefix}" + i }));`]);
+  const a = run("latest", "v1.0.");
+  const b = run("skipped", "v2.0.");
+  expect(await a.exited).toBe(0);
+  expect(await b.exited).toBe(0);
+  const c = loadCache(p)!;
+  expect(c.latest).toBe("v1.0.149");
+  expect(c.skipped).toBe("v2.0.149");
+  expect(readdirSync(join(p, "..")).sort()).toEqual(["update-check.json"]);
+}, 30_000);
+
+test("a restart snapshot reopens only under the launch options it was saved with", () => {
+  const r: Restore = {
+    v: 1, at: Date.now(), from: "0.3.0",
+    launch: { profile: "/p/a", incognito: false, scale: null, search: "x%s" },
+    layout: { spaces: [], activeSpace: 0, sidebar: true, zoom: 1 },
+  };
+  expect(restoreConflict(r, { profile: "/p/a", incognito: false })).toBeNull();
+  expect(restoreConflict(r, { incognito: false })).toMatch(/--profile \/p\/a/);
+  expect(restoreConflict(r, { incognito: true })).toMatch(/wasn't --incognito/);
+  const inc = { ...r, launch: { ...r.launch, profile: undefined, incognito: true } };
+  expect(restoreConflict(inc, { incognito: true })).toBeNull();
+  expect(restoreConflict(inc, { incognito: false })).toMatch(/was --incognito/);
+  expect(restoreConflict({ ...r, launch: { ...r.launch, profile: undefined } }, { incognito: false, browser: "/b" })).toMatch(/default browser/);
+});

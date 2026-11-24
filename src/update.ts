@@ -22,6 +22,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeSync,
   existsSync,
   readdirSync,
@@ -169,10 +170,30 @@ export function cachedNewer(c: Cache | null, current: string): string | null {
   return c?.latest && isNewer(c.latest, current) ? c.latest : null;
 }
 
+/**
+ * Changes the cache: read, changed by `change`, written back, all under a
+ * lock beside it, so termiums doing this at once (sessions, check-update)
+ * never lose each other's fields.
+ */
+export function updateCache(path: string, change: (c: Cache) => Cache): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const lock = `${path}.lock`;
+  let held = false;
+  for (const end = Date.now() + 5000; !held && Date.now() < end; ) {
+    held = lockFile(lock) === null;
+    if (!held) Bun.sleepSync(10);
+  }
+  if (!held) throw new Error("the update cache is locked by another termium");
+  try {
+    saveCache(path, change(loadCache(path) ?? { checked_at: 0, latest: null, skipped: null }));
+  } finally {
+    unlockFile(lock);
+  }
+}
+
 /** Records that the user does not want to be asked about `tag` again. */
 export function skipVersion(path: string, tag: string): void {
-  const c = loadCache(path) ?? { checked_at: 0, latest: null, skipped: null };
-  saveCache(path, { ...c, skipped: tag });
+  updateCache(path, (c) => ({ ...c, skipped: tag }));
 }
 
 // ------------------------------------------------------------ the check
@@ -261,10 +282,12 @@ export async function checkAndCache(path: string | null, version: string, stop?:
   // Stopped (nobody to tell any more): nothing is recorded.
   if (stop?.aborted) return { ok: false, error: "stopped" };
   if (path) {
-    const prev = loadCache(path);
-    const latest = r.ok && parseVersion(r.tag) ? r.tag : (prev?.latest ?? null);
     try {
-      saveCache(path, { checked_at: Math.floor(Date.now() / 1000), latest, skipped: prev?.skipped ?? null });
+      updateCache(path, (prev) => ({
+        ...prev,
+        checked_at: Math.floor(Date.now() / 1000),
+        latest: r.ok && parseVersion(r.tag) ? r.tag : prev.latest,
+      }));
     } catch {}
   }
   return r;
@@ -484,6 +507,37 @@ async function download(url: string, version: string): Promise<Uint8Array> {
   }
 }
 
+/** ELF e_machine / Mach-O cputype of termium's release targets. */
+const ELF_MACHINE: Record<string, number> = { x64: 0x3e, arm64: 0xb7 };
+const MACHO_CPU: Record<string, number> = { x64: 0x01000007, arm64: 0x0100000c };
+
+/**
+ * Why `bin` isn't a termium binary for this machine (null if it looks like
+ * one): a native 64-bit executable for `platform`/`arch` (ELF on Linux,
+ * Mach-O on macOS), and of about the size of `refSize` (the running one).
+ */
+export function nativeProblem(bin: Uint8Array, platform: string, arch: string, refSize: number): string | null {
+  const b = Buffer.from(bin.buffer, bin.byteOffset, bin.byteLength);
+  if (b.length < 64) return "it is not an executable";
+  if (platform === "linux") {
+    if (b.readUInt32BE(0) !== 0x7f454c46) return "it is not an ELF executable";
+    if (b[4] !== 2 || b[5] !== 1) return "it is not a 64-bit little-endian ELF executable";
+    const type = b.readUInt16LE(16);
+    if (type !== 2 && type !== 3) return "it is not an ELF executable";
+    if (b.readUInt16LE(18) !== ELF_MACHINE[arch]) return `it is not built for ${arch}`;
+  } else if (platform === "darwin") {
+    if (b.readUInt32LE(0) !== 0xfeedfacf) return "it is not a 64-bit Mach-O executable";
+    if (b.readUInt32LE(4) !== MACHO_CPU[arch]) return `it is not built for ${arch}`;
+    if (b.readUInt32LE(12) !== 2) return "it is not a Mach-O executable";
+  } else {
+    return `there is no prebuilt termium for ${platform}`;
+  }
+  if (refSize > 0 && (b.length < refSize / 3 || b.length > refSize * 3)) {
+    return `its size (${Math.round(b.length / 1e6)} MB) is far from this termium's (${Math.round(refSize / 1e6)} MB)`;
+  }
+  return null;
+}
+
 /** Runs a staged binary's --version: it must run here and be the release we asked for. */
 function checkRuns(staged: string, tag: string): void {
   const r = Bun.spawnSync([staged, "--version"], { stdout: "pipe", stderr: "ignore", timeout: 20_000 });
@@ -563,7 +617,13 @@ export async function selfUpdate(tag: string, version: string, step: (s: Step) =
   if (!want) throw new Error(`SHA256SUMS has no entry for ${asset}`);
   if (sha256Hex(archive) !== want) throw new Error(`${asset} does not match its SHA-256 in SHA256SUMS; nothing was changed`);
   const bin = extractBinary(archive, target);
-  if (bin.length === 0) throw new Error(`${asset} holds an empty termium binary`);
+  // Never run (nor install) anything but a native termium for this machine.
+  let refSize = 0;
+  try {
+    refSize = statSync(exe).size;
+  } catch {}
+  const problem = nativeProblem(bin, process.platform, process.arch, refSize);
+  if (problem) throw new Error(`${asset} doesn't hold a termium binary for this machine (${problem}); nothing was changed`);
   step("installing");
   return installRelease(bin, exe, tag);
 }
