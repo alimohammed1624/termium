@@ -27,7 +27,8 @@ Usage:
 Options:
   -s, --session <name>  session to use (default: "${DEFAULT_SESSION}")
   --browser <path>      Helium/Chromium binary (default: helium-browser on PATH, or $TERMIUM_BROWSER)
-  --profile <dir>       browser profile directory (default: $XDG_DATA_HOME/termium/profile)
+  --profile <dir>       browser profile directory (default: $XDG_DATA_HOME/termium/profile,
+                        or $XDG_DATA_HOME/termium/profiles/NAME for -s NAME)
   --incognito           use a throwaway profile that is deleted when the session ends
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)

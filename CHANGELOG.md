@@ -15,7 +15,9 @@ Planned as 0.2.0 (`package.json` already says 0.2.0).
   `Ctrl+B d` detaches, and attaching again from any terminal redraws
   everything at that terminal's size. `termium attach [name]`,
   `termium ls`, `termium kill [name]` and `-s/--session NAME` for several
-  sessions. A second attach takes the session over and tells the first
+  sessions; each named session has its own profile
+  (`~/.local/share/termium/profiles/NAME`), so several run at once. A
+  second attach takes the session over and tells the first
   terminal. Closing or killing the terminal only detaches; if the session
   dies, the attached terminal gets its screen back with a message.
   Sessions listen on a private Unix socket in `$XDG_RUNTIME_DIR/termium`;

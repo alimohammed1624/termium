@@ -57,7 +57,8 @@ termium --help
 
 Options: `--browser <path>` (default: Helium on `PATH`, or
 `$TERMIUM_BROWSER`), `--profile <dir>` (default
-`~/.local/share/termium/profile`), `--incognito`, `--scale <n>` (device
+`~/.local/share/termium/profile`, or `.../profiles/NAME` for a session
+started with `-s NAME`), `--incognito`, `--scale <n>` (device
 pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
 They apply when a session starts.
 
@@ -69,8 +70,8 @@ terminal it was started from:
 ```sh
 termium                  # attach to the session "default", starting it if needed
 termium example.com      # ...and open a page (in a new tab if it's running)
-termium -s work --profile ~/work-profile   # another session, with its own browser
-termium -s private --incognito             # ...or with a throwaway profile
+termium -s work          # another session, with its own browser and profile
+termium -s temp --incognito   # ...or with a throwaway profile
 termium attach [name]    # attach to a running session
 termium ls               # list sessions (attached or detached, pages, profile)
 termium kill [name]      # end a session and its browser
@@ -114,7 +115,9 @@ all` also keeps pictures current while the pane is in a hidden window;
 with `on`, a page that changed while hidden shows its old picture until it
 changes again.
 
-**herdr** needs no setup: it draws termium's pictures itself.
+**herdr** needs no setup: it draws termium's pictures itself. (The first
+time herdr runs it shows an introduction that takes the keyboard until you
+dismiss it: Enter, then Esc.)
 
 tmux and herdr both use `Ctrl+B` as their prefix too: press it twice to
 reach termium (`Ctrl+B Ctrl+B d` detaches termium), or change one of the
@@ -162,10 +165,11 @@ divider between panes.
   built-in content blocker loads, so the very first page can take a moment,
   and Helium may reload a page that loaded before the blocker was ready
   (anything typed into it in those first seconds is lost).
-- Only one session can use a profile at a time. For a second browser,
-  start a second session with its own profile: `termium -s NAME
-  --profile DIR` or `termium -s NAME --incognito` (plain `termium` again
-  just attaches to the session that's running). If a session was killed
+- Only one session can use a profile at a time. Each named session
+  (`termium -s NAME`) has its own, `~/.local/share/termium/profiles/NAME`
+  (the default session keeps `~/.local/share/termium/profile`); `--profile`
+  or `--incognito` choose another. Plain `termium` again just attaches to
+  the session that's running. If a session was killed
   outright (`kill -9`), the next start stops the browser it left behind.
 - Logs: `~/.local/state/termium/termium.log` (set `TERMIUM_DEBUG=1` to log
   DevTools traffic) and `browser.log` next to it.

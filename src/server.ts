@@ -24,7 +24,7 @@ import {
 } from "./browser";
 import { CDP } from "./cdp";
 import type { InputEvent } from "./input";
-import { FrameReader, PROTOCOL, dial, jsonFrame, outputFrame, sessionPaths } from "./session";
+import { DEFAULT_SESSION, FrameReader, PROTOCOL, dial, jsonFrame, outputFrame, sessionPaths } from "./session";
 import { setSink } from "./terminal";
 
 export interface LaunchOptions {
@@ -40,7 +40,7 @@ export interface LaunchOptions {
 export interface Hello {
   t: "hello";
   v: number;
-  kind: "attach" | "info" | "kill";
+  kind: "attach" | "info" | "kill" | "abandon";
   version?: string;
   cols?: number;
   rows?: number;
@@ -48,10 +48,18 @@ export interface Hello {
   cellH?: number;
   pixelMouse?: boolean;
   placeholders?: boolean;
+  /** Placeholder ids may use RGB colours (the terminal under tmux shows RGB). */
+  rgbIds?: boolean;
   /** How pictures reach the terminal (for the log): "direct", "tmux-files" or "tmux-paced". */
   via?: string;
   /** Open this in a new tab (attaching to a session that's already running). */
   url?: string | null;
+  /**
+   * Pid of the server this client started, if any: that server opened the
+   * URL itself (so it's not opened twice), and only that one may be
+   * abandoned by this client.
+   */
+  starter?: number;
 }
 
 /**
@@ -130,6 +138,15 @@ function isRunning(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * A session's profile unless --profile/--incognito say otherwise: the
+ * default session keeps termium's original one; a named session gets its
+ * own, so several can run at once.
+ */
+export function defaultProfile(dataDir: string, name: string): string {
+  return name === DEFAULT_SESSION ? join(dataDir, "profile") : join(dataDir, "profiles", name);
 }
 
 export function stateDir(): string {
@@ -264,7 +281,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   try {
     const chosen = args.incognito
       ? mkdtempSync(join(tempBase(), `termium-incognito-${process.pid}-`))
-      : (args.profile ?? join(dataDir, "profile"));
+      : (args.profile ?? defaultProfile(dataDir, name));
     mkdirSync(chosen, { recursive: true });
     // One spelling per directory, so locks and leftover-browser records match
     // however the path was typed (relative, symlinked, trailing slash).
@@ -409,10 +426,14 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         await shutdown(1, e);
         return;
       }
+      appReady = true;
       app.flushEarlyInput();
+      for (const url of pendingUrls.splice(0)) app.openTab(url);
     })());
 
   let lastHello: Hello | null = null;
+  let appReady = false;
+  const pendingUrls: string[] = [];
 
   const onMessage = (c: Conn, msg: any) => {
     if (!msg || typeof msg !== "object") return;
@@ -439,6 +460,18 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         });
         return;
       }
+      if (h.kind === "abandon") {
+        // The client that started us can't use its terminal. End the
+        // session only if nobody else ever attached; otherwise just let go.
+        if (h.starter !== process.pid || everAttached || client) {
+          void c.end({ t: "bye", reason: "exited", code: 0 });
+          return;
+        }
+        log("abandoned by the client that started it");
+        c.send({ t: "killing" });
+        void shutdown(0, undefined, c);
+        return;
+      }
       if (h.kind === "kill") {
         log("killed by request");
         c.send({ t: "killing" });
@@ -462,11 +495,19 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       c.send({ t: "welcome", pid: process.pid });
       setSink((data, done) => c.output(data, done));
       log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders} via=${h.via}`);
+      // Its own server (it opened the URL at start) or another one (a client
+      // whose server lost the race to start this session): then open it here.
+      if (h.starter === process.pid) h.url = null;
       if (!app) {
+        // Until the app is up, URLs wait.
+        if (h.url) pendingUrls.push(h.url);
         void startApp(h);
       } else {
         app.attach(terminalOf(h));
-        if (h.url) app.openTab(h.url);
+        if (h.url) {
+          if (appReady) app.openTab(h.url);
+          else pendingUrls.push(h.url);
+        }
       }
       return;
     }
@@ -542,17 +583,23 @@ function readPidSafe(path: string): number | null {
   }
 }
 
+/** Largest terminal drawn for, in device pixels each way: beyond it, pictures stall the terminal. */
+const MAX_PIXELS = 16384;
+
 function terminalOf(h: Partial<Hello>) {
   const num = (v: unknown, dflt: number, max: number) => {
     const n = Math.floor(Number(v));
-    return Number.isFinite(n) && n >= 1 && n <= max ? n : dflt;
+    return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : dflt;
   };
+  const cellW = num(h.cellW, 10, 256);
+  const cellH = num(h.cellH, 20, 256);
   return {
-    cols: num(h.cols, 80, 4096),
-    rows: num(h.rows, 24, 4096),
-    cellW: num(h.cellW, 10, 512),
-    cellH: num(h.cellH, 20, 512),
+    cols: num(h.cols, 80, Math.max(1, Math.floor(MAX_PIXELS / cellW))),
+    rows: num(h.rows, 24, Math.max(1, Math.floor(MAX_PIXELS / cellH))),
+    cellW,
+    cellH,
     pixelMouse: !!h.pixelMouse,
     placeholders: !!h.placeholders,
+    rgbIds: !!h.rgbIds,
   };
 }
