@@ -230,8 +230,27 @@ export async function runClient(o: ClientOptions): Promise<void> {
               1,
             );
           }
-          const killed = Bun.spawnSync([...o.selfArgv, "kill", o.name], { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
-          if (killed.exitCode !== 0) fail(`couldn't end session "${o.name}"`, 1);
+          // End exactly the server that was asked about (by pid, while it's still
+          // the same process), never whatever holds the name by then.
+          const pid = askedAbout.pid;
+          const same = () => pidAlive(pid) && startTime(pid) === askedAbout.start;
+          if (same()) {
+            try {
+              process.kill(pid, "SIGTERM"); // it closes its browser and exits
+            } catch {}
+          }
+          for (let i = 0; i < 400 && same(); i++) await Bun.sleep(50);
+          if (same()) {
+            const family = [pid, ...descendants(pid)];
+            for (const q of family) {
+              try {
+                process.kill(q, "SIGKILL");
+              } catch {}
+            }
+            for (let i = 0; i < 60 && same(); i++) await Bun.sleep(50);
+          }
+          if (same()) fail(`couldn't end session "${o.name}" (pid ${pid})`, 1);
+          removeStale(o.name);
           // Start it again, as it was started, from this termium.
           const argv = [...o.selfArgv, "--session", o.name];
           if (info.profile === "(incognito)") argv.push("--incognito");
