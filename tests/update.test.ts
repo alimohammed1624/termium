@@ -447,3 +447,29 @@ test("a restart snapshot reopens only under every launch option it was saved wit
   expect(restoreConflict(inc, { incognito: true, scale: null, search: "x%s" })).toBeNull();
   expect(restoreConflict(inc, { incognito: false, scale: null, search: "x%s" })).toBe("it was started with --incognito");
 });
+
+test("a check stopped while it waits for the cache lock writes nothing", async () => {
+  const srv = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { Location: "https://github.com/o/r/releases/tag/v0.9.0" } }) });
+  const old = process.env.TERMIUM_UPDATE_URL;
+  process.env.TERMIUM_UPDATE_URL = `http://127.0.0.1:${srv.port}/latest`;
+  try {
+    const p = join(tempDir(), "update-check.json");
+    saveCache(p, { checked_at: 1, latest: "v0.3.1", skipped: null });
+    expect(lockFile(`${p}.lock`)).toBeNull();
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 200);
+    setTimeout(() => unlockFile(`${p}.lock`), 300); // freed before the 0.5 s wait is over
+    expect(await checkAndCache(p, "0.3.0", stop.signal)).toEqual({ ok: false, error: "stopped" });
+    await Bun.sleep(400);
+    expect(loadCache(p)).toEqual({ checked_at: 1, latest: "v0.3.1", skipped: null });
+    // Not stopped, the same wait ends in a write.
+    expect(lockFile(`${p}.lock`)).toBeNull();
+    setTimeout(() => unlockFile(`${p}.lock`), 200);
+    expect(await checkAndCache(p, "0.3.0")).toEqual({ ok: true, tag: "v0.9.0" });
+    expect(loadCache(p)?.latest).toBe("v0.9.0");
+  } finally {
+    if (old === undefined) delete process.env.TERMIUM_UPDATE_URL;
+    else process.env.TERMIUM_UPDATE_URL = old;
+    srv.stop(true);
+  }
+});

@@ -177,17 +177,19 @@ export function cachedNewer(c: Cache | null, current: string): string | null {
  * waited for (without blocking anything else) at most `waitMs`, and if
  * it's still taken nothing is written. True if it was written.
  */
-export async function updateCache(path: string, change: (c: Cache) => Cache, waitMs = 500): Promise<boolean> {
+export async function updateCache(path: string, change: (c: Cache) => Cache, waitMs = 500, stop?: AbortSignal): Promise<boolean> {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const lock = `${path}.lock`;
   let held = false;
-  for (const end = Date.now() + waitMs; ; ) {
+  for (const end = Date.now() + waitMs; !stop?.aborted; ) {
     held = lockFile(lock) === null;
     if (held || Date.now() >= end) break;
     await Bun.sleep(15);
   }
   if (!held) return false;
   try {
+    // Stopped while it waited (or as it got the lock): nothing is written.
+    if (stop?.aborted) return false;
     saveCache(path, change(loadCache(path) ?? { checked_at: 0, latest: null, skipped: null }));
     return true;
   } finally {
@@ -287,12 +289,14 @@ export async function checkAndCache(path: string | null, version: string, stop?:
   if (stop?.aborted) return { ok: false, error: "stopped" };
   if (path) {
     try {
-      await updateCache(path, (prev) => ({
-        ...prev,
-        checked_at: Math.floor(Date.now() / 1000),
-        latest: r.ok && parseVersion(r.tag) ? r.tag : prev.latest,
-      }));
+      await updateCache(
+        path,
+        (prev) => ({ ...prev, checked_at: Math.floor(Date.now() / 1000), latest: r.ok && parseVersion(r.tag) ? r.tag : prev.latest }),
+        500,
+        stop,
+      );
     } catch {}
+    if (stop?.aborted) return { ok: false, error: "stopped" };
   }
   return r;
 }
