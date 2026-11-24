@@ -439,6 +439,17 @@ try:
     check("...and Ctrl+B U says it was skipped", k.wait_for(lambda: "was skipped" in k.line(2), 5) and not box_open(k), k.line(2))
     stop("skip2")
 
+    # ------------------------------------------------ a release pulled since it was cached: the offer is withdrawn
+    os.makedirs(os.path.join(tmp, "st-pulled", "termium"), exist_ok=True)
+    json.dump({"checked_at": 1, "latest": f"v{NEXT}", "skipped": None}, open(os.path.join(tmp, "st-pulled", "termium", "update-check.json"), "w"))
+    LATEST["tag"] = f"v{CUR}"
+    pl = term(cur_bin, "-s", "pulled", "--incognito", PAGE, state="st-pulled")
+    pl.wait_text("termium test page", 40)
+    check("pulled release: the check finds the latest is this version", pl.wait_for(lambda: (cache("st-pulled") or {}).get("latest") == f"v{CUR}", 15), cache("st-pulled"))
+    time.sleep(1)
+    check("pulled release: ...and the cached offer and badge are withdrawn", not notice(pl) and not update_ui(pl), (pl.line(1), pl.line(2)))
+    stop("pulled")
+
     # ------------------------------------------------ skipped in another session: withdrawn here on the next attach
     LATEST["tag"] = f"v{NEXT}"
     sx = term(cur_bin, "-s", "skx", "--incognito", PAGE, state="st-skx")
@@ -610,6 +621,41 @@ try:
                   and "↻" not in t3.line(1), (t3.line(1), t3.line(2)))
         stop(sess)
     shutil.copy(next_bin, os.path.join(inst_n, "termium"))
+    # The newer version known at one path, gone; the same version attaching from another: that one is used.
+    inst_n2 = os.path.join(tmp, "inst-new2"); os.makedirs(inst_n2)
+    shutil.copy(next_bin, os.path.join(inst_n2, "termium"))
+    t1 = term(os.path.join(inst_o, "termium"), "-s", "nw3", "--incognito", PAGE, state="st-nw")
+    t1.wait_text("termium test page", 40); t1.key("ctrl+b"); t1.key("d"); exit_code(t1)
+    for d in (inst_n, inst_n2):
+        t2 = term(os.path.join(d, "termium"), "attach", "nw3", state="st-nw")
+        t2.wait_text("termium test page", 20); time.sleep(2); t2.key("ctrl+b"); t2.key("d"); exit_code(t2)
+        if d == inst_n:
+            os.remove(os.path.join(inst_n, "termium"))
+    t3 = term(os.path.join(inst_o, "termium"), "attach", "nw3", state="st-nw")
+    old_pid = server_pid("nw3")
+    t3.wait_for(lambda: f"termium {NEXT} is installed" in t3.line(2), 20)
+    open_box(t3); t3.key("r")
+    check("nw3: the same newer version from another path (the first gone) is what r restarts into",
+          t3.wait_for(lambda: "inst-new2" in output(t3), 15) and t3.wait_for(lambda: server_pid("nw3") not in (None, old_pid), 30) and
+          f"(termium {NEXT})" in ls_row("nw3", "st-nw"), (output(t3)[-300:], ls_row("nw3", "st-nw")))
+    stop("nw3")
+    shutil.copy(next_bin, os.path.join(inst_n, "termium"))
+
+    # ------------------------------------------------ a relative --browser survives a restart from another directory
+    helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
+    bdir = os.path.join(tmp, "bdir"); os.makedirs(bdir)
+    os.symlink(helium, os.path.join(bdir, "my-browser"))
+    t1 = Term([cur_bin, "-s", "relb", "--incognito", "--browser", "./my-browser", PAGE], cwd=bdir, env=env_for("st-relb")); terms.append(t1)
+    check("relative --browser: the session starts", t1.wait_text("termium test page", 40))
+    t1.key("ctrl+b"); t1.key("d"); exit_code(t1)
+    t2 = term(os.path.join(inst_n, "termium"), "attach", "relb", state="st-relb")  # cwd: elsewhere
+    t2.wait_for(lambda: f"termium {NEXT} is installed" in t2.line(2), 20)
+    old_pid = server_pid("relb")
+    open_box(t2); t2.key("r")
+    check("relative --browser: r from another directory restarts it with the same browser",
+          t2.wait_for(lambda: server_pid("relb") not in (None, old_pid), 30) and t2.wait_for(lambda: "Restarted:" in t2.text(), 40) and
+          not os.path.exists(os.path.join(sockdir, "relb.restore")), (output(t2)[-300:], ls_row("relb", "st-relb")))
+    stop("relb")
 
     # ------------------------------------------------ a skip is reported saved only once it is
     sk_cache = os.path.join(tmp, "st-sklock", "termium", "update-check.json")
@@ -718,6 +764,19 @@ try:
         check("0.2.0: with --no-update-check, no question", lq.wait_text("termium test page", 20) and "[y/N]" not in output(lq), output(lq)[-300:])
         lq.key("ctrl+b"); lq.key("d")
         check("0.2.0: ...and no restart instructions on detach", exit_code(lq) == 0 and "termium kill legacy" not in output(lq), output(lq)[-300:])
+        # A question left open while the session is replaced: answering it does nothing to the new one.
+        g0 = term(old_bin, "-s", "lgx", "--incognito", PAGE, state="st-legacy")
+        g0.wait_text("termium test page", 40); g0.key("ctrl+b"); g0.key("d"); exit_code(g0)
+        g1 = term(cur_bin, "attach", "lgx", state="st-legacy")
+        g1.wait_for(lambda: "[y/N]" in output(g1), 10)
+        cli(cur_bin, "kill", "lgx", state="st-legacy")
+        g2 = term(cur_bin, "-s", "lgx", "--incognito", PAGE, state="st-legacy")
+        g2.wait_text("termium test page", 40)
+        new_pid = server_pid("lgx")
+        g1.write("y\r")
+        check("0.2.0: a question about a session replaced meanwhile expires, and the new one is left alone",
+              exit_code(g1, 15) == 1 and "changed while you answered" in output(g1) and server_pid("lgx") == new_pid, (output(g1)[-300:], new_pid, server_pid("lgx")))
+        stop("lgx")
         l1 = term(cur_bin, "attach", "legacy", state="st-legacy")
         check(f"0.2.0: attaching from {CUR} says the session runs 0.2.0 and asks to restart it",
               l1.wait_for(lambda: f"runs termium 0.2.0, older than this termium ({CUR})" in output(l1) and "[y/N]" in output(l1), 10), output(l1)[-400:])
@@ -745,7 +804,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "relb", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)
