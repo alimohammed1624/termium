@@ -132,6 +132,8 @@ interface UpdateBox {
   state: "offer" | "working" | "done" | "failed" | "installed";
   step?: Step;
   error?: string;
+  /** The binary an update replaced. */
+  path?: string;
 }
 
 /** What the session server does for the update box. */
@@ -2221,9 +2223,20 @@ export class App {
     return tag !== this.skippedTag && (!this.lastOffered || isNewer(tag, this.lastOffered));
   }
 
+  /** A release the user skipped (maybe in another session): never offered, and an offer of it on screen is withdrawn. */
+  updateSkipped(tag: string | null | undefined): void {
+    if (!tag) return;
+    this.skippedTag = tag;
+    const box = this.updateBox;
+    if (box?.state !== "offer" || box.tag !== tag) return;
+    this.updateBox = null;
+    if (this.mode === "update") this.closeUpdate(false);
+    else this.queueChrome();
+  }
+
   /** The update check found newer release `tag`; `offer` is false when the user skipped it. */
   updateAvailable(tag: string, offer: boolean): void {
-    if (!offer) this.skippedTag = tag;
+    if (!offer) this.updateSkipped(tag);
     if (!isNewer(tag, this.opts.version)) return;
     if (this.updateInstalled && !isNewer(tag, this.updateInstalled)) return; // that one's installed already
     if (this.updateLatest !== tag) {
@@ -2274,12 +2287,12 @@ export class App {
   }
 
   /** The self-update ended: `installed` is the version now on disk, or `error` why it failed. */
-  updateDone(tag: string, installed: string | null, error: string | null): void {
+  updateDone(tag: string, installed: string | null, error: string | null, path?: string): void {
     if (installed) {
       this.updateInstalled = installed;
       this.updateLatest = null;
     }
-    this.updateBox = { tag: installed ?? tag, state: error ? "failed" : "done", error: error ?? undefined };
+    this.updateBox = { tag: installed ?? tag, state: error ? "failed" : "done", error: error ?? undefined, path };
     this.queueChrome();
   }
 
@@ -2474,7 +2487,10 @@ export class App {
       case "done":
       case "installed":
         title = box.state === "done" ? "updated" : "restart to update";
-        if (box.state === "done") add([ok, ` ✓ updated to termium ${nv}`]);
+        if (box.state === "done") {
+          add([ok, ` ✓ updated to termium ${nv}`]);
+          if (box.path) wrapped(dim, box.path);
+        }
         else add([ok, ` termium ${nv}`], [txt, " is installed"]);
         blank();
         wrapped(txt, `This session keeps running termium ${cur} until it restarts.`);

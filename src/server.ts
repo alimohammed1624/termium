@@ -47,6 +47,7 @@ import {
   cachePath,
   cachedNewer,
   checkAndCache,
+  currentExe,
   displayVersion,
   isNewer,
   loadCache,
@@ -377,7 +378,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     rmSync(paths.pid, { force: true });
   };
 
-  const shutdown = async (code: number, err?: unknown, requester?: Conn, reason?: "restart") => {
+  const shutdown = async (code: number, err?: unknown, requester?: Conn, reason?: "restart", extra?: object) => {
     if (shuttingDown) return;
     shuttingDown = true;
     if (app) app.closingAll = true;
@@ -420,7 +421,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     unlockProfile(profile);
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
     rmSync(browserTmp, { recursive: true, force: true });
-    const bye = { t: "bye", reason: err ? "error" : (reason ?? "exited"), code, message: err ? (err instanceof Error ? err.message : String(err)) : undefined };
+    const bye = { t: "bye", reason: err ? "error" : (reason ?? "exited"), code, message: err ? (err instanceof Error ? err.message : String(err)) : undefined, ...extra };
     await Promise.all([client?.end(bye), requester && requester !== client ? requester.end(bye) : undefined]);
     process.exit(code);
   };
@@ -530,6 +531,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   let updating = false;
   /** The version a self-update installed (this session runs the old one until it restarts). */
   let installed: string | null = null;
+  /** The binary that update replaced (this server's own, symlinks resolved): what a restart runs. */
+  let installedExe: string | null = null;
 
   const runCheck = async () => {
     if (checking || !client || !wantsUpdates || !appReady || shuttingDown) return;
@@ -550,6 +553,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         log(`update check: ${r.error}`);
         return;
       }
+      if (client && wantsUpdates) app?.updateSkipped(loadCache(cacheFile)?.skipped);
       if (isNewer(r.tag, version) && client && wantsUpdates) {
         log(`update check: termium ${displayVersion(r.tag)} is available`);
         app?.updateAvailable(r.tag, loadCache(cacheFile)?.skipped !== r.tag);
@@ -575,6 +579,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     if (installed) app.newerInstalled(installed);
     if (!wantsUpdates) return;
     const c = loadCache(cacheFile);
+    // Skipped since (in another session, say): withdrawn here too.
+    app.updateSkipped(c?.skipped);
     const tag = cachedNewer(c, version);
     if (tag) app.updateAvailable(tag, c?.skipped !== tag);
     void runCheck();
@@ -585,9 +591,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     updating = true;
     log(`updating to ${tag}`);
     try {
+      const exe = currentExe();
       installed = await selfUpdate(tag, version, (step) => app?.updateStep(step));
+      installedExe = exe;
       log(`updated: termium ${installed} is installed`);
-      app?.updateDone(tag, installed, null);
+      app?.updateDone(tag, installed, null, exe);
     } catch (e: any) {
       log(`update to ${tag} failed: ${e?.message ?? e}`);
       app?.updateDone(tag, null, e?.message ?? String(e));
@@ -617,8 +625,15 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       app.showToast(`Can't restart: ${e?.message ?? e}`, 5000);
       return;
     }
-    log("restarting into the updated termium");
-    void shutdown(0, undefined, undefined, "restart");
+    // The binary to restart from: the one this session updated, unless the
+    // attached terminal runs a newer termium still (then its own).
+    const h = lastHello;
+    const exe =
+      installed && installedExe && !(typeof h?.version === "string" && isNewer(h.version, installed))
+        ? { exe: installedExe, version: installed }
+        : {};
+    log(`restarting into the updated termium${"exe" in exe ? ` (${exe.exe}, ${exe.version})` : ""}`);
+    void shutdown(0, undefined, undefined, "restart", exe);
   };
 
   let lastHello: Hello | null = null;

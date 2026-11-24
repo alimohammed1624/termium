@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lockHolder, pidAlive } from "./browser";
 import { VERSION } from "./version";
-import { isNewer } from "./update";
+import { binaryVersion, isNewer } from "./update";
 import { InputParser, type InputEvent } from "./input";
 import type { Hello } from "./server";
 import { stateDir } from "./server";
@@ -369,13 +369,25 @@ export async function runClient(o: ClientOptions): Promise<void> {
    * server is gone, this process becomes that termium (exec), which starts
    * the session again with the layout the old server left behind.
    */
-  const restartInto = async () => {
+  const restartInto = async (exe?: string, version?: string) => {
     process.stdin.pause();
     process.stdin.removeAllListeners("data");
     for (let i = 0; i < 200 && serverPid && pidAlive(serverPid); i++) await Bun.sleep(50);
     rmSync(errPath, { force: true });
+    // The binary the session updated (which may not be this terminal's own termium).
+    const argv = exe ? [exe, ...o.restartArgv.slice(o.selfArgv.length)] : o.restartArgv;
+    if (exe && version) {
+      const got = binaryVersion(exe);
+      if (got !== version) {
+        console.error(
+          `termium: couldn't restart: ${exe} is ${got ? `termium ${got}` : "not a working termium"}, not the termium ${version} the update installed. ` +
+            `Run termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`} within 10 minutes and its spaces and tabs reopen.`,
+        );
+        process.exit(1);
+      }
+    }
     try {
-      process.execve!(o.restartArgv[0]!, o.restartArgv, process.env);
+      process.execve!(argv[0]!, argv, process.env);
     } catch (e: any) {
       console.error(
         `termium: couldn't restart (${e?.message ?? e}). Run \`termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`}\` ` +
@@ -741,6 +753,12 @@ export async function runClient(o: ClientOptions): Promise<void> {
     if (m?.t === "welcome") {
       welcomed = true;
       serverPid = Number(m.pid) || 0;
+      // This terminal's termium is older than the session's (another copy was updated): say so on leaving.
+      if (o.updateCheck && typeof m.version === "string" && isNewer(m.version, o.version)) {
+        legacyNote =
+          `termium: this termium (${o.version}, ${o.selfArgv.join(" ")}) is older than the one session "${o.name}" runs (${m.version}); ` +
+          `\`termium update\` updates it.`;
+      }
     } else if (m?.t === "pong") {
       if (pingTimer) clearTimeout(pingTimer);
       pingTimer = null;
@@ -762,7 +780,11 @@ export async function runClient(o: ClientOptions): Promise<void> {
         case "takeover":
           return void leave(0, `[detached (session ${o.name} was attached from another terminal)]`);
         case "restart":
-          return void leave(0, `[restarting session ${o.name} into the updated termium]`, restartInto);
+          return void leave(
+            0,
+            `[restarting session ${o.name} into the updated termium${typeof m.exe === "string" ? ` (${m.exe})` : ""}]`,
+            () => restartInto(typeof m.exe === "string" ? m.exe : undefined, typeof m.version === "string" ? m.version : undefined),
+          );
         case "error": {
           let msg = `termium: ${m.message ?? "the session ended with an error"}`;
           // Refused before it ever answered: a session of another termium version
