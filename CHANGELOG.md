@@ -6,7 +6,7 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
-Planned as 0.2.0 (`package.json` already says 0.2.0).
+## [0.2.0] - 2026-11-24
 
 ### Added
 - Detachable sessions, like tmux: the browser, its pages and all of
