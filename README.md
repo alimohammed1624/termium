@@ -175,7 +175,8 @@ termium update           # update to it (a release binary only)
   `https://api.github.com/repos/alimohammed1624/termium/releases/latest`.
   The request carries only a `termium/<version>` User-Agent. It never
   delays anything: failures are silent (offline means no badge) and it
-  gives up after 3 s. The answer is cached in
+  gives up after 3 s in all (both sources together), or as soon as the
+  terminal detaches (nothing is recorded then). The answer is cached in
   `~/.local/state/termium/update-check.json` (`$XDG_STATE_HOME`); a cached
   newer release shows at once, then the check refreshes it (a failed check
   keeps what was cached). Pre-releases are never offered.
@@ -186,16 +187,15 @@ termium update           # update to it (a release binary only)
   once in a session's life.
 - **What you see.** A newer release shows `↑ vX.Y.Z` at the right end of
   the tab bar (just `↑` in a narrow terminal), and `Ctrl+B ?` shows the
-  upgrade command. Once, when nothing else is open (no dialog, page menu,
-  address editing or help) and you haven't typed or clicked for 3 s, a box
-  asks: "termium X is available (you have Y)", with `u` update now, `l`
-  later (ask again when the session restarts) and `s` skip this version
-  (never offered again; the badge stays). The box hides the pages while
-  it's open and takes the keyboard, so nothing typed reaches a page
-  unseen; keys typed in the first second after it appears close it and go
-  to the page as meant. `Ctrl+B` still works (the box is put away),
-  `Ctrl+Q` still quits, and `Ctrl+B U` or a click on the badge brings it
-  back.
+  upgrade command. It's offered once, as a notice at the right of the
+  address line, "termium X is available (you have Y) · Ctrl+B U", shown
+  while nothing else is open there (no dialog, address editing, help).
+  The notice never takes the keyboard: everything you type or paste goes
+  to the page as usual. To answer it, press `Ctrl+B U` or click the notice
+  or the badge: a box opens with `u` update now, `l` later (ask again when
+  the session restarts) and `s` skip this version (never offered again;
+  the badge stays). Any other key closes the box and goes on as usual, and
+  a paste closes it and reaches the page.
 - **Updating.** `u` (or `termium update` from a shell) downloads this
   platform's archive and `SHA256SUMS` from the release, checks the
   archive's SHA-256, runs the new binary's `--version` and renames it over
@@ -214,18 +214,28 @@ termium update           # update to it (a release binary only)
   `--incognito`), anything typed into a page and not saved is lost.
   `Esc` leaves it for later (`Ctrl+B U` offers it again; the badge shows
   `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
-  (from the new binary) offers the same restart. A session started by a
-  termium whose session protocol differs can't be attached; termium says
+  (from the new binary) offers the same restart, as a notice. If a
+  restart fails to start the session, its spaces and tabs are kept for the
+  next start of that session (within 10 minutes). Two updates at once
+  (two sessions, or a shell) take turns, and never replace a newer
+  termium with an older one.
+- **Sessions of older termiums.** A session started by termium 0.2.0 (before
+  an update) can't restart itself or keep its pages across a restart: when
+  a newer termium attaches to it, it says so in the shell and asks, once
+  per session, whether to restart it now (its pages close; logins stay in
+  the profile), and reminds you how when you detach. A session started by
+  a termium whose session protocol differs can't be attached; termium says
   so and how to end it (`termium kill NAME`).
 - **Turning it off.** `--no-update-check`, `TERMIUM_NO_UPDATE_CHECK=1`,
   or a set `CI` variable (empty, `0` and `false` don't count) turn off the
-  check, the badge and the box for that terminal. termium has no config
+  check and all update news (badge, notice, box) for that terminal, even
+  when it takes over a session another terminal had them in. termium has no config
   file, so there's no config option. `termium ls`, `kill`, `--version`
   and `--help` never go online. `termium check-update` checks on demand
   (ignoring the opt-outs and refreshing the cache) and exits 0 when up to
   date, 100 when a newer release is available and 1 when it could not
   check; `termium update` exits 0 when updated or already up to date and
-  1 on failure.
+  1 on failure (always with the `install.sh` command to update by hand).
 
 ### Good to know
 

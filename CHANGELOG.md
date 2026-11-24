@@ -9,26 +9,30 @@ All notable changes to termium are documented here. The format follows
 ### Added
 - Update check: when a terminal attaches, the session asks GitHub for
   termium's latest release in the background (never delaying anything;
-  silent when offline; 3 s timeout) and caches the answer in
-  `~/.local/state/termium/update-check.json`. A newer release shows
-  `↑ vX.Y.Z` in the tab bar and the upgrade command in `Ctrl+B ?`, and is
-  offered once, when nothing else is open: `u` update now, `l` later,
-  `s` skip this version. `Ctrl+B U` (or a click on the badge) brings the
-  offer back. The session owns the check, so attaching and detaching
-  don't repeat it, and a detached session never checks.
+  silent when offline; one 3 s deadline; stopped on detach) and caches the
+  answer in `~/.local/state/termium/update-check.json`. A newer release
+  shows `↑ vX.Y.Z` in the tab bar and the upgrade command in `Ctrl+B ?`,
+  and is offered once as a notice in the address line that never takes
+  the keyboard (typing and pasting always reach the page): `Ctrl+B U`, or
+  a click on the notice or badge, opens a box with `u` update now, `l`
+  later, `s` skip this version. The session owns the check, so attaching
+  and detaching don't repeat it, and a detached session never checks.
 - Self-update: `u`, or `termium update` from a shell, downloads the
   release archive for this platform, verifies it against `SHA256SUMS` and
   replaces the binary in place (never for a run from source, nor when its
-  folder isn't writable; on failure, the `install.sh` command to update
-  by hand).
+  folder isn't writable; on any failure, the `install.sh` command to
+  update by hand). Concurrent updates take turns under a lock and never
+  replace a newer binary with an older one.
 - Restart into an update: a running session keeps the old version until
   it restarts; `r` restarts it from the new binary in the same terminal,
-  reopening its spaces, tabs and splits. After `termium update` from a
-  shell, the next attach offers the same.
+  reopening its spaces, tabs and splits (kept for the next start if the
+  restart fails). After `termium update` from a shell, the next attach
+  offers the same. Attaching to a session of termium 0.2.0 says it runs
+  the older version and offers to restart it (its pages close).
 - `termium check-update` prints one line (exit 0 up to date, 100 newer
   release available, 1 could not check).
 - `--no-update-check`, `TERMIUM_NO_UPDATE_CHECK=1` or a set `CI`
-  variable turn the check off.
+  variable turn the check and all update news off for that terminal.
 - `termium ls` says which termium a session runs when it isn't this one.
 
 ### Changed
