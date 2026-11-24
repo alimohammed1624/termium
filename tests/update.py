@@ -35,15 +35,18 @@ def shot(t, name):
         t.shot(os.path.join(SHOTS, name))
 CUR = json.load(open(os.path.join(ROOT, "package.json")))["version"]
 maj, mnr, pat = map(int, CUR.split("."))
-NEXT, BAD = f"{maj}.{mnr}.{pat + 1}", f"{maj}.{mnr}.{pat + 2}"
+NEXT, BAD, LATER = f"{maj}.{mnr}.{pat + 1}", f"{maj}.{mnr}.{pat + 2}", f"{maj}.{mnr}.{pat + 3}"
 TARGET = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[os.uname().machine] + "-unknown-linux-gnu"
 ASSET = f"termium-{TARGET}.tar.gz"
 
-def build(version, out, protocol=None):
-    """A release binary of this checkout claiming `version` (and speaking `protocol`)."""
+def build(version, out, protocol=None, tag=None):
+    """A release binary of this checkout (or of git tag `tag`) claiming `version` (and speaking `protocol`)."""
     src = os.path.join(tmp, f"src-{version}-{protocol}")
     os.makedirs(src)
-    shutil.copytree(os.path.join(ROOT, "src"), os.path.join(src, "src"))
+    if tag:
+        subprocess.run(f"git -C {ROOT} archive {tag} src | tar -x -C {src}", shell=True, check=True)
+    else:
+        shutil.copytree(os.path.join(ROOT, "src"), os.path.join(src, "src"))
     os.symlink(os.path.join(ROOT, "node_modules"), os.path.join(src, "node_modules"))
     pkg = json.load(open(os.path.join(ROOT, "package.json"))); pkg["version"] = version
     json.dump(pkg, open(os.path.join(src, "package.json"), "w"))
@@ -72,9 +75,14 @@ def package(binary, tag, good=True):
 print(f"building termium {CUR} and {NEXT} ...", flush=True)
 cur_bin = build(CUR, os.path.join(tmp, "build", "cur", "termium"))
 next_bin = build(NEXT, os.path.join(tmp, "build", "next", "termium"))
+later_bin = build(LATER, os.path.join(tmp, "build", "later", "termium"))
 proto_bin = build("9.9.9", os.path.join(tmp, "build", "proto", "termium"), protocol=999)
+# The real v0.2.0 (sessions, no update support), as released.
+HAVE_020 = subprocess.run(["git", "-C", ROOT, "rev-parse", "-q", "--verify", "v0.2.0^{commit}"], capture_output=True).returncode == 0
+old_bin = build("0.2.0", os.path.join(tmp, "build", "v0.2.0", "termium"), tag="v0.2.0") if HAVE_020 else None
 package(next_bin, f"v{NEXT}")
 package(next_bin, f"v{BAD}", good=False)
+package(later_bin, f"v{LATER}")
 sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
 
 # ---- the fake GitHub
@@ -88,8 +96,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             HITS.append((time.time(), self.path, self.headers.get("User-Agent")))
             if self.path.startswith("/slow"):
                 time.sleep(10)
+            tag = self.path.split("/")[2] if self.path.startswith("/latest/") else LATEST["tag"]
             self.send_response(302)
-            self.send_header("Location", f"https://github.com/alimohammed1624/termium/releases/tag/{LATEST['tag']}")
+            self.send_header("Location", f"https://github.com/alimohammed1624/termium/releases/tag/{tag}")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -176,14 +185,18 @@ def page_eval(expr, profile, match="page.html"):
             return p["value"]
     return None
 
-BOX = "is available (you have"
-def box_shown(t):
-    return BOX in t.text()
-def wait_box(t, timeout=40, text=BOX):
-    """Waits for the box, then past the moment where keys still go to the page."""
-    ok = t.wait_for(lambda: text in t.text(), timeout)
-    time.sleep(1.3)
-    return ok
+def notice(t):
+    """The update notice in the address line."""
+    return "Ctrl+B U" in t.line(2) or "^B U" in t.line(2)
+def box_open(t):
+    """The update box (opened on purpose) is on screen."""
+    return " UPDATE " in t.line(2)
+def open_box(t, timeout=5):
+    t.key("ctrl+b"); t.key("shift+u")
+    return t.wait_for(lambda: box_open(t), timeout)
+def update_ui(t):
+    """Any update news on screen at all."""
+    return box_open(t) or notice(t) or "↑" in t.line(1) or "↻" in t.line(1)
 def badge(t, v=NEXT):
     return f"↑ v{v}" in t.line(1)
 
@@ -215,6 +228,10 @@ try:
     r = cli(cur_bin, "check-update", TERMIUM_UPDATE_URL="http://127.0.0.1:1/latest")
     check("check-update: an error (exit 1) keeps the cached tag", r.returncode == 1 and r.stderr.strip().startswith("could not check for updates: ")
           and cache("cli")["latest"] == f"v{CUR}", (r.returncode, r.stdout, r.stderr, cache("cli")))
+    t0 = time.time()
+    r = cli(cur_bin, "check-update", TERMIUM_UPDATE_URL=f"{BASE}/slow {BASE}/slow")
+    took = time.time() - t0
+    check(f"check-update: both sources hanging, one 3 s deadline ({took:.2f}s)", r.returncode == 1 and "no answer within 3 s" in r.stderr and took < 3.8, (took, r.stderr))
     LATEST["tag"] = f"v{NEXT}"
     r = cli(cur_bin, "check-update", TERMIUM_NO_UPDATE_CHECK="1", CI="true")
     check("check-update ignores the opt-outs", r.returncode == 100, (r.returncode, r.stdout))
@@ -231,52 +248,79 @@ try:
         return t, ok, took
     base_t, ok0, base = startup("t0", "st-off", TERMIUM_NO_UPDATE_CHECK="1")
     stop("t0"); base_t.close()
-    slow_t, ok1, slow = startup("t1", "st-slow", TERMIUM_UPDATE_URL=f"{BASE}/slow")
+    slow_t, ok1, slow = startup("t1", "st-slow", TERMIUM_UPDATE_URL=f"{BASE}/slow {BASE}/slow")
     check(f"startup with a check that hangs isn't slower (opt-out {base:.2f}s, hanging check {slow:.2f}s)",
           ok0 and ok1 and slow < base + 1.0, (ok0, ok1, base, slow))
     time.sleep(5)
-    check("a check that times out is silent: no badge, no box", not badge(slow_t) and not box_shown(slow_t) and "update" not in slow_t.text().lower(),
-          slow_t.line(1))
+    check("a check that times out is silent: no badge, no notice", not update_ui(slow_t), slow_t.line(1))
+    log = open(os.path.join(tmp, "st-slow", "termium", "termium.log")).read()
+    check("...and gives up within one 3 s deadline across both sources", "update check: no answer within 3 s" in log, log[-500:])
     stop("t1"); slow_t.close()
     off_t, ok2, off = startup("t2", "st-offline", TERMIUM_UPDATE_URL="http://127.0.0.1:1/latest")
     time.sleep(4)
-    check(f"offline: silent and not slower ({off:.2f}s)", ok2 and off < base + 1.0 and not badge(off_t) and not box_shown(off_t), (ok2, off))
+    check(f"offline: silent and not slower ({off:.2f}s)", ok2 and off < base + 1.0 and not update_ui(off_t), (ok2, off))
     stop("t2"); off_t.close()
     n = len(HITS)
     ci_t, _, _ = startup("t3", "st-ci", CI="1")
     time.sleep(5)
-    check("CI set: no check, no badge", len(HITS) == n and not badge(ci_t), HITS[n:])
+    check("CI set: no check, no badge", len(HITS) == n and not update_ui(ci_t), HITS[n:])
     stop("t3"); ci_t.close()
     n = len(HITS)
     fl_t = term(cur_bin, "-s", "t4", "--incognito", "--no-update-check", PAGE, state="st-flag")
     fl_t.wait_text("termium test page", 40); time.sleep(5)
-    check("--no-update-check: no check, no badge", len(HITS) == n and not badge(fl_t), HITS[n:])
+    check("--no-update-check: no check, no badge", len(HITS) == n and not update_ui(fl_t), HITS[n:])
     stop("t4"); fl_t.close()
 
-    # ------------------------------------------------ the badge and the box; later; attach/detach/takeover
+    # ------------------------------------------------ detaching stops a check under way: nothing is written after
+    ab = term(cur_bin, "-s", "abort", "--incognito", PAGE, state="st-abort", env={"TERMIUM_UPDATE_URL": f"{BASE}/slow"})
+    ab.wait_text("termium test page", 40); time.sleep(1)
+    ab.key("ctrl+b"); ab.key("d"); exit_code(ab)
+    time.sleep(12)
+    log = open(os.path.join(tmp, "st-abort", "termium", "termium.log")).read()
+    check("detach stops the check under way, and no cache is written after", cache("st-abort") is None and "update check: stopped" in log, (cache("st-abort"), log[-300:]))
+    stop("abort")
+
+    # ------------------------------------------------ the badge and the notice; typing and pasting always reach the page
     prof = os.path.join(tmp, "prof-offer")
     n = len(HITS)
     a = term(cur_bin, "-s", "offer", "--profile", prof, PAGE, state="st-offer")
     check("the badge shows the newer release in the tab bar", a.wait_for(lambda: badge(a), 40), a.line(1))
-    a.key("ctrl+l")  # the address bar is open: the box must wait
-    time.sleep(6)
+    check("the notice shows in the address line", a.wait_for(lambda: notice(a) and f"termium {NEXT} is available (you have {CUR})" in a.line(2), 5), a.line(2))
+    shot(a, "update-notice.png")
+    a.key("ctrl+l")
     def editing(t):
         """The address is being edited (its text selected: shown in reverse video)."""
         row = t.line(2); i = row.find("http://")
         with t.lock:
             return i >= 0 and t.screen.buffer[1][i].reverse
-    check("no box while the address bar is open", not box_shown(a) and editing(a), (box_shown(a), a.line(2)))
+    check("no notice while the address bar is open", a.wait_for(lambda: editing(a) and not notice(a), 3), a.line(2))
     a.key("escape")
-    check("the box appears once nothing is open and input is idle", wait_box(a, 10), a.text()[-400:])
-    check("the box offers u / l / s", "u update · l later · s skip" in a.text() and "skip this version" in a.text())
+    check("the notice comes back once the address bar closes", a.wait_for(lambda: notice(a), 5))
+    a.wait_idle(0.8, 10)
+    inp = page_eval("(() => { const r = document.getElementById('inp').getBoundingClientRect(); return [r.x + 10, r.y + r.height/2]; })()", prof)
+    a.click(220 + int(inp[0]), 40 + int(inp[1])); time.sleep(0.5)
+    a.type("sul usual")
+    a.paste(" pasted")
+    check("plain keys and pastes go to the page while the notice shows",
+          a.wait_for(lambda: page_eval("termiumState().inp", prof) == "sul usual pasted", 5), page_eval("termiumState().inp", prof))
+    check("...and none of them answered it", notice(a) and not box_open(a) and (cache("st-offer") or {}).get("skipped") is None, cache("st-offer"))
+    check("Ctrl+B U opens the box", open_box(a) and "u update · l later · s skip" in a.text(), a.text()[-400:])
     shot(a, "update-offer.png")
-    a.key("x"); time.sleep(0.8)
-    check("other keys don't close the box (nor reach the page)", box_shown(a) and (page_eval("termiumState().inp", prof) or "") == "")
+    a.key("x")
+    check("a key the box doesn't use closes it and goes to the page", a.wait_for(lambda: not box_open(a), 5) and
+          a.wait_for(lambda: page_eval("termiumState().inp", prof) == "sul usual pastedx", 5), page_eval("termiumState().inp", prof))
+    check("...the notice stays", notice(a))
+    open_box(a)
+    a.paste("!")
+    check("a paste with the box open closes it and reaches the page", a.wait_for(lambda: not box_open(a), 5) and
+          a.wait_for(lambda: page_eval("termiumState().inp", prof) == "sul usual pastedx!", 5), page_eval("termiumState().inp", prof))
+    # a click on the notice opens the box
+    col = a.line(2).find("↑ termium")
+    a.click_cell(col + 3, 2)
+    check("a click on the notice opens the box", a.wait_for(lambda: box_open(a), 5), a.line(2))
     a.key("l")
-    check("l: later closes the box", a.wait_for(lambda: not box_shown(a), 5))
+    check("l: later closes the box and the notice", a.wait_for(lambda: not box_open(a) and not notice(a), 5), a.line(2))
     check("...the badge stays", badge(a))
-    time.sleep(5)
-    check("...and the box doesn't come back in this session", not box_shown(a))
     check("one check for the attach", len(HITS) - n == 1, HITS[n:])
     a.key("ctrl+b"); a.key("question")
     check("help shows the update and the upgrade command", a.wait_text("update available", 5) and "install.sh" in a.text() and f"→ {NEXT}" in a.text(), a.text()[:600])
@@ -289,52 +333,34 @@ try:
     check("no checks while detached", len(HITS) == n, HITS[n:])
     b = term(cur_bin, "attach", "offer", state="st-offer")
     check("re-attach: the badge is back at once", b.wait_for(lambda: badge(b), 15), b.line(1))
-    time.sleep(5)
-    check("re-attach: no new check, no repeated box", len(HITS) == n and not box_shown(b), HITS[n:])
-    c = term(cur_bin, "attach", "offer", state="st-offer", cols=120, rows=36)
-    check("takeover: the badge shows", c.wait_for(lambda: badge(c), 15))
-    time.sleep(5)
-    check("takeover: no new check, no repeated box", len(HITS) == n and not box_shown(c), HITS[n:])
+    time.sleep(3)
+    check("re-attach: no new check, no repeated notice", len(HITS) == n and not notice(b), HITS[n:])
+    check("Ctrl+B U offers it again on demand", open_box(b))
+    # A takeover by a terminal that opted out: no update UI at all, even with the box open.
+    c = term(cur_bin, "attach", "offer", "--no-update-check", state="st-offer", cols=120, rows=36)
+    check("an opted-out takeover shows the page", c.wait_text("termium test page", 15))
+    time.sleep(2)
+    check("an opted-out takeover shows no box, notice or badge", not update_ui(c), (c.line(1), c.line(2)))
     c.key("ctrl+b"); c.key("shift+u")
-    check("Ctrl+B U opens the box on demand", wait_box(c, 5))
-    c.key("escape"); time.sleep(0.5)
+    check("...and Ctrl+B U says update news is off", c.wait_for(lambda: "Update news is off" in c.line(2), 5) and not box_open(c), c.line(2))
+    check("...and it didn't check either", len(HITS) == n, HITS[n:])
     w = term(cur_bin, "attach", "offer", state="st-offer", cols=60, rows=24)
-    check("a narrow terminal still shows a (short) badge", w.wait_for(lambda: "↑" in w.line(1), 15), w.line(1))
+    check("taken back by a terminal that wants it: a narrow terminal still shows a (short) badge", w.wait_for(lambda: "↑" in w.line(1), 15), w.line(1))
     shot(w, "update-badge-narrow.png")
     stop("offer")
 
-    # ------------------------------------------------ a menu open: no box; keys typed as it appears go to the page
-    prof2 = os.path.join(tmp, "prof-arm")
-    m = term(cur_bin, "-s", "arm", "--profile", prof2, PAGE, state="st-arm")
-    m.wait_text("termium test page", 40); m.wait_idle(0.8, 10)
-    sel = page_eval("(() => { const r = document.getElementById('sel').getBoundingClientRect(); return [r.x + 10, r.y + r.height/2]; })()", prof2)
-    m.click(220 + int(sel[0]), 40 + int(sel[1]))
-    menu_open = lambda: page_eval("!!document.querySelector('termium-select')", prof2) is True
-    check("a <select> menu is open", m.wait_for(menu_open, 5))
-    time.sleep(6)
-    check("no box while a page's menu is open", not box_shown(m) and m.wait_for(lambda: badge(m), 1))
-    m.key("escape")
-    check("menu closed", m.wait_for(lambda: not menu_open(), 5))
-    inp = page_eval("(() => { const r = document.getElementById('inp').getBoundingClientRect(); return [r.x + 10, r.y + r.height/2]; })()", prof2)
-    m.click(220 + int(inp[0]), 40 + int(inp[1]))
-    check("the box appears", m.wait_for(lambda: box_shown(m), 12, 0.02))
-    m.type("ab", delay=0.05)
-    check("keys typed just as the box appeared close it ...", m.wait_for(lambda: not box_shown(m), 3))
-    check("... and reach the page", m.wait_for(lambda: page_eval("termiumState().inp", prof2) == "ab", 5), page_eval("termiumState().inp", prof2))
-    stop("arm")
-
     # ------------------------------------------------ skip
     s = term(cur_bin, "-s", "skip", "--incognito", PAGE, state="st-skip")
-    check("skip: the box appears", wait_box(s))
-    s.key("s")
-    check("s: closes the box and says so", s.wait_for(lambda: not box_shown(s) and "skipped" in s.text(), 5))
+    check("skip: the notice appears", s.wait_for(lambda: notice(s), 40))
+    open_box(s); s.key("s")
+    check("s: closes the box and the notice and says so", s.wait_for(lambda: not box_open(s) and "skipped" in s.text(), 5))
     sp = os.path.join(tmp, "st-skip", "termium", "update-check.json")
     check("s: the skipped release is saved (0600)", (cache("st-skip") or {}).get("skipped") == f"v{NEXT}" and stat.S_IMODE(os.stat(sp).st_mode) == 0o600, cache("st-skip"))
     stop("skip"); s.close()
     s = term(cur_bin, "-s", "skip", "--incognito", PAGE, state="st-skip")
     check("skipped: the badge still shows after a restart", s.wait_for(lambda: badge(s), 40))
-    time.sleep(6)
-    check("skipped: ... but the box isn't offered again", not box_shown(s))
+    time.sleep(3)
+    check("skipped: ... but it isn't offered again", not notice(s))
     stop("skip"); s.close()
 
     # ------------------------------------------------ a checksum mismatch is refused
@@ -343,16 +369,33 @@ try:
     before = sha(os.path.join(inst, "termium"))
     LATEST["tag"] = f"v{BAD}"
     x = term(os.path.join(inst, "termium"), "-s", "bad", "--incognito", PAGE, state="st-bad")
-    check("mismatch: the box offers the bad release", wait_box(x) and BAD in x.text())
-    x.key("u")
+    check("mismatch: the bad release is offered", x.wait_for(lambda: notice(x) and BAD in x.line(2), 40))
+    open_box(x); x.key("u")
     check("mismatch: the update fails and says why", x.wait_for(lambda: "update failed" in x.text(), 30) and "does not match its SHA-256" in x.text(), x.text()[-600:])
     check("mismatch: ... and shows how to update by hand", "update by hand" in x.text() and "install.sh" in x.text())
     shot(x, "update-failed.png")
     check("mismatch: the binary is untouched, nothing left beside it", sha(os.path.join(inst, "termium")) == before and os.listdir(inst) == ["termium"], os.listdir(inst))
     x.key("escape")
-    check("mismatch: Esc closes", x.wait_for(lambda: "update failed" not in x.text(), 5))
+    check("mismatch: Esc closes", x.wait_for(lambda: "update failed" not in x.text() and not box_open(x), 5))
     stop("bad"); x.close()
     LATEST["tag"] = f"v{NEXT}"
+
+    # ------------------------------------------------ a failed restart keeps its snapshot for the next try
+    layout = {"spaces": [{"name": "kept space", "active": 0, "tabs": [{"root": {"url": PAGE}, "focus": 0, "zoomed": False}]}],
+              "activeSpace": 0, "sidebar": True, "zoom": 1}
+    os.makedirs(sockdir, mode=0o700, exist_ok=True)
+    rpath = os.path.join(sockdir, "rf.restore")
+    with open(rpath, "w") as f:
+        json.dump({"v": 1, "at": int(time.time() * 1000), "from": CUR, "layout": layout,
+                   "launch": {"incognito": True, "scale": None, "search": "https://duckduckgo.com/?q=%s"}}, f)
+    os.chmod(rpath, 0o600)
+    fz = term(cur_bin, "-s", "rf", "--incognito", "--browser", "/no/such/browser", state="st-rf")
+    exit_code(fz, 20)
+    check("restart snapshot: kept when the session fails to start", os.path.exists(rpath), output(fz)[-200:])
+    rf = term(cur_bin, "-s", "rf", "--incognito", state="st-rf")
+    check("restart snapshot: the next start reopens it", rf.wait_for(lambda: "kept space" in rf.text() and "termium test page" in rf.text(), 40), rf.text()[:300])
+    check("restart snapshot: ...and only then removes it", rf.wait_for(lambda: not os.path.exists(rpath), 5))
+    stop("rf")
 
     # ------------------------------------------------ u: update, then r: restart into it (layout kept)
     inst = os.path.join(tmp, "inst"); os.makedirs(inst)
@@ -368,20 +411,19 @@ try:
     u.type(f"{BASE}/fixtures/frame.html"); u.key("enter"); time.sleep(1.5)
     u.key("ctrl+b"); u.key("shift+n"); time.sleep(1.5)
     u.type(f"{BASE}/fixtures/anim.html"); u.key("enter")
-    check("u: the box appears", wait_box(u), u.text()[-300:])
+    check("u: the notice appears", u.wait_for(lambda: notice(u), 40), u.line(2))
     old_server = server_pid("upd")
-    u.key("u")
+    open_box(u); u.key("u")
     check("u: the update downloads, verifies and installs", u.wait_for(lambda: f"updated to termium {NEXT}" in u.text(), 60), u.text()[-600:])
     check("u: the box says this session runs the old one until it restarts",
           u.wait_for(lambda: f"keeps running termium {CUR} until it restarts" in u.text() and "r restart" in u.text(), 5), u.text())
     shot(u, "update-done.png")
     r = subprocess.run([os.path.join(inst, "termium"), "--version"], capture_output=True, text=True)
     check("u: the binary (the symlink's target) is the new release", r.stdout.strip() == f"termium {NEXT}", r.stdout)
-    check("u: the symlink is still a symlink, and no temp files are left", os.path.islink(os.path.join(link, "termium")) and os.listdir(inst) == ["termium"], os.listdir(inst))
+    check("u: the symlink is still a symlink, and no temp or lock files are left", os.path.islink(os.path.join(link, "termium")) and os.listdir(inst) == ["termium"], os.listdir(inst))
     check("u: the binary is executable", os.access(os.path.join(inst, "termium"), os.X_OK))
     check("u: the session still runs (the old version)", server_pid("upd") == old_server)
     check("u: the badge says a restart is due", f"↻ v{NEXT}" in u.line(1), u.line(1))
-    time.sleep(1.3)
     u.key("r")
     check("r: the client says it's restarting", u.wait_for(lambda: "restarting session upd" in output(u), 15), output(u)[-300:])
     check("r: a new session server runs", u.wait_for(lambda: server_pid("upd") not in (None, old_server), 30))
@@ -394,9 +436,20 @@ try:
     shot(u, "update-restarted.png")
     urls = lambda: [p["url"] for p in json.loads(subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), prof3, "1"], capture_output=True, text=True, timeout=20).stdout or "[]")]
     check("r: every page reopened at its address", u.wait_for(lambda: sorted(x.split("/")[-1] for x in urls() if "fixtures" in x) == ["anim.html", "frame.html", "page.html", "reader.html"], 20), urls())
-    check("r: no box and no badge (it's up to date now)", not box_shown(u) and "↑" not in u.line(1) and "↻" not in u.line(1), u.line(1))
+    check("r: no notice and no badge (it's up to date now)", not notice(u) and "↑" not in u.line(1) and "↻" not in u.line(1), u.line(1))
     check("r: the restore file is gone", not os.path.exists(os.path.join(sockdir, "upd.restore")))
     stop("upd")
+
+    # ------------------------------------------------ two updaters at once never downgrade
+    for i in range(3):
+        cc = os.path.join(tmp, f"inst-race{i}"); os.makedirs(cc)
+        shutil.copy(cur_bin, os.path.join(cc, "termium"))
+        procs = [subprocess.Popen([os.path.join(cc, "termium"), "update"], env=dict(os.environ, **env_for("cli", TERMIUM_UPDATE_URL=f"{BASE}/latest/v{v}")),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for v in (NEXT, LATER)]
+        outs = [p.communicate(timeout=120) for p in procs]
+        got = subprocess.run([os.path.join(cc, "termium"), "--version"], capture_output=True, text=True).stdout.strip()
+        check(f"concurrent updaters (run {i + 1}): both succeed and the newer release stays", all(p.returncode == 0 for p in procs) and got == f"termium {LATER}"
+              and sorted(os.listdir(cc)) == ["termium"], (got, [p.returncode for p in procs], outs, os.listdir(cc)))
 
     # ------------------------------------------------ termium update from the shell; a newer client attaching
     inst2 = os.path.join(tmp, "inst2"); os.makedirs(inst2)
@@ -411,22 +464,24 @@ try:
     check("termium update: the new binary reports the new version", r2.stdout.strip() == f"termium {NEXT}", r2.stdout)
     r = cli(os.path.join(inst2, "termium"), "update", state="st-shell")
     check("termium update again: up to date (exit 0)", r.returncode == 0 and f"termium {NEXT} is up to date" in r.stdout, (r.returncode, r.stdout))
-    q = term(os.path.join(inst2, "termium"), "attach", "shell", state="st-shell", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
-    check("a newer client attaching to the old session: offered a restart", wait_box(q, 30, f"termium {NEXT} is installed") and "r restart" in q.text(), q.text()[-500:])
+    q = term(os.path.join(inst2, "termium"), "attach", "shell", state="st-shell")
+    check("a newer client attaching to the old session: a restart is offered", q.wait_for(lambda: notice(q) and f"↻ termium {NEXT} is installed" in q.line(2), 30), q.line(2))
+    open_box(q)
+    check("...the box offers r restart", f"termium {NEXT}" in q.text() and "is installed" in q.text() and "r restart" in q.text(), q.text()[-500:])
     q.key("escape")
-    check("...Esc: later, with the ↻ badge", q.wait_for(lambda: f"↻ v{NEXT}" in q.line(1), 5), q.line(1))
+    check("...Esc: later, with the ↻ badge", q.wait_for(lambda: not box_open(q) and f"↻ v{NEXT}" in q.line(1), 5), q.line(1))
     stop("shell")
 
-    # ------------------------------------------------ refusals
+    # ------------------------------------------------ refusals and failures always say how to update by hand
     r = subprocess.run(["bun", os.path.join(ROOT, "src", "main.ts"), "update"], env=dict(os.environ, **env_for("cli")), capture_output=True, text=True, timeout=60)
     check("from source: termium update refuses cleanly", r.returncode == 1 and "runs from source" in r.stderr and "install.sh" in r.stderr, (r.returncode, r.stderr))
     ro = os.path.join(tmp, "ro"); os.makedirs(ro)
     shutil.copy(cur_bin, os.path.join(ro, "termium")); os.chmod(ro, 0o555)
     r = cli(os.path.join(ro, "termium"), "update")
-    check("unwritable folder: termium update refuses cleanly", r.returncode == 1 and "can't write to" in r.stderr and sha(os.path.join(ro, "termium")) == sha(cur_bin), (r.returncode, r.stderr))
+    check("unwritable folder: termium update refuses cleanly", r.returncode == 1 and "can't write to" in r.stderr and "install.sh" in r.stderr and sha(os.path.join(ro, "termium")) == sha(cur_bin), (r.returncode, r.stderr))
     os.chmod(ro, 0o755)
     r = cli(cur_bin, "update", TERMIUM_UPDATE_URL="http://127.0.0.1:1/latest")
-    check("termium update offline: fails with exit 1", r.returncode == 1 and "could not check for updates" in r.stderr, (r.returncode, r.stderr))
+    check("termium update offline: fails (exit 1) with the update-by-hand command", r.returncode == 1 and "could not check for updates" in r.stderr and "Update by hand" in r.stderr and "install.sh" in r.stderr, (r.returncode, r.stderr))
 
     # ------------------------------------------------ a client of another protocol
     p = term(cur_bin, "-s", "proto", "--incognito", PAGE, state="st-proto", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
@@ -439,6 +494,35 @@ try:
           (code, out[-400:]))
     check("...and the session is left running", server_pid("proto") is not None)
     stop("proto")
+
+    # ------------------------------------------------ a session started by the real termium 0.2.0
+    if not old_bin:
+        print("SKIP termium 0.2.0 sessions: no v0.2.0 tag in this checkout")
+    else:
+        prof4 = os.path.join(tmp, "prof-legacy")
+        l0 = term(old_bin, "-s", "legacy", "--profile", prof4, PAGE, state="st-legacy")
+        check("0.2.0: the old termium starts its session", l0.wait_text("termium test page", 40))
+        old_pid = server_pid("legacy")
+        l0.key("ctrl+b"); l0.key("d"); exit_code(l0)
+        l1 = term(cur_bin, "attach", "legacy", state="st-legacy")
+        check(f"0.2.0: attaching from {CUR} says the session runs 0.2.0 and asks to restart it",
+              l1.wait_for(lambda: f"runs termium 0.2.0, older than this termium ({CUR})" in output(l1) and "[y/N]" in output(l1), 10), output(l1)[-400:])
+        l1.write("n\r")
+        check("0.2.0: answering no attaches to it as it is", l1.wait_text("termium test page", 20) and server_pid("legacy") == old_pid)
+        l1.key("ctrl+b"); l1.key("d")
+        check("0.2.0: detaching repeats how to restart it", exit_code(l1) == 0 and "termium kill legacy && termium -s legacy" in output(l1), output(l1)[-300:])
+        l2 = term(cur_bin, "attach", "legacy", state="st-legacy")
+        check("0.2.0: asked once per session: a second attach goes straight in", l2.wait_text("termium test page", 20) and "[y/N]" not in output(l2))
+        l2.key("ctrl+b"); l2.key("d"); exit_code(l2)
+        os.remove(os.path.join(sockdir, "legacy.asked"))
+        l3 = term(cur_bin, "attach", "legacy", state="st-legacy")
+        l3.wait_for(lambda: "[y/N]" in output(l3), 10)
+        l3.write("y\r")
+        check("0.2.0: answering yes restarts it from this termium, same profile",
+              l3.wait_for(lambda: server_pid("legacy") not in (None, old_pid), 40) and l3.wait_for(lambda: "SPACES" in l3.text(), 30), output(l3)[-300:])
+        info = subprocess.run([cur_bin, "ls"], env=dict(os.environ, **env_for("st-legacy")), capture_output=True, text=True).stdout
+        check("0.2.0: ...ls shows it now runs this termium, on the same profile", "legacy" in info and "(termium" not in info and os.path.realpath(prof4) in info, info)
+        stop("legacy")
 finally:
     for t in terms:
         if t.alive:
@@ -447,7 +531,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "offer", "arm", "skip", "bad", "upd", "shell", "proto"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "rf", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)
