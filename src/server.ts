@@ -36,6 +36,7 @@ import {
   sweepGraphicsFiles,
   readRestore,
   restoreConflict,
+  savedLaunch,
   restorePath,
   writeRestore,
   type Restore,
@@ -471,11 +472,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           blocker: () => selfUpdateBlocker(),
           start: (tag) => void runSelfUpdate(tag),
           skip: (tag) => {
-            try {
-              skipVersion(cacheFile, tag);
-            } catch (e) {
-              log(`update: can't save the skipped version: ${e}`);
-            }
+            // Never offered again in this session either way; saved for later ones if the cache is free.
+            skipVersion(cacheFile, tag).then(
+              (saved) => saved || log("update: the cache was busy; the skipped version holds for this session only"),
+              (e) => log(`update: can't save the skipped version: ${e}`),
+            );
           },
           restart: () => restartSession(),
         },
@@ -492,7 +493,12 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
             ? `Restarted: termium ${restore.from} → ${version}`
             : `Restarted: termium ${version}`
           : undefined;
-        if (await app.start(args.url, restore?.layout, notice)) rmSync(restorePath(name), { force: true });
+        const reopened = await app.start(args.url, restore?.layout, notice);
+        // Removed only once everything in it reopened; otherwise kept, and the user told.
+        if (reopened === "all") rmSync(restorePath(name), { force: true });
+        else if (reopened === "some") {
+          app.showToast("Not all pages reopened; the restart snapshot is kept", 10_000);
+        }
         if (conflict) {
           app.showToast(
             `Snapshot kept (${conflict}); start it that way within 10 minutes to reopen its spaces and tabs`,
@@ -602,7 +608,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       v: 1,
       at: Date.now(),
       from: version,
-      launch: { browser: args.browser, profile: args.profile, incognito: args.incognito, scale: args.scale, search: args.search },
+      launch: savedLaunch(args),
       layout: app.layoutSnapshot(),
     };
     try {

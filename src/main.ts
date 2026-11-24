@@ -9,7 +9,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { killSession, listSessions, runClient, runningSessions } from "./client";
 import { runServer, stateDir, type LaunchOptions } from "./server";
-import { DEFAULT_SESSION, readRestore, validSessionName } from "./session";
+import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
 import { DEFAULT_SEARCH } from "./text";
 import {
@@ -260,13 +260,7 @@ async function main(): Promise<void> {
       // (Given other ones, the server keeps the snapshot and says so.)
       if (args.command === "open" && !args.launchFlags.length) {
         const r = readRestore(args.session);
-        if (r) {
-          args.browser = r.launch.browser;
-          args.profile = r.launch.profile;
-          args.incognito = !!r.launch.incognito;
-          args.scale = r.launch.scale ?? null;
-          args.search = r.launch.search || args.search;
-        }
+        if (r) Object.assign(args, savedLaunch(r.launch));
       }
       const restartArgv = [...selfArgv(), "--session", args.session, "--restore"];
       if (args.noUpdateCheck) restartArgv.push("--no-update-check");

@@ -17,6 +17,7 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lockFile, pidAlive, unlockFile } from "./browser";
+import type { LaunchOptions } from "./server";
 
 /** Bumped whenever client and server stop understanding each other. */
 export const PROTOCOL = 1;
@@ -261,7 +262,8 @@ export interface Restore {
   at: number;
   /** The termium version that wrote it. */
   from: string;
-  launch: { browser?: string; profile?: string; incognito: boolean; scale: number | null; search: string };
+  /** Every launch option the session was started with (all of LaunchOptions but the URL). */
+  launch: SavedLaunch;
   layout: SavedLayout;
 }
 
@@ -297,13 +299,36 @@ export function takeRestore(name: string, dir?: string): Restore | null {
   return r;
 }
 
-/** Why `r` can't be reopened by a session started with `launch` (null if it can). */
-export function restoreConflict(r: Restore, launch: { browser?: string; profile?: string; incognito: boolean }): string | null {
-  if (!!r.launch.incognito !== !!launch.incognito) return r.launch.incognito ? "it was --incognito" : "it wasn't --incognito";
-  if (!r.launch.incognito && (r.launch.profile ?? null) !== (launch.profile ?? null)) {
-    return r.launch.profile ? `it used --profile ${r.launch.profile}` : "it used the session's own profile";
+export type SavedLaunch = Omit<LaunchOptions, "url">;
+
+/**
+ * Every launch option but the URL. A Record over the type's keys, so an
+ * option added to LaunchOptions can't be left out of snapshots and their
+ * comparison (it won't type-check until it's listed here).
+ */
+const LAUNCH_KEYS: Record<keyof SavedLaunch, true> = { incognito: true, profile: true, browser: true, scale: true, search: true };
+
+/** The launch options of `args` as a restart saves them: all of them but the URL (and nothing else `args` holds). */
+export function savedLaunch(args: LaunchOptions | SavedLaunch): SavedLaunch {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(LAUNCH_KEYS)) out[key] = (args as unknown as Record<string, unknown>)[key];
+  return out as unknown as SavedLaunch;
+}
+
+/**
+ * Why `r` can't be reopened by a session started with `launch` (null if it
+ * can): every launch option either side has must be the same.
+ */
+export function restoreConflict(r: Restore, launch: SavedLaunch | LaunchOptions): string | null {
+  const now = savedLaunch(launch) as unknown as Record<string, unknown>;
+  const saved = savedLaunch(r.launch) as unknown as Record<string, unknown>;
+  const norm = (v: unknown) => (v === undefined || v === null || v === false ? null : v);
+  for (const key of Object.keys(LAUNCH_KEYS)) {
+    const was = norm(saved[key]);
+    if (JSON.stringify(was) === JSON.stringify(norm(now[key]))) continue;
+    if (was === true) return `it was started with --${key}`;
+    return was === null ? `it was started without --${key}` : `it was started with --${key} ${was}`;
   }
-  if ((r.launch.browser ?? null) !== (launch.browser ?? null)) return r.launch.browser ? `it used --browser ${r.launch.browser}` : "it used the default browser";
   return null;
 }
 

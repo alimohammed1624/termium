@@ -117,7 +117,7 @@ type Prompt =
   | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page }
-  | { kind: "confirm"; tag: "quit" | "close"; edit: LineEdit; message: string; onYes: () => void };
+  | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
 
@@ -340,8 +340,8 @@ export class App {
 
   // ---------------------------------------------------------- startup
 
-  /** Starts the UI; true if `restore` was reopened. */
-  async start(initialUrl: string | null, restore?: SavedLayout | null, notice?: string): Promise<boolean> {
+  /** Starts the UI; how much of `restore` was reopened ("none" without one). */
+  async start(initialUrl: string | null, restore?: SavedLayout | null, notice?: string): Promise<"all" | "some" | "none"> {
     const cdp = this.cdp;
     cdp.on("Target.attachedToTarget", (p, parent) => this.onAttached(p, parent).catch((e) => this.opts.log(String(e))));
     cdp.on("Target.detachedFromTarget", (p) => {
@@ -475,12 +475,13 @@ export class App {
     this.titlePoll = setInterval(() => void this.pollTitles(), 1000);
     const firstReady = new Promise<void>((r) => (this.onFirstPage = r));
     // Restarted (into an updated termium): the spaces, tabs and splits it had.
-    const restored = restore
-      ? await this.restoreLayout(restore, space).catch((e) => {
+    const result = restore
+      ? await this.restoreLayout(restore, space).catch((e): "none" => {
           this.opts.log(`restore: ${e instanceof Error ? e.stack : e}`);
-          return false;
+          return "none";
         })
-      : false;
+      : "none";
+    const restored = result !== "none";
     if (!restored) {
       await this.createPage({ kind: "tab", space, index: 0, editUrl: !url, url: url ?? undefined });
       // Input is held back until the first page exists so early keystrokes land in it.
@@ -492,7 +493,7 @@ export class App {
     this.ready = true;
     this.fullRedraw();
     if (notice && restored) this.showToast(notice, 6000);
-    return restored;
+    return result;
   }
 
   /** Spaces, tabs and splits with their pages' addresses, for a restart. */
@@ -513,17 +514,22 @@ export class App {
     };
   }
 
-  /** Opens a saved layout (pages load from their addresses); false if not a single page came up. */
-  private async restoreLayout(saved: SavedLayout, first: Space): Promise<boolean> {
+  /** Opens a saved layout (pages load from their addresses): "all" of its pages came up, "some", or "none". */
+  private async restoreLayout(saved: SavedLayout, first: Space): Promise<"all" | "some" | "none"> {
     const valid = (n: any, depth = 0): n is SavedNode =>
       depth < 32 && !!n && typeof n === "object" &&
       (typeof n.url === "string" || ((n.dir === "h" || n.dir === "v") && valid(n.a, depth + 1) && valid(n.b, depth + 1)));
     const leftmost = (n: SavedNode): string => ("url" in n ? n.url : leftmost(n.a));
+    const count = (n: SavedNode): number => ("url" in n ? 1 : count(n.a) + count(n.b));
+    // Pages in the snapshot (an unreadable tab counts as one), and pages that came up.
+    let expected = 0;
+    let opened = 0;
     const clampInt = (v: unknown, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.floor(Number(v)) || 0));
     const build = async (n: SavedNode, p: Page, tab: Tab): Promise<void> => {
       if ("url" in n) return;
       const url = leftmost(n.b);
       const q = await this.placePage({ kind: "split", tab, next: p, dir: n.dir, editUrl: false, url: url || undefined });
+      if (q) opened++;
       await build(n.a, p, tab);
       if (q) await build(n.b, q, tab);
     };
@@ -535,16 +541,25 @@ export class App {
       ratios(n.b, s.b);
     };
     let any = false;
-    for (const [si, ss] of (saved.spaces ?? []).slice(0, 64).entries()) {
+    const spaces = Array.isArray(saved.spaces) ? saved.spaces : [];
+    if (spaces.length > 64) expected += spaces.length - 64;
+    for (const [si, ss] of spaces.slice(0, 64).entries()) {
       const space = si === 0 ? first : this.newSpaceModel();
       if (si > 0) this.spaces.push(space);
       if (typeof ss?.name === "string" && ss.name.trim()) space.name = ss.name.slice(0, 64);
-      for (const st of (Array.isArray(ss?.tabs) ? ss.tabs : []).slice(0, 200)) {
-        if (!valid(st?.root)) continue;
+      const tabs = Array.isArray(ss?.tabs) ? ss.tabs : [];
+      if (tabs.length > 200) expected += tabs.length - 200;
+      for (const st of tabs.slice(0, 200)) {
+        if (!valid(st?.root)) {
+          expected++;
+          continue;
+        }
+        expected += count(st.root);
         const url = leftmost(st.root);
         const page = await this.placePage({ kind: "tab", space, index: space.tabs.length, editUrl: false, url: url || undefined, background: true });
         if (!page) continue;
         any = true;
+        opened++;
         const tab = this.locate(page)?.tab;
         if (!tab) continue;
         await build(st.root, page, tab);
@@ -557,14 +572,15 @@ export class App {
     }
     // Spaces none of whose pages came back go (the first stays).
     this.spaces = this.spaces.filter((s, i) => i === 0 || s.tabs.length > 0);
-    if (!any) return false;
+    if (!any) return "none";
     this.activeSpace = clampInt(saved.activeSpace, 0, this.spaces.length - 1);
     if (!this.space?.tabs.length) this.activeSpace = Math.max(0, this.spaces.findIndex((s) => s.tabs.length > 0));
     this.sidebar = saved.sidebar !== false;
     const z = Number(saved.zoom);
     if (Number.isFinite(z) && z !== 1) this.zoom = Math.max(0.3, Math.min(5, Math.round(z * 100) / 100));
     this.relayout();
-    return true;
+    if (opened < expected) this.opts.log(`restore: ${opened} of ${expected} pages reopened`);
+    return opened < expected ? "some" : "all";
   }
 
   private onFirstPage: (() => void) | null = null;
@@ -2197,8 +2213,17 @@ export class App {
     this.queueChrome();
   }
 
-  /** The update check found newer release `tag`; with `offer` (not skipped) it's offered, once. */
+  /** A release the user skipped (never offered). */
+  private skippedTag: string | null = null;
+
+  /** Whether `tag` may be offered: not skipped, and newer than anything offered in this session. */
+  private mayOffer(tag: string): boolean {
+    return tag !== this.skippedTag && (!this.lastOffered || isNewer(tag, this.lastOffered));
+  }
+
+  /** The update check found newer release `tag`; `offer` is false when the user skipped it. */
   updateAvailable(tag: string, offer: boolean): void {
+    if (!offer) this.skippedTag = tag;
     if (!isNewer(tag, this.opts.version)) return;
     if (this.updateInstalled && !isNewer(tag, this.updateInstalled)) return; // that one's installed already
     if (this.updateLatest !== tag) {
@@ -2207,16 +2232,21 @@ export class App {
     }
     const box = this.updateBox;
     if (box?.state === "offer") {
-      // A newer tag replaces the one being offered (and counts as offered).
-      if (box.tag !== tag && isNewer(tag, box.tag)) {
+      if (box.tag === tag || !isNewer(tag, box.tag)) return;
+      // A newer release makes the one offered out of date: it's offered
+      // instead if it may be, else nothing is (it was skipped).
+      if (this.mayOffer(tag)) {
         box.tag = tag;
         this.lastOffered = tag;
-        this.queueChrome();
+      } else {
+        this.updateBox = null;
+        if (this.mode === "update") this.closeUpdate(false);
       }
+      this.queueChrome();
       return;
     }
     if (box) return; // an update under way (or done) isn't interrupted
-    if (!offer || (this.lastOffered && !isNewer(tag, this.lastOffered))) return;
+    if (!this.mayOffer(tag)) return;
     this.lastOffered = tag;
     this.updateBox = { tag, state: "offer" };
     this.queueChrome();
@@ -2268,7 +2298,10 @@ export class App {
     }
     if (!this.updateBox) {
       if (this.updateInstalled) this.updateBox = { tag: this.updateInstalled, state: "installed" };
-      else if (this.updateLatest) this.updateBox = { tag: this.updateLatest, state: "offer" };
+      else if (this.updateLatest && this.updateLatest === this.skippedTag) {
+        this.showToast(`termium ${displayVersion(this.updateLatest)} was skipped (termium update installs it)`, 5000);
+        return;
+      } else if (this.updateLatest) this.updateBox = { tag: this.updateLatest, state: "offer" };
       else {
         this.showToast(`termium ${this.opts.version}: no newer release known (termium check-update checks now)`, 5000);
         return;
@@ -2280,7 +2313,11 @@ export class App {
     this.fullRedraw();
   }
 
-  /** Keys while the box is open (it was opened on purpose). Keys it doesn't use close it and go on as usual. */
+  /**
+   * Keys while the box is open (it was opened on purpose). Only its letters
+   * act (u, l, s, r); Escape closes it; any other key (Enter and Space
+   * included) closes it and goes on as usual.
+   */
   private updateKey(ev: KeyEvent, combo: string): void {
     const box = this.updateBox;
     const pass = () => {
@@ -2288,40 +2325,59 @@ export class App {
       this.onKey(ev);
     };
     if (!box) return pass();
+    if (combo === "escape") return this.closeUpdate(box.state === "failed");
     const shown = displayVersion(box.tag);
     switch (box.state) {
       case "offer":
-        if ((combo === "u" || combo === "enter") && !this.updateBlocker && this.opts.update) {
+        if (combo === "u" && !this.updateBlocker && this.opts.update) {
           box.state = "working";
           box.step = "downloading";
           this.opts.update.start(box.tag);
           this.queueChrome();
         } else if (combo === "s") {
+          this.skippedTag = box.tag;
           this.opts.update?.skip(box.tag);
           this.closeUpdate(true);
           this.showToast(`termium ${shown} skipped: not offered again`, 4000);
-        } else if (combo === "l" || combo === "escape") {
+        } else if (combo === "l") {
           this.closeUpdate(true);
         } else pass();
         return;
       case "working":
-        if (combo === "escape") this.closeUpdate(false);
-        else pass();
-        return;
+        return pass();
       case "done":
       case "installed":
-        if (combo === "r" || combo === "enter") {
-          this.opts.update?.restart();
-        } else if (combo === "escape" || combo === "l") {
+        if (combo === "r") {
+          this.closeUpdate(false);
+          void this.requestRestart();
+        } else if (combo === "l") {
           this.closeUpdate(true);
           this.showToast(`This session runs termium ${this.opts.version} until it restarts (Ctrl+B U restarts it)`, 5000);
         } else pass();
         return;
       case "failed":
-        if (combo === "escape" || combo === "enter") this.closeUpdate(true);
-        else pass();
-        return;
+        return pass();
     }
+  }
+
+  /** Restarts into the installed termium; first asks if a page may have unsaved changes (as Ctrl+Q does). */
+  private async requestRestart(): Promise<void> {
+    const restart = () => this.opts.update?.restart();
+    const asking = (await Promise.all([...this.pages.values()].map((page) => this.wouldAsk(page)))).filter(Boolean).length;
+    const downloading = this.downloads.size;
+    if (asking === 0 && downloading === 0) return restart();
+    const reasons = [
+      asking ? `${asking === 1 ? "a page" : `${asking} pages`} may have unsaved changes` : "",
+      downloading ? `${downloading === 1 ? "a download is" : `${downloading} downloads are`} in progress` : "",
+    ].filter(Boolean).join(" and ");
+    this.prompt = {
+      kind: "confirm",
+      tag: "restart",
+      message: `${reasons[0]!.toUpperCase()}${reasons.slice(1)}. Restart anyway?`,
+      onYes: restart,
+      edit: new LineEdit("", false),
+    };
+    this.queueChrome();
   }
 
   /** The notice in the address line: the longest wording that fits `room` columns ("" if none). */
@@ -2405,7 +2461,7 @@ export class App {
           choice("u", "update now: download, verify and replace the termium binary");
           choice("l", "later: ask again when this session restarts");
           choice("s", "skip this version");
-          footer = "u update · l later · s skip";
+          footer = "u update · l later · s skip · Esc close";
         }
         break;
       case "working":
@@ -2425,8 +2481,8 @@ export class App {
         blank();
         choice("r", "restart now: reopens your spaces, tabs and splits");
         add([txt, "       (pages reload; text typed into them is lost)"]);
-        choice("Esc", "later: Ctrl+B U restarts it any time");
-        footer = "r restart · Esc later";
+        choice("l", "later: Ctrl+B U restarts it any time");
+        footer = "r restart · l later · Esc close";
         break;
       case "failed":
         title = "update failed";
@@ -2903,7 +2959,9 @@ export class App {
       key: ev.key,
       code: ev.code,
       windowsVirtualKeyCode: ev.vk,
-      nativeVirtualKeyCode: ev.vk,
+      // No nativeVirtualKeyCode: it's read as the platform's own key code,
+      // and on macOS a Windows code there makes Helium treat keys without
+      // text (Shift, arrows, Tab…) as a shortcut that opens its settings.
       location: ev.location,
     };
     const sid = page.sessionId;
@@ -2962,7 +3020,7 @@ export class App {
       // may hold something copied on another site.
       const r = await evaluate(`navigator.clipboard.writeText(${JSON.stringify(text)}).then(() => true, () => false)`);
       if (r?.result?.value !== true) throw new Error("clipboard write refused");
-      const key = { key: "v", code: "KeyV", windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 };
+      const key = { key: "v", code: "KeyV", windowsVirtualKeyCode: 86, modifiers: 2 };
       await this.cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...key, commands: ["paste"] }, sid);
       await this.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...key }, sid);
       await evaluate(`navigator.clipboard.writeText("").then(() => true, () => false)`);
