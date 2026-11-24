@@ -44,7 +44,7 @@ import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Ste
 // ---------------------------------------------------------------- model
 
 export interface Page {
-  /** A short number for the page, unique in the session. */
+  /** A short number for the page, unique in the session (what `termium ctl` calls a tab). */
   num: number;
   targetId: string;
   sessionId: string;
@@ -111,6 +111,24 @@ export interface Page {
   foreignTries?: number;
   loadingTries?: number;
   foreignPolls?: number;
+}
+
+/** A page as `termium ctl tabs` lists it. */
+export interface AgentTab {
+  id: number;
+  targetId: string;
+  url: string;
+  title: string;
+  /** The page the attached terminal is focused on (input goes there). */
+  active: boolean;
+  /** Shown on screen now (in the current tab of the current space, with a terminal attached). */
+  visible: boolean;
+  space: number;
+  spaceName: string;
+  tab: number;
+  pane: number;
+  loading: boolean;
+  dialog: { type: string; message: string } | null;
 }
 
 interface Tab {
@@ -240,6 +258,9 @@ const BROWSER_SHORTCUTS = new Set([
 
 /** While a page is blocked on a JavaScript dialog, only these make sense. */
 const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
+
+/** The viewport of a page opened while no terminal is attached (until one is). */
+const DETACHED_VIEWPORT = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false, screenWidth: 1920, screenHeight: 1080 };
 
 const SIDEBAR_W = 22;
 const TOP_ROWS = 2;
@@ -824,6 +845,9 @@ export class App {
     const setup = Promise.all([
       this.documentSetup(sid),
       this.cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sid),
+      // No terminal to size it to (a session an agent started): a desktop-sized
+      // page rather than the small headless window. A terminal attaching resizes it.
+      this.attached ? null : this.cdp.send("Emulation.setDeviceMetricsOverride", DETACHED_VIEWPORT, sid),
     ]).catch((e) => this.opts.log(`setup ${sid}: ${e}`));
 
     // Put it into the model before applying metrics so it gets the right size.
@@ -3639,6 +3663,115 @@ export class App {
 
   private movesInFlight = new Set<Page>();
   private pendingMoves = new Map<Page, () => Promise<unknown>>();
+
+  // ---------------------------------------------------------- agents
+  //
+  // What `termium ctl` uses (src/agent.ts): pages by number, and the same
+  // actions the keyboard and mouse have, without a terminal of its own.
+
+  /** The UI is up (the first page exists). */
+  get isReady(): boolean {
+    return this.ready;
+  }
+
+  /** Every page, in the order of spaces, tabs and panes. */
+  agentTabs(): AgentTab[] {
+    const out: AgentTab[] = [];
+    const focused = this.focused;
+    this.spaces.forEach((space, si) => {
+      space.tabs.forEach((tab, ti) => {
+        leaves(tab.root).forEach((page, pi) => {
+          out.push({
+            id: page.num,
+            targetId: page.targetId,
+            url: page.url.includes(MARKER) ? "about:blank" : page.url,
+            title: page.title.includes(MARKER) ? "" : page.title,
+            active: page === focused,
+            visible: this.geom.has(page),
+            space: si + 1,
+            spaceName: space.name,
+            tab: ti + 1,
+            pane: pi + 1,
+            loading: page.loading,
+            dialog: page.dialog ? { type: page.dialog.type, message: page.dialog.message } : null,
+          });
+        });
+      });
+    });
+    return out;
+  }
+
+  pageByNum(num: number): Page | undefined {
+    for (const page of this.pages.values()) if (page.num === num) return page;
+    return undefined;
+  }
+
+  /** The page input goes to: the focused pane of the current tab. */
+  activePage(): Page | undefined {
+    return this.focused;
+  }
+
+  /** What the address bar makes of `text`: an address, or a search with the session's engine. */
+  resolveUrl(text: string): string | null {
+    return toUrl(text, this.opts.search);
+  }
+
+  /** Opens `url` in a new tab of the current space (after the current tab), resolving to its page. */
+  agentNewTab(url: string, background: boolean): Promise<Page | null> {
+    const space = this.space ?? this.spaces[0];
+    if (!space) return Promise.resolve(null);
+    return this.placePage({ kind: "tab", space, index: space.active + 1, editUrl: false, url, background });
+  }
+
+  /** Navigates a page (a crashed or hung one is replaced, as from the address bar). */
+  agentNavigate(page: Page, url: string): void {
+    this.go(page, url);
+  }
+
+  /** Shows a page: its space, its tab, and focuses its pane. */
+  agentSelect(page: Page): boolean {
+    const loc = this.locate(page);
+    if (!loc) return false;
+    this.activeSpace = this.spaces.indexOf(loc.space);
+    loc.space.active = loc.space.tabs.indexOf(loc.tab);
+    loc.tab.focused = page;
+    if (loc.tab.zoomed && !leaves(loc.tab.root).includes(page)) loc.tab.zoomed = false;
+    if (this.prompt?.kind === "url" || this.prompt?.kind === "rename") this.prompt = null;
+    this.relayoutAndRedraw();
+    return true;
+  }
+
+  /** Closes a page as Ctrl+W does (its "Leave this page?" may ask), or outright with `force`. */
+  agentClose(page: Page, force: boolean): void {
+    if (force) {
+      page.closing = true;
+      this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
+    } else {
+      this.closePage(page);
+    }
+  }
+
+  isOpen(page: Page): boolean {
+    return this.pages.get(page.sessionId) === page;
+  }
+
+  /** Answers a page's JavaScript dialog (alert, confirm, prompt, "Leave this page?"). */
+  agentDialog(page: Page, accept: boolean, text: string): boolean {
+    if (!page.dialog) return false;
+    this.answerDialog(page, accept, text);
+    return true;
+  }
+
+  /**
+   * Runs `job` between the page's viewport changes and screenshots (see
+   * serial): a screenshot taken while the viewport changes can undo the
+   * change. The queue waits for it 15 s at most.
+   */
+  withPage<T>(page: Page, job: () => Promise<T>): Promise<T> {
+    const run = page.ops.then(job);
+    page.ops = Promise.race([run.then(() => {}, () => {}), Bun.sleep(15_000)]);
+    return run;
+  }
 }
 
 // ---------------------------------------------------------------- helpers

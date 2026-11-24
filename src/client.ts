@@ -891,7 +891,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
  * socket is removed), { unresponsive, pid } if it accepts the connection but
  * never answers (hung, or stopped).
  */
-async function sessionInfo(name: string): Promise<any | null> {
+export async function sessionInfo(name: string): Promise<any | null> {
   const p = sessionPaths(name);
   const sock = await dial(p.sock, 3000).catch(() => null);
   if (!sock) {

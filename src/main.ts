@@ -8,6 +8,7 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { killSession, listSessions, runClient, runningSessions } from "./client";
+import { runCtl, runDevtools, startSession } from "./ctl";
 import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
@@ -35,6 +36,14 @@ Usage:
   termium attach [name]        attach to a running session
   termium ls                   list sessions
   termium kill [name]          end a session (stops its browser)
+  termium start [options] [url]
+                               start a session in the background without a terminal
+                               (for agents; attach to it later with termium attach)
+  termium ctl COMMAND ...      drive a session from a script or agent without attaching:
+                               tabs, open, snapshot, click, type, key, text, shot, eval,
+                               wait... (termium ctl --help)
+  termium devtools [name]      print the session's DevTools endpoint (http://127.0.0.1:PORT;
+                               --json for more) for Puppeteer, Playwright, chrome-devtools-mcp
   termium check-update         check for a newer termium release (exit 0: up to date,
                                100: one is available, 1: could not check)
   termium update               update termium to the latest release (exit 0: updated or
@@ -58,7 +67,7 @@ Ctrl+B d detaches (the browser keeps running); Ctrl+Q ends the session.
 Needs a terminal with the kitty graphics protocol, such as Ghostty, kitty or WezTerm
 (inside tmux: set -g allow-passthrough on). Press Ctrl+B then ? inside termium for keys.`;
 
-type Command = "open" | "attach" | "ls" | "kill" | "server" | "check-update" | "update";
+type Command = "open" | "attach" | "ls" | "kill" | "server" | "check-update" | "update" | "start";
 
 interface Args extends LaunchOptions {
   command: Command;
@@ -92,6 +101,7 @@ function parseArgs(argv: string[]): Args {
   else if (first === "__server") args.command = "server";
   else if (first === "check-update") args.command = "check-update";
   else if (first === "update") args.command = "update";
+  else if (first === "start") args.command = "start";
   if (args.command !== "open") i = 1;
   const flag = (f: string) => {
     if (!args.launchFlags.includes(f)) args.launchFlags.push(f);
@@ -160,7 +170,7 @@ function parseArgs(argv: string[]): Args {
   if (!validSessionName(args.session)) fail(`bad session name "${args.session}" (letters, digits, . _ -; up to 64)`);
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
   if (args.incognito && args.profile) fail("--incognito and --profile can't be used together");
-  if (args.command !== "open" && args.command !== "server" && args.launchFlags.length) {
+  if (args.command !== "open" && args.command !== "server" && args.command !== "start" && args.launchFlags.length) {
     fail(`${args.launchFlags.join(", ")} only apply when starting a session`);
   }
   return args;
@@ -247,7 +257,11 @@ async function update(): Promise<never> {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  // Agents' commands have options of their own.
+  const argv = process.argv.slice(2);
+  if (argv[0] === "ctl") return runCtl(argv.slice(1));
+  if (argv[0] === "devtools") return runDevtools(argv.slice(1));
+  const args = parseArgs(argv);
   switch (args.command) {
     case "check-update":
       return checkUpdate();
@@ -259,6 +273,14 @@ async function main(): Promise<void> {
       return killSession(args.session);
     case "server":
       return runServer(args.session, args, VERSION);
+    case "start": {
+      // As for a plain `termium`: a restart's snapshot is reopened.
+      if (!args.launchFlags.length) {
+        const r = readRestore(args.session);
+        if (r) Object.assign(args, savedLaunch(r.launch));
+      }
+      return startSession({ name: args.session, url: args.url, launchFlags: args.launchFlags, serverArgv: serverArgv(args) });
+    }
     case "open":
     case "attach": {
       // A restart's snapshot waiting for this session (a restart now, or

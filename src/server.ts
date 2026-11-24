@@ -11,6 +11,7 @@ import { createServer, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { App } from "./app";
+import { CtlError, runCtl, type CtlRequest } from "./agent";
 import {
   clearOwner,
   findBrowser,
@@ -70,7 +71,13 @@ export interface LaunchOptions {
 export interface Hello {
   t: "hello";
   v: number;
-  kind: "attach" | "info" | "kill" | "abandon";
+  /**
+   * "ctl": an agent's command (`termium ctl`), sent as the next message
+   * ({t: "ctl", req}); it never attaches nor disturbs the attached terminal.
+   * Clients ask "info" first: only a server that says `ctl: true` knows it
+   * (an older one would take it for an attach).
+   */
+  kind: "attach" | "info" | "kill" | "abandon" | "ctl";
   version?: string;
   cols?: number;
   rows?: number;
@@ -361,6 +368,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   let cdp: CDP | null = null;
   let app: App | null = null;
   let client: Conn | null = null;
+  /** A terminal attached, or an agent used the session (`termium start`, `termium ctl`). */
   let everAttached = false;
   let shuttingDown = false;
   const pending: InputEvent[] = [];
@@ -448,9 +456,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     log(`client ${reason}`);
   };
 
-  /** Creates the app for the first client: the browser must be up, and the terminal's size known. */
+  /** Creates the app for the first client: the browser must be up, and the terminal's size known (an agent's: a default). */
   let starting: Promise<void> | null = null;
-  const startApp = (h: Hello) =>
+  const startApp = (h: Partial<Hello>) =>
     (starting ??= (async () => {
       try {
         browser = await launching;
@@ -485,7 +493,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         },
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
-      app.setUpdatesShown((lastHello ?? h).updateCheck === true);
+      app.setUpdatesShown((lastHello ?? h).updateCheck === true && !!client);
       app.attach(terminalOf(lastHello ?? h));
       if (!client) app.detach();
       log(`start ${bin} dsf=${app.dsf}`);
@@ -711,9 +719,18 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           attached: !!client,
           // Saves its layout and restarts into an updated termium itself (termium 0.3.0 on).
           restarts: true,
+          // Takes `termium ctl` commands (hello kind "ctl").
+          ctl: true,
           pages: app?.pages.size ?? 0,
           profile: args.incognito ? "(incognito)" : profile,
+          // Its DevTools endpoint (on loopback), once the browser is up.
+          devtools: browser?.devtools ?? null,
         });
+        return;
+      }
+      if (h.kind === "ctl") {
+        // Waits for its request (the next message): see onCtl.
+        ctlConns.add(c);
         return;
       }
       if (h.kind === "abandon") {
@@ -778,6 +795,10 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       }
       return;
     }
+    if (msg.t === "ctl" && ctlConns.delete(c)) {
+      void onCtl(c, msg.req as CtlRequest);
+      return;
+    }
     if (c !== client) return; // a client that was taken over: ignore what it still sends
     switch (msg.t) {
       case "input":
@@ -805,7 +826,32 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     }
   };
 
+  // ------------------------------------------------------------ agents
+  //
+  // `termium ctl` connects, says hello (kind "ctl"), sends one request and
+  // gets one reply. It never becomes the session's client: the attached
+  // terminal (if any) keeps its screen and input, and sees what the agent
+  // does to the pages.
+  const ctlConns = new Set<Conn>();
+  const onCtl = async (c: Conn, req: CtlRequest) => {
+    const reply = (msg: object) => void c.end({ t: "ctl", ...msg });
+    if (shuttingDown) return reply({ ok: false, code: 1, error: `session "${name}" is ending` });
+    // An agent counts as using the session: it isn't ended for want of a terminal.
+    everAttached = true;
+    try {
+      if (!app) await startApp(lastHello ?? {});
+      if (!app || !appReady || !cdp || shuttingDown) return reply({ ok: false, code: 1, error: `session "${name}" couldn't start its browser` });
+      const result = await runCtl(app, cdp, req, { devtools: browser?.devtools ?? null, log });
+      reply({ ok: true, result });
+    } catch (e: any) {
+      const code = e instanceof CtlError ? e.code : 1;
+      if (!(e instanceof CtlError)) log(`ctl ${req?.cmd}: ${e instanceof Error ? e.stack : e}`);
+      reply({ ok: false, code, error: e?.message ?? String(e) });
+    }
+  };
+
   const onClose = (c: Conn) => {
+    ctlConns.delete(c);
     if (c !== client) return;
     stopCheck();
     // The terminal went away (closed, killed, or the client detached).
