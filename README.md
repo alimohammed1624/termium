@@ -176,7 +176,8 @@ termium update           # update to it (a release binary only)
   The request carries only a `termium/<version>` User-Agent. It never
   delays anything: failures are silent (offline means no badge) and it
   gives up after 3 s in all (both sources together), or as soon as the
-  terminal detaches (nothing is recorded then). The answer is cached in
+  terminal detaches (nothing is recorded then). The answer is cached (best
+  effort: if another termium holds the cache's lock, it isn't written) in
   `~/.local/state/termium/update-check.json` (`$XDG_STATE_HOME`); a cached
   newer release shows at once, then the check refreshes it (a failed check
   keeps what was cached). Pre-releases are never offered.
@@ -195,8 +196,10 @@ termium update           # update to it (a release binary only)
   or the badge: a box opens with `u` update now, `l` later (not offered
   again in this session unless a newer release comes out; asked again when
   the session restarts) and `s` skip this version (never offered again;
-  the badge stays). A terminal that attaches or takes over always starts
-  typing into the page: an open box, help or address editing is closed. Any other key closes the box and goes on as usual, and
+  the badge stays). Only those letters act: `Esc` closes the box, and
+  any other key (Enter and Space included) closes it and goes on to the
+  page. A terminal that attaches or takes over always starts typing into
+  the page: an open box, help or address editing is closed. Any other key closes the box and goes on as usual, and
   a paste closes it and reaches the page.
 - **Updating.** `u` (or `termium update` from a shell) downloads this
   platform's archive and `SHA256SUMS` from the release, checks the
@@ -215,15 +218,17 @@ termium update           # update to it (a release binary only)
   closes its browser and starts again from the new binary in the same
   terminal, with its spaces, tabs, splits and zoom: pages reload from
   their addresses, logins survive in the profile (not with
-  `--incognito`), anything typed into a page and not saved is lost.
-  `Esc` leaves it for later (`Ctrl+B U` offers it again; the badge shows
-  `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
+  `--incognito`), anything typed into a page and not saved is lost, so if
+  a page may have unsaved changes (or a download is running) termium asks
+  first, as `Ctrl+Q` does. `l` leaves it for later (`Ctrl+B U` offers it
+  again; the badge shows `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
   (from the new binary) offers the same restart, as a notice. If a
   restart fails to start the session, its spaces and tabs are kept: the
   next `termium` (or `termium -s NAME`) within 10 minutes starts it with
-  the profile and options it had and reopens them; started with other
-  options (another `--profile`, say), the snapshot is kept and termium
-  says so. Two updates at once
+  the profile and options it had and reopens them; started with any other
+  launch option (another `--profile`, `--scale`, …), the snapshot is kept
+  and termium says so. It's removed only once every page in it reopened;
+  otherwise it's kept and termium says so. Two updates at once
   (two sessions, or a shell) take turns, and never replace a newer
   termium with an older one.
 - **Sessions of older termiums.** A session started by termium 0.2.0 (before

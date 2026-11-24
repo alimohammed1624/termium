@@ -23,11 +23,13 @@ All notable changes to termium are documented here. The format follows
   folder isn't writable; on any failure, the `install.sh` command to
   update by hand). Only a native executable for this machine is accepted.
   Concurrent updates take turns under a lock and never replace a newer
-  binary with an older one; the update cache is changed under a lock too.
+  binary with an older one; the update cache is changed under a lock too
+  (best effort: never waited for long).
 - Restart into an update: a running session keeps the old version until
   it restarts; `r` restarts it from the new binary in the same terminal,
   reopening its spaces, tabs and splits (kept for the next start, with
-  the profile and options it had, if the restart fails). After
+  the launch options it had, unless every page reopened). It asks first
+  if a page may have unsaved changes. After
   `termium update` from a shell, the next attach offers the same. Attaching to a session of termium 0.2.0 says it runs
   the older version and offers to restart it (its pages close).
 - `termium check-update` prints one line (exit 0 up to date, 100 newer
@@ -42,6 +44,12 @@ All notable changes to termium are documented here. The format follows
   previous terminal is closed.
 - Attaching to a session of a termium that speaks another session
   protocol says how to end it (`termium kill NAME`).
+
+### Fixed
+- After re-attaching at another size, the first picture of a page could
+  be one of the old shape (the browser's first frame after a resize can
+  carry the new size in its metadata but the old picture); frames that
+  don't have the viewport's shape are dropped.
 
 ## [0.2.0] - 2026-11-24
 

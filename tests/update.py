@@ -93,6 +93,7 @@ sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
 # ---- the fake GitHub
 LATEST = {"tag": f"v{NEXT}"}
 HITS = []
+DL = []  # downloads asked for
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -108,6 +109,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             return
         if self.path.startswith("/dl/"):
+            DL.append(self.path)
             p = os.path.join(tmp, "dist", *self.path[4:].split("/"))
             if os.path.isfile(p):
                 data = open(p, "rb").read()
@@ -310,6 +312,15 @@ try:
           a.wait_for(lambda: page_eval("termiumState().inp", prof) == "sul usual pasted", 5), page_eval("termiumState().inp", prof))
     check("...and none of them answered it", notice(a) and not box_open(a) and (cache("st-offer") or {}).get("skipped") is None, cache("st-offer"))
     check("Ctrl+B U opens the box", open_box(a) and "u update · l later · s skip" in a.text(), a.text()[-400:])
+    a.key("enter")
+    time.sleep(1)
+    check("Enter in the box doesn't update: it closes the box (and goes to the page)", not box_open(a) and notice(a) and not DL, (a.line(2), DL))
+    open_box(a); a.key("space"); time.sleep(1)
+    check("...nor does Space", not box_open(a) and notice(a) and not DL and page_eval("termiumState().inp", prof) == "sul usual pasted ", page_eval("termiumState().inp", prof))
+    a.key("backspace"); time.sleep(0.3)
+    open_box(a); a.key("escape")
+    check("Escape just closes the box (the offer stays)", a.wait_for(lambda: not box_open(a), 5) and notice(a) and page_eval("termiumState().inp", prof) == "sul usual pasted")
+    open_box(a)
     shot(a, "update-offer.png")
     a.key("x")
     check("a key the box doesn't use closes it and goes to the page", a.wait_for(lambda: not box_open(a), 5) and
@@ -416,6 +427,17 @@ try:
     lt2.wait_text("termium test page", 15); time.sleep(3)
     check("later: not offered again on re-attach", not notice(lt2) and f"↑ v{LATER}" in lt2.line(1), (lt2.line(1), lt2.line(2)))
     stop("later")
+
+    # ------------------------------------------------ a skipped release never shows, even replacing a cached offer
+    os.makedirs(os.path.join(tmp, "st-skip2", "termium"), exist_ok=True)
+    json.dump({"checked_at": 1, "latest": f"v{NEXT}", "skipped": f"v{LATER}"}, open(os.path.join(tmp, "st-skip2", "termium", "update-check.json"), "w"))
+    k = term(cur_bin, "-s", "skip2", "--incognito", PAGE, state="st-skip2")
+    check("skipped newer release: the badge shows it", k.wait_for(lambda: f"↑ v{LATER}" in k.line(1), 40), k.line(1))
+    time.sleep(2)
+    check("...but no offer shows (the cached older one is withdrawn)", not notice(k), k.line(2))
+    k.key("ctrl+b"); k.key("shift+u")
+    check("...and Ctrl+B U says it was skipped", k.wait_for(lambda: "was skipped" in k.line(2), 5) and not box_open(k), k.line(2))
+    stop("skip2")
     LATEST["tag"] = f"v{NEXT}"
 
     # ------------------------------------------------ a failed restart keeps its snapshot; a plain retry reopens it as it was
@@ -445,9 +467,29 @@ try:
     rpath = snapshot("rf2", os.path.join(tmp, "prof-resume2"))
     rf2 = term(cur_bin, "-s", "rf2", "--incognito", state="st-rf")
     check("restart snapshot: started with other options, it says the snapshot is kept",
-          rf2.wait_for(lambda: "Snapshot kept (it wasn't --incognito)" in rf2.line(2), 40), rf2.line(2))
+          rf2.wait_for(lambda: "Snapshot kept (it was started without --incognito)" in rf2.line(2), 40), rf2.line(2))
     check("restart snapshot: ...keeps it, and starts as asked", os.path.exists(rpath) and "(incognito)" in ls_row("rf2", "st-rf") and "kept space" not in rf2.text(), ls_row("rf2", "st-rf"))
     stop("rf2")
+    # Every saved launch option counts: another --scale keeps the snapshot.
+    def raw_snapshot(name, launch, lay=layout):
+        path = os.path.join(sockdir, f"{name}.restore")
+        with open(path, "w") as f:
+            json.dump({"v": 1, "at": int(time.time() * 1000), "from": CUR, "layout": lay, "launch": launch}, f)
+        os.chmod(path, 0o600)
+        return path
+    rpath = raw_snapshot("rf3", {"incognito": True, "scale": 1, "search": "https://duckduckgo.com/?q=%s"})
+    rf3 = term(cur_bin, "-s", "rf3", "--incognito", "--scale", "1.5", state="st-rf")
+    check("restart snapshot: another --scale keeps it, and says so", rf3.wait_for(lambda: "Snapshot kept (it was started with --scale 1)" in rf3.line(2), 40) and os.path.exists(rpath), rf3.line(2))
+    stop("rf3")
+    # Not every page reopened: kept, and the user told.
+    partial = {"spaces": [{"name": "kept space", "active": 0, "tabs": [{"root": {"url": PAGE}, "focus": 0, "zoomed": False},
+                                                                      {"root": {"dir": "x"}, "focus": 0, "zoomed": False}]}],
+               "activeSpace": 0, "sidebar": True, "zoom": 1}
+    rpath = raw_snapshot("rf4", {"incognito": True, "scale": None, "search": "https://duckduckgo.com/?q=%s"}, partial)
+    rf4 = term(cur_bin, "-s", "rf4", state="st-rf")
+    check("restart snapshot: partly reopened, it's kept and says so",
+          rf4.wait_for(lambda: "Not all pages reopened" in rf4.line(2), 40) and "kept space" in rf4.text() and os.path.exists(rpath), (rf4.line(2), os.path.exists(rpath)))
+    stop("rf4")
 
     # ------------------------------------------------ u: update, then r: restart into it (layout kept)
     inst = os.path.join(tmp, "inst"); os.makedirs(inst)
@@ -476,7 +518,9 @@ try:
     check("u: the binary is executable", os.access(os.path.join(inst, "termium"), os.X_OK))
     check("u: the session still runs (the old version)", server_pid("upd") == old_server)
     check("u: the badge says a restart is due", f"↻ v{NEXT}" in u.line(1), u.line(1))
-    u.key("r")
+    open_box(u); u.key("enter"); time.sleep(1.5)
+    check("Enter in the done box doesn't restart: it closes the box", not box_open(u) and server_pid("upd") == old_server and notice(u), u.line(2))
+    open_box(u); u.key("r")
     check("r: the client says it's restarting", u.wait_for(lambda: "restarting session upd" in output(u), 15), output(u)[-300:])
     check("r: a new session server runs", u.wait_for(lambda: server_pid("upd") not in (None, old_server), 30))
     check("r: the same terminal is attached again, with a notice", u.wait_for(lambda: f"Restarted: termium {CUR} → {NEXT}" in u.text(), 40), u.text()[-400:])
@@ -506,7 +550,8 @@ try:
     # ------------------------------------------------ termium update from the shell; a newer client attaching
     inst2 = os.path.join(tmp, "inst2"); os.makedirs(inst2)
     shutil.copy(cur_bin, os.path.join(inst2, "termium"))
-    o = term(os.path.join(inst2, "termium"), "-s", "shell", "--incognito", PAGE, state="st-shell", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
+    prof6 = os.path.join(tmp, "prof-shell")
+    o = term(os.path.join(inst2, "termium"), "-s", "shell", "--profile", prof6, PAGE, state="st-shell", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
     o.wait_text("termium test page", 40)
     o.key("ctrl+b"); o.key("d"); exit_code(o)
     r = cli(os.path.join(inst2, "termium"), "update", state="st-shell")
@@ -520,8 +565,20 @@ try:
     check("a newer client attaching to the old session: a restart is offered", q.wait_for(lambda: notice(q) and f"↻ termium {NEXT} is installed" in q.line(2), 30), q.line(2))
     open_box(q)
     check("...the box offers r restart", f"termium {NEXT}" in q.text() and "is installed" in q.text() and "r restart" in q.text(), q.text()[-500:])
-    q.key("escape")
-    check("...Esc: later, with the ↻ badge", q.wait_for(lambda: not box_open(q) and f"↻ v{NEXT}" in q.line(1), 5), q.line(1))
+    q.key("l")
+    check("...l: later, with the ↻ badge", q.wait_for(lambda: not box_open(q) and f"↻ v{NEXT}" in q.line(1), 5), q.line(1))
+    # A page with unsaved changes: restarting asks first.
+    q.wait_idle(0.8, 10)
+    g = page_eval("(() => { const r = document.getElementById('guard').getBoundingClientRect(); return [r.x + 10, r.y + r.height/2]; })()", prof6)
+    q.click(220 + int(g[0]), 40 + int(g[1])); time.sleep(0.3); q.type("x"); time.sleep(0.5)
+    shell_pid = server_pid("shell")
+    open_box(q); q.key("r")
+    check("r with unsaved changes asks first", q.wait_for(lambda: "may have unsaved changes. Restart anyway?" in q.line(2), 10), q.line(2))
+    q.key("escape"); time.sleep(1.5)
+    check("...Esc keeps the session", server_pid("shell") == shell_pid and "Restart anyway" not in q.line(2))
+    open_box(q); q.key("r")
+    q.wait_for(lambda: "Restart anyway?" in q.line(2), 10); q.key("enter")
+    check("...Enter there restarts it", q.wait_for(lambda: server_pid("shell") not in (None, shell_pid), 40) and q.wait_for(lambda: "Restarted:" in q.text(), 40), output(q)[-200:])
     stop("shell")
 
     # ------------------------------------------------ refusals and failures always say how to update by hand
@@ -587,7 +644,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "rf", "rf2", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "rf", "rf2", "rf3", "rf4", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)
