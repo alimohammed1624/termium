@@ -28,7 +28,11 @@ import {
   readdirSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { gunzip, gunzipSync } from "node:zlib";
+import { promises as fsp } from "node:fs";
+import { promisify } from "node:util";
+
+const gunzipAsync = promisify(gunzip);
 import { lockFile, unlockFile } from "./browser";
 
 const REPO = "alimohammed1624/termium";
@@ -381,11 +385,12 @@ export function sha256Hex(data: Uint8Array): string {
 }
 
 /** The `termium` binary inside a release archive (`termium-<target>/termium`, tar.gz). */
-export function extractBinary(archive: Uint8Array, target: string): Uint8Array {
+/** `archive` is the .tar.gz (or, with `gzipped` false, the .tar already unpacked). */
+export function extractBinary(archive: Uint8Array, target: string, gzipped = true): Uint8Array {
   const want = `termium-${target}/termium`;
   let tar: Buffer;
   try {
-    tar = gunzipSync(archive);
+    tar = gzipped ? gunzipSync(archive) : Buffer.from(archive.buffer, archive.byteOffset, archive.byteLength);
   } catch (e: any) {
     throw new Error(`bad archive: ${e?.message ?? e}`);
   }
@@ -480,32 +485,33 @@ export function selfUpdateBlocker(exe?: string): string | null {
  * and made executable, then renamed over it, so `exe` is never half-written.
  * `check` may inspect the staged file first (throwing leaves `exe` alone).
  */
-export function installBinary(bin: Uint8Array, exe: string, check?: (staged: string) => void): void {
+export async function installBinary(bin: Uint8Array, exe: string, check?: (staged: string) => Promise<void> | void): Promise<void> {
+  // All of it without blocking (the session server keeps answering meanwhile).
   const dir = dirname(exe);
   const tmp = join(dir, `.termium-update-${randomBytes(8).toString("hex")}`);
   try {
-    const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o700);
+    const fh = await fsp.open(tmp, "wx", 0o700);
     try {
-      for (let off = 0; off < bin.length; ) off += writeSync(fd, bin, off);
-      fsyncSync(fd);
+      await fh.writeFile(bin);
+      await fh.sync();
     } finally {
-      closeSync(fd);
+      await fh.close();
     }
-    chmodSync(tmp, 0o755);
-    check?.(tmp);
-    renameSync(tmp, exe);
+    await fsp.chmod(tmp, 0o755);
+    await check?.(tmp);
+    await fsp.rename(tmp, exe);
   } catch (e: any) {
-    rmSync(tmp, { force: true });
+    await fsp.rm(tmp, { force: true }).catch(() => {});
     if (!e?.code) throw e;
     throw new Error(`cannot replace the termium binary: ${e.message}`);
   }
   // The rename itself, durably (best effort).
   try {
-    const d = openSync(dir, "r");
+    const d = await fsp.open(dir, "r");
     try {
-      fsyncSync(d);
+      await d.sync();
     } finally {
-      closeSync(d);
+      await d.close();
     }
   } catch {}
 }
@@ -563,11 +569,10 @@ export function nativeProblem(bin: Uint8Array, platform: string, arch: string, r
 }
 
 /** Runs a staged binary's --version: it must run here and be the release we asked for. */
-function checkRuns(staged: string, tag: string): void {
-  const r = Bun.spawnSync([staged, "--version"], { stdout: "pipe", stderr: "ignore", timeout: 20_000 });
-  const got = r.stdout.toString().trim();
-  if (r.exitCode !== 0 || !got) throw new Error("the downloaded termium doesn't run on this machine; nothing was changed");
-  if (got !== `termium ${displayVersion(tag)}`) throw new Error(`the downloaded termium says "${got}", not termium ${displayVersion(tag)}; nothing was changed`);
+async function checkRuns(staged: string, tag: string): Promise<void> {
+  const got = await binaryVersionAsync([staged]);
+  if (!got) throw new Error("the downloaded termium doesn't run on this machine; nothing was changed");
+  if (got !== displayVersion(tag)) throw new Error(`the downloaded termium says "termium ${got}", not termium ${displayVersion(tag)}; nothing was changed`);
 }
 
 /** The version a termium reports (`termium X.Y.Z`), or null: a binary, or the argv that runs one (bun and the script). */
@@ -618,13 +623,18 @@ class AlreadyInstalled extends Error {
  * that release or newer (another updater got there first). Returns the
  * version installed afterwards.
  */
-export async function installRelease(bin: Uint8Array, exe: string, tag: string, check = checkRuns): Promise<string> {
+export async function installRelease(
+  bin: Uint8Array,
+  exe: string,
+  tag: string,
+  check: (staged: string, tag: string) => Promise<void> | void = checkRuns,
+): Promise<string> {
   const release = await waitLock(join(dirname(exe), ".termium-update.lock"));
   try {
-    installBinary(bin, exe, (staged) => {
-      check(staged, tag);
+    await installBinary(bin, exe, async (staged) => {
+      await check(staged, tag);
       // Just before the rename: what's there now?
-      const now = binaryVersion(exe);
+      const now = await binaryVersionAsync([exe]);
       if (now && !isNewer(tag, now)) throw new AlreadyInstalled(now);
     });
     return displayVersion(tag);
@@ -658,7 +668,9 @@ export async function selfUpdate(tag: string, version: string, step: (s: Step) =
   const want = sumFor(Buffer.from(sums).toString("utf8"), asset);
   if (!want) throw new Error(`SHA256SUMS has no entry for ${asset}`);
   if (sha256Hex(archive) !== want) throw new Error(`${asset} does not match its SHA-256 in SHA256SUMS; nothing was changed`);
-  const bin = extractBinary(archive, target);
+  const bin = extractBinary(new Uint8Array(await gunzipAsync(archive).catch((e: any) => {
+    throw new Error(`bad archive: ${e?.message ?? e}`);
+  })), target, false);
   // Never run (nor install) anything but a native termium for this machine.
   let refSize = 0;
   try {

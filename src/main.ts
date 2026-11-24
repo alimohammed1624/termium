@@ -119,6 +119,8 @@ function parseArgs(argv: string[]): Args {
         process.exit(0);
       case "-V":
       case "--version":
+        // Tests stand in for a slow machine (a new binary that takes a while to start) with this.
+        if (Number(process.env.TERMIUM_TEST_VERSION_DELAY_MS) > 0) Bun.sleepSync(Number(process.env.TERMIUM_TEST_VERSION_DELAY_MS));
         console.log(`termium ${VERSION}`);
         process.exit(0);
       case "--skill":
@@ -137,7 +139,8 @@ function parseArgs(argv: string[]): Args {
         // A path (not a name looked up on PATH) is made absolute: the session
         // may restart from another directory.
         const b = value();
-        args.browser = b.includes("/") ? resolve(b) : b;
+        // A name is looked up on this shell's PATH now (a restart may come from a shell without it).
+        args.browser = b.includes("/") ? resolve(b) : (Bun.which(b) ?? b);
         flag("--browser");
         break;
       }

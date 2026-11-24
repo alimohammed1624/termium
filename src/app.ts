@@ -46,6 +46,8 @@ import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Ste
 export interface Page {
   /** A short number for the page, unique in the session (what `termium ctl` calls a tab). */
   num: number;
+  /** A size check waiting for the once-a-second limit (see trailingSizeCheck). */
+  sizeRecheck?: ReturnType<typeof setTimeout>;
   /** An agent is closing it (see agentClose): "refused" once the page said it has unsaved changes. */
   agentClosing?: "yes" | "force" | "refused";
   /** Its browser context (another DevTools client's newContext() makes others). */
@@ -1690,7 +1692,8 @@ export class App {
       if (page.actual) return void this.checkForeign(page);
       const size = await this.pageSize(page);
       if (!size || (Math.abs(size.w - css.w) <= 1 && Math.abs(size.h - css.h) <= 1) || page.css !== css) return;
-      if (Date.now() - (page.reassertedAt ?? 0) < 1000) return;
+      const since = Date.now() - (page.reassertedAt ?? 0);
+      if (since < 1000) return void this.trailingSizeCheck(page, 1000 - since);
       page.reassertedAt = Date.now();
       this.opts.log(`page ${page.num}: resized to ${size.w}x${size.h} by another client; restoring ${css.w}x${css.h}`);
       this.reassertViewport(page);
@@ -1707,12 +1710,24 @@ export class App {
     const want = css ? { width: css.w, height: css.h, deviceScaleFactor: css.dsf } : DETACHED_VIEWPORT;
     const size = await this.pageSize(page);
     if (!size || this.attached || (Math.abs(size.w - want.width) <= 1 && Math.abs(size.h - want.height) <= 1)) return;
-    if (Date.now() - (page.reassertedAt ?? 0) < 1000) return;
+    // Put back at most once a second; a change meanwhile (a client letting go
+    // just after setting its size) is checked again then, never dropped.
+    const since = Date.now() - (page.reassertedAt ?? 0);
+    if (since < 1000) return void this.trailingSizeCheck(page, 1000 - since);
     page.reassertedAt = Date.now();
     this.opts.log(`page ${page.num}: resized to ${size.w}x${size.h} while detached; restoring ${want.width}x${want.height}`);
     await this.cdp
       .send("Emulation.setDeviceMetricsOverride", { ...DETACHED_VIEWPORT, ...want, mobile: false }, page.sessionId)
       .catch(() => {});
+  }
+
+  /** Looks at a page's size again in `ms` (once, however many changes come meanwhile). */
+  private trailingSizeCheck(page: Page, ms: number): void {
+    if (page.sizeRecheck) return;
+    page.sizeRecheck = setTimeout(() => {
+      page.sizeRecheck = undefined;
+      if (this.pages.has(page.sessionId)) this.sizeChanged(page);
+    }, ms + 50);
   }
 
   /** Sends the page its viewport again (another DevTools client changed it). */
@@ -2595,7 +2610,11 @@ export class App {
   }
 
   /** The self-update ended: `installed` is the version now on disk, or `error` why it failed. */
+  /** When the last update's outcome came. */
+  private updateResultAt = 0;
+
   updateDone(tag: string, installed: string | null, error: string | null, path?: string): void {
+    this.updateResultAt = Date.now();
     if (installed) {
       this.updateInstalled = installed;
       this.updateLatest = null;
@@ -2628,6 +2647,8 @@ export class App {
         return;
       }
     }
+    // Opened on purpose: its outcome is on screen, keys from now on are meant for it.
+    this.updateResultAt = 0;
     this.updateBlocker = this.updateBox.state === "offer" ? (this.opts.update ? this.opts.update.blocker() : "updates aren't available here") : null;
     this.prompt = null;
     this.mode = "update";
@@ -2641,12 +2662,16 @@ export class App {
    */
   private updateKey(ev: KeyEvent, combo: string): void {
     const box = this.updateBox;
+    // A key that arrives just as an update ended was pressed before its outcome
+    // was on screen: it never dismisses that outcome (the failure and its hint stay).
+    const fresh = Date.now() - this.updateResultAt < 600;
     const pass = () => {
-      this.closeUpdate(box?.state === "failed");
+      this.closeUpdate(box?.state === "failed" && !fresh);
       this.onKey(ev);
     };
     if (!box) return pass();
-    if (combo === "escape") return this.closeUpdate(box.state === "failed");
+    if (combo === "escape") return this.closeUpdate(box.state === "failed" && !fresh);
+    if (fresh && (box.state === "done" || box.state === "failed")) return pass();
     const shown = displayVersion(box.tag);
     switch (box.state) {
       case "offer":

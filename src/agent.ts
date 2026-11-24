@@ -65,15 +65,23 @@ interface Ctx {
 
 const DEFAULT_TIMEOUT = 30_000;
 
+/**
+ * Runs one command. An acting one (see ACTING) is never cut off from
+ * outside once it has started: it checks its deadline itself before each
+ * step that changes anything, and stops there, saying exactly how far it
+ * got. A reading one is simply timed out.
+ */
 export async function runCtl(app: App, cdp: CDP, req: CtlRequest, ctx: Ctx): Promise<unknown> {
   if (!req || typeof req.cmd !== "string") throw new CtlError("bad request", EXIT.usage);
   const timeoutMs = clampTimeout(req.timeoutMs);
+  const agent = new Agent(app, cdp, ctx, Date.now() + timeoutMs);
+  if (ACTING.has(req.cmd)) return agent.run(req, timeoutMs);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new CtlError(`${req.cmd}: timed out after ${timeoutMs / 1000}s`, EXIT.timeout)), timeoutMs);
   });
   try {
-    return await Promise.race([new Agent(app, cdp, ctx).run(req, timeoutMs), timeout]);
+    return await Promise.race([agent.run(req, timeoutMs), timeout]);
   } finally {
     clearTimeout(timer);
   }
@@ -89,7 +97,14 @@ class Agent {
     private app: App,
     private cdp: CDP,
     private ctx: Ctx,
+    /** When the command's time is up (checked before each step that changes anything). */
+    private deadline: number,
   ) {}
+
+  /** Before a step that changes something: past the deadline, stop here, saying what was (not) done. */
+  private step(soFar = "nothing was done"): void {
+    if (Date.now() >= this.deadline) throw new CtlError(`timed out; ${soFar}`, EXIT.timeout);
+  }
 
   async run(req: CtlRequest, timeoutMs: number): Promise<unknown> {
     switch (req.cmd) {
@@ -110,6 +125,7 @@ class Agent {
         const page = this.page(req.tab, true);
         const waited = await this.personFree(null, timeoutMs, "tab not switched");
         if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
+        this.step("tab not switched");
         this.app.agentSelect(page);
         this.note(`showing tab ${page.num}`);
         return waited > 150 ? { ...this.describe(page), waitedForPerson: waited } : this.describe(page);
@@ -153,7 +169,7 @@ class Agent {
    */
   private async personFree(page: Page | null, timeoutMs: number, what: string): Promise<number> {
     const t0 = Date.now();
-    const deadline = t0 + timeoutMs - 300;
+    const deadline = Math.min(this.deadline, t0 + timeoutMs);
     while (this.app.humanBusy() && (!page || page === this.app.activePage())) {
       if (Date.now() > deadline) {
         throw new CtlError(
@@ -213,6 +229,7 @@ class Agent {
     // A new tab asked for in front opens behind while the person is busy (it never takes their keys).
     let held = false;
     if (req.newTab) {
+      this.step("no tab opened");
       const created = await this.app.agentNewTab(url, !!req.background);
       if (!created) throw new CtlError("couldn't open a tab");
       page = created;
@@ -221,6 +238,7 @@ class Agent {
     } else {
       page = this.page(req.tab);
       await this.personFree(page, timeoutMs, "not navigated");
+      this.step("not navigated");
       this.app.agentNavigate(page, url);
       this.note(`going to ${url}`);
     }
@@ -247,6 +265,7 @@ class Agent {
         `tab ${page.num} may have unsaved changes (it would ask "Leave this page?"); not closed. ` +
           "close --force discards them",
       );
+    this.step("not closed");
     if ((await this.app.agentClose(page, !!req.force)) === "unsaved") throw unsaved();
     this.note(`closing tab ${page.num}`);
     const end = Date.now() + 5000;
@@ -454,6 +473,7 @@ class Agent {
       const page = this.page(req.tab);
       await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
       const [x, y] = req.xy;
+      this.step("not clicked");
       await this.mouseClick(page, x, y, button, count);
       this.note(`clicked at ${Math.round(x)},${Math.round(y)}`);
       return { tab: page.num, x, y };
@@ -473,6 +493,7 @@ class Agent {
       }`,
       [x, y],
     ).catch(() => true);
+    this.step("not clicked");
     await this.mouseClick(page, x, y, button, count);
     const label = await this.label(page, objectId);
     this.note(`clicked ${label}`);
@@ -507,6 +528,7 @@ class Agent {
     // Named before anything is typed, from its names only.
     const label = await this.label(page, objectId);
     await this.centre(page, node).catch(() => {}); // scrolled into view, where the watcher sees it
+    this.step("nothing was typed");
     const kind = await this.callOn(
       page,
       objectId,
@@ -547,7 +569,21 @@ class Agent {
           s.removeAllRanges();
           s.addRange(r);
         }
-        return { field: true, secret };
+        // Inserted here and now, in the same task as the focus check: the page
+        // can't move focus in between. execCommand fires the input events a
+        // person's typing would.
+        const read = () => (field ? this.value : this.innerText);
+        const before = read();
+        const ok = text ? doc.execCommand("insertText", false, text) : append || doc.execCommand("delete", false);
+        let now = doc.activeElement;
+        while (now && now.shadowRoot && now.shadowRoot.activeElement) now = now.shadowRoot.activeElement;
+        const describe = (e) => !e ? "nowhere" : e.tagName.toLowerCase() +
+          (e.id ? "#" + e.id : "") + (e.getAttribute && (e.getAttribute("aria-label") || e.getAttribute("name")) ? ' "' + (e.getAttribute("aria-label") || e.getAttribute("name")).slice(0, 40) + '"' : "");
+        const after = read();
+        const landed = !text || after !== before;
+        if (!ok && text) return { field: true, secret, fallback: true };
+        if (!landed || !(now === this || this.contains(now))) return { field: true, secret, missed: describe(now), landed };
+        return { field: true, secret, done: true };
       }`,
       [!!req.append, text],
     );
@@ -559,9 +595,35 @@ class Agent {
     if (kind?.field === false) throw new CtlError(`element ${req.ref} isn't a text field (click it, then use key)`);
     if (kind?.refused) throw new CtlError(`element ${req.ref} can't be typed into: ${kind.refused}; nothing was typed`);
     if (!kind?.field) throw new CtlError(`element ${req.ref} can't be typed into; nothing was typed`);
-    if (text) await this.cdp.send("Input.insertText", { text }, sid);
-    else if (!req.append) await this.pressKey(page, "Delete");
-    if (req.submit) await this.pressKey(page, "Enter");
+    if (kind.missed !== undefined) {
+      throw new CtlError(
+        kind.landed
+          ? `element ${req.ref} got the text, but the page then moved focus to ${kind.missed}; not submitted`
+          : `the text didn't go into element ${req.ref} (focus is on ${kind.missed}); check the page`,
+      );
+    }
+    if (kind.fallback) {
+      // The page's editor doesn't take execCommand: typed as keyboard input, then checked.
+      this.step("nothing was typed");
+      await this.cdp.send("Input.insertText", { text }, sid);
+      const check = await this.callOn(
+        page,
+        objectId,
+        `function (text) {
+          const doc = this.ownerDocument;
+          let now = doc.activeElement;
+          while (now && now.shadowRoot && now.shadowRoot.activeElement) now = now.shadowRoot.activeElement;
+          const got = this.tagName === "INPUT" || this.tagName === "TEXTAREA" ? this.value : this.innerText;
+          return (now === this || this.contains(now)) && got.includes(text);
+        }`,
+        [text],
+      ).catch(() => false);
+      if (!check) throw new CtlError(`typed, but element ${req.ref} didn't get the text (the page moved focus?); check the page`);
+    }
+    if (req.submit) {
+      this.step(`typed ${text.length} characters into ${req.ref}, not submitted`);
+      await this.pressKey(page, "Enter");
+    }
     // What was typed is never shown (nor is a password field's name worth the risk).
     this.note(kind.secret ? "typed into a password field" : `typed into ${label}`);
     return { tab: page.num, ref: req.ref, typed: text.length };
@@ -585,7 +647,11 @@ class Agent {
     for (const k of keys) parseKey(k); // all valid before any is pressed
     const page = this.page(req.tab);
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "no keys pressed");
-    for (const k of keys) await this.pressKey(page, k);
+    // Key by key, stopping (and saying so) when the time is up: never typing on after the reply.
+    for (const [i, k] of keys.entries()) {
+      this.step(i ? `pressed ${i} of ${keys.length} keys${i <= 10 ? ` (${keys.slice(0, i).join(" ")})` : ""}` : "no keys pressed");
+      await this.pressKey(page, k);
+    }
     this.note(`pressed ${keys.join(" ")}`);
     return { tab: page.num, keys };
   }
@@ -607,6 +673,7 @@ class Agent {
     const amount = req.amount && req.amount > 0 ? req.amount : Math.round(viewport * 0.8);
     const dx = dir === "left" ? -amount : dir === "right" ? amount : 0;
     const dy = dir === "up" ? -amount : dir === "down" ? amount : 0;
+    this.step("not scrolled");
     await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: at.x, y: at.y, deltaX: dx, deltaY: dy }, page.sessionId);
     await Bun.sleep(250); // smooth scrolling
     const pos = (await this.evalValue(page, "[scrollX, scrollY]").catch(() => null)) as number[] | null;

@@ -133,7 +133,10 @@ The port changes each time the session starts: ask `termium devtools`.
   one at a time per session, in order: several agents (or parallel calls)
   never interleave their typing. `--timeout` counts from when the session
   gets the command, waiting included; one whose time runs out while it
-  waits its turn exits 4 at once and is never run. `dialog` doesn't wait
+  waits its turn exits 4 at once and is never run. One that has started
+  stops itself at its timeout and says how far it got ("pressed 23 of 50
+  keys"); `type` either types all its text or none, and checks the text
+  went into the element (exit 1 naming where focus went if not). `dialog` doesn't wait
   its turn: it can answer a dialog an `open` is stopped on (`open` returns
   as soon as the page shows one, with `dialog` in its reply).
 - `close` never asks the person anything: a tab that may have unsaved

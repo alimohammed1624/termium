@@ -26,6 +26,7 @@ import {
   sessionPaths,
   socketDir,
   sweepErrFiles,
+  restorePath,
   DEFAULT_SESSION,
   GRAPHICS_FILE_PREFIX,
   graphicsDir,
@@ -1021,9 +1022,18 @@ export async function killSession(name: string): Promise<void> {
     fail(e?.message ?? String(e));
   }
   sweepErrFiles();
+  // Killed, a session isn't brought back by its next start: a restart
+  // snapshot left from before (a restart that partly failed, say) goes too.
+  const snapshot = restorePath(name);
+  const hadSnapshot = existsSync(snapshot);
+  rmSync(snapshot, { force: true });
   const sock = await dial(p.sock).catch(() => null);
   if (!sock) {
     await sessionInfo(name); // clears a stale socket
+    if (hadSnapshot) {
+      console.error(`termium: no session "${name}" running; removed its restart snapshot`);
+      process.exit(0);
+    }
     fail(`no session "${name}"`, 1);
   }
   const serverPid = lockHolder(p.lock) ?? readPid(name);

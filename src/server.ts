@@ -698,7 +698,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       from: version,
       // What this session actually runs with (the browser found, the profile
       // used), not what the restarting terminal's environment would pick.
-      launch: { ...savedLaunch(args), browser: args.browser ?? bin, profile: args.incognito ? undefined : profile },
+      launch: { ...savedLaunch(args), browser: bin, profile: args.incognito ? undefined : profile },
       layout: app.layoutSnapshot(),
     };
     try {
@@ -896,13 +896,27 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       const run = () => runCtl(a, d, { ...req, timeoutMs: deadline - Date.now() }, { devtools: browser?.devtools ?? null, log });
       let result: unknown;
       if (ACTING.has(String(req?.cmd))) {
-        // Its turn may come after its time is up, or after its agent gave up
-        // (disconnected): then it's dropped, never run late.
+        // Its time covers waiting for its turn: one whose time runs out first
+        // (or whose agent gave up and disconnected) is answered then and
+        // dropped, never run late. Once started, it holds the queue until it's
+        // done; it stops itself at its deadline, saying how far it got (see runCtl).
         let expired = false;
-        const turn = ctlQueue.then(() => (expired || c.closed || Date.now() >= deadline ? SKIPPED : run()));
+        let started = false;
+        const turn = ctlQueue.then(() => {
+          if (expired || c.closed || Date.now() >= deadline) return SKIPPED;
+          started = true;
+          return run();
+        });
         ctlQueue = turn.catch(() => {});
-        const lapse = new Promise<typeof SKIPPED>((res) => setTimeout(() => res(SKIPPED), Math.max(0, deadline - Date.now())));
-        result = await Promise.race([turn, lapse]);
+        let lapseTimer: ReturnType<typeof setTimeout> | undefined;
+        const lapse = new Promise<typeof SKIPPED>((res) => {
+          lapseTimer = setTimeout(() => !started && res(SKIPPED), Math.max(0, deadline - Date.now()));
+        });
+        try {
+          result = await Promise.race([turn, lapse]);
+        } finally {
+          clearTimeout(lapseTimer);
+        }
         if (result === SKIPPED) {
           expired = true;
           return timedOut("waiting for earlier commands");
