@@ -268,7 +268,39 @@ export async function reapOrphans(profileDir: string): Promise<number> {
       process.kill(pid, "SIGKILL");
     } catch {}
   }
+  if (victims.length) {
+    // Its helper processes (network service, renderers...) outlive it a
+    // little and, noticing, write their last state into the profile (Chrome
+    // flushes its cache index and network state): stop them too, and wait
+    // until none is left, so nothing writes into a profile that is about to
+    // be removed or used again.
+    const deadline2 = Date.now() + 3000;
+    for (;;) {
+      const left = [...new Set([...victims.filter(alive), ...processesOnProfile(profileDir)])];
+      if (!left.length || Date.now() > deadline2) break;
+      for (const pid of left) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      await Bun.sleep(50);
+    }
+  }
   return victims.length;
+}
+
+/** This user's processes started on exactly this profile directory (a browser and its helpers). */
+function processesOnProfile(profileDir: string): number[] {
+  const uid = process.getuid?.();
+  const r = Bun.spawnSync(["ps", "-A", "-ww", "-o", "pid=,uid=,args="], { stdout: "pipe", stderr: "ignore" });
+  const out: number[] = [];
+  for (const line of r.stdout.toString().split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m || (uid !== undefined && Number(m[2]) !== uid) || Number(m[1]) === process.pid) continue;
+    // Chromium's rewritten process title joins its arguments with spaces.
+    if (` ${m[3]} `.includes(` --user-data-dir=${profileDir} `) && alive(Number(m[1]))) out.push(Number(m[1]));
+  }
+  return out;
 }
 
 /** Running, not merely an exited process its parent hasn't collected yet. */

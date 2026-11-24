@@ -284,21 +284,32 @@ try:
     c.wait_for(lambda: not running(c), 10)
     check("ctrl+q quits from the address bar", not running(c) and helium_on(prof) == 0)
 
-    # SIGKILLed incognito session: the next start removes its profile and browser
-    # (a temp dir of the test's own, so the leftovers looked for are only these)
+    # SIGKILLed incognito session: the next start removes its profile and browser,
+    # for good: the browser's helper processes, outliving it, must not write it back
+    # (Chrome's do: run it with Chrome too where installed, as CI does)
     itmp = os.path.join(tmp, "t"); os.makedirs(itmp)
-    i1 = Term(["bun", main, "--incognito"], cwd=ROOT, env={"TMPDIR": itmp})
-    check("incognito starts", at_address_bar(i1))
-    inc = [d for d in glob.glob(os.path.join(itmp, f"termium-incognito-{i1.server_pid()}-*"))]
-    check("incognito profile is in the temp dir", len(inc) == 1, inc)
-    freeze_browser(inc[0]) if inc else None
-    i1.kill9()
-    time.sleep(1)
-    i2 = Term(["bun", main, "--incognito"], cwd=ROOT, env={"TMPDIR": itmp})
-    check("next start after a killed incognito session works", at_address_bar(i2))
-    check("killed incognito session's profile removed", inc and not os.path.exists(inc[0]), inc)
-    check("killed incognito session's browser stopped", inc and helium_on(inc[0]) == 0)
-    i2.close()
+    browsers = [("", {})]
+    chrome = shutil.which("google-chrome-stable") or shutil.which("google-chrome")
+    if chrome and os.environ.get("TERMIUM_BROWSER") != chrome:
+        browsers.append((" (Chrome)", {"TERMIUM_BROWSER": chrome}))
+    inc = []
+    for label, benv in browsers:
+        i1 = Term(["bun", main, "--incognito"], cwd=ROOT, env={"TMPDIR": itmp, **benv})
+        check(f"incognito starts{label}", at_address_bar(i1))
+        found = [d for d in glob.glob(os.path.join(itmp, f"termium-incognito-{i1.server_pid()}-*"))]
+        inc += found
+        check(f"incognito profile is in the temp dir{label}", len(found) == 1, found)
+        freeze_browser(found[0]) if found else None
+        i1.kill9()
+        time.sleep(1)
+        i2 = Term(["bun", main, "--incognito"], cwd=ROOT, env={"TMPDIR": itmp, **benv})
+        check(f"next start after a killed incognito session works{label}", at_address_bar(i2))
+        check(f"killed incognito session's profile removed{label}", found and not os.path.exists(found[0]), found)
+        check(f"killed incognito session's browser stopped{label}", found and helium_on(found[0]) == 0)
+        time.sleep(3)
+        check(f"...and its profile stays removed{label}", found and not os.path.exists(found[0]),
+              found and os.path.exists(found[0]) and os.listdir(found[0]))
+        i2.close()
 
     # a leftover whose termium is a zombie (dead, not yet reaped: how a killed session server
     # looks until something reaps it) is cleaned up like any other
