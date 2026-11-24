@@ -87,6 +87,8 @@ export interface Page {
   restartCast?: boolean;
   /** When its viewport or screencast last changed: frames of another size just after are stale. */
   viewportAt?: number;
+  /** Since its viewport or screencast last changed, no frame of the right shape has come yet (see onFrame). */
+  awaitingShape?: boolean;
   /** Screencast starts that failed in a row (retried a while). */
   castRetries?: number;
 }
@@ -1493,6 +1495,7 @@ export class App {
     const want = page.css;
     if (want && !sameSize(page.appliedCss, want)) {
       page.viewportAt = Date.now();
+      page.awaitingShape = true;
       for (let attempt = 0; attempt < 4; attempt++) {
         await this.cdp.send("Emulation.setDeviceMetricsOverride", {
           width: want.w,
@@ -1515,6 +1518,7 @@ export class App {
     if (cast && (!sameSize(page.appliedCast, cast) || page.restartCast)) {
       page.restartCast = false;
       page.viewportAt = Date.now();
+      page.awaitingShape = true;
       if (page.appliedCast) await this.cdp.send("Page.stopScreencast", {}, sid).catch(() => {});
       page.appliedCast = null; // until it has started (a failed start is retried: see showPage)
       // Tests make the first few starts fail, as Chrome's do mid-replacement.
@@ -1643,12 +1647,15 @@ export class App {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page) return;
     const m = p.metadata;
-    if (page.css && ((m && Date.now() - (page.viewportAt ?? 0) < 2000 &&
-        (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1)) ||
-        !frameFits(p.data, page.css))) {
-      // A frame of the viewport as it was (the first after a resize or a
-      // restarted screencast can be, sometimes with metadata that already
-      // gives the new size but a picture of the old shape): the right one follows.
+    // Just after a resize or a restarted screencast (until a frame of the new
+    // shape comes, for 2 s at most), a frame of the viewport as it was can
+    // come: its metadata says another size, or it already gives the new size
+    // but the picture has the old shape. Such frames are dropped; the right
+    // one follows. Outside that window, every frame is shown.
+    const recent = Date.now() - (page.viewportAt ?? 0) < 2000;
+    if (page.awaitingShape && (!recent || (page.css && frameFits(p.data, page.css)))) page.awaitingShape = false;
+    if (page.css && recent && ((m && (Math.abs(m.deviceWidth - page.css.w) > 1 || Math.abs(m.deviceHeight - page.css.h) > 1)) ||
+        (page.awaitingShape && !frameFits(p.data, page.css)))) {
       this.cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }, sid).catch(() => {});
       return;
     }
@@ -3503,8 +3510,8 @@ export function freeName(dir: string, name: string): string {
 
 /**
  * Whether a screencast frame (base64 PNG) has the shape of a viewport of
- * `css` size (frames are that viewport scaled down to fit the screencast;
- * within a couple of pixels of rounding). Not a PNG: no opinion.
+ * `css` size (frames are that viewport scaled to fit the screencast, each
+ * side rounded). Not a PNG: no opinion.
  */
 export function frameFits(base64Png: string, css: { w: number; h: number }): boolean {
   const head = Buffer.from(base64Png.slice(0, 44), "base64");
@@ -3512,7 +3519,9 @@ export function frameFits(base64Png: string, css: { w: number; h: number }): boo
   const w = head.readUInt32BE(16);
   const h = head.readUInt32BE(20);
   if (!w || !h || !css.w || !css.h) return true;
-  return Math.abs(h - (w * css.h) / css.w) <= 2 && Math.abs(w - (h * css.w) / css.h) <= 2;
+  // Each side is rounded once scaled, so the other, derived from it, can be
+  // off by its ratio to that side, plus a couple of pixels.
+  return Math.abs(h - (w * css.h) / css.w) <= 2 + css.h / css.w && Math.abs(w - (h * css.w) / css.h) <= 2 + css.w / css.h;
 }
 
 function sameSize<T extends { w: number; h: number; dsf?: number }>(a: T | null, b: T | null): boolean {

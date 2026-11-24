@@ -514,6 +514,21 @@ try:
     check("cast retry: ...and its later changes show (the screencast runs)", fc.wait_for(lambda: (centre() or (0, 0, 0))[2] > 150, 15), centre())
     fc.close()
 
+    # --- frames of every shape and scale are shown, not taken for stale ones (fractional scales,
+    # very wide and short or tall and narrow panes, zoom, HiDPI): a page's change always shows
+    for i, (cols, rows, cw, ch, extra, zoom) in enumerate([
+            (160, 4, 10, 20, ["--scale", "0.75"], False), (160, 4, 10, 20, ["--scale", "0.5"], False),
+            (30, 60, 10, 20, ["--scale", "1.25"], False), (30, 60, 10, 20, ["--scale", "1.5"], False),
+            (120, 30, 10, 20, ["--scale", "1.5"], True), (200, 6, 20, 40, [], False), (24, 50, 20, 40, [], True)]):
+        sh = Term(["bun", main, "-s", f"shape{i}", "--incognito", *extra, page_turns_blue], cwd=ROOT, env=ENV, cols=cols, rows=rows, cell_w=cw, cell_h=ch)
+        mid = lambda: (lambda im: im.getpixel((im.width // 2, im.height // 2)) if im else None)(sh.latest_image())
+        shown = sh.wait_for(lambda: (mid() or (0, 0, 0))[1] > 150, 30)
+        if zoom:
+            sh.key("alt+equal"); time.sleep(0.5)
+        what = f"{cols}x{rows} cell {cw}x{ch} {' '.join(extra) or 'default scale'}{' zoomed' if zoom else ''}"
+        check(f"shapes: {what}: the page shows, then its change", shown and sh.wait_for(lambda: (mid() or (0, 0, 0))[2] > 150, 15), mid())
+        sh.close()
+
     # --- a stale socket from a server that never cleaned up (and an error file of a client killed outright)
     open(os.path.join(sockdir, "gone.999999.err"), "w").write("x")
     cli("ls")
@@ -532,7 +547,7 @@ finally:
                 t.close()
             except Exception:
                 pass
-    for name in ("default", "one", "two", "stale", "hung", "handler", "work", "shared", "urlrace", "prefix", "r3", "r3b", "r3k", "r3f", "castfail", f"race{os.getpid()}"):
+    for name in ("default", "one", "two", "stale", "hung", "handler", "work", "shared", "urlrace", "prefix", "r3", "r3b", "r3k", "r3f", "castfail", *(f"shape{i}" for i in range(7)), f"race{os.getpid()}"):
         pid = server_pid(name)
         if pid:
             os.kill(pid, signal.SIGTERM)

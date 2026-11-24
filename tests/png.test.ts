@@ -76,4 +76,8 @@ test("a screencast frame must have its viewport's shape", () => {
   // The old viewport's picture, scaled to the new screencast (seen after a re-attach at a smaller size).
   expect(frameFits(png(780, 486), { w: 780, h: 560 })).toBe(false);
   expect(frameFits("not a png", { w: 780, h: 560 })).toBe(true);
+  // Very wide and short (160x4 cells at --scale 0.75: 1840x53 CSS px, frames 1380x40) and tall and narrow.
+  expect(frameFits(png(1380, 40), { w: 1840, h: 53 })).toBe(true);
+  expect(frameFits(png(40, 1380), { w: 53, h: 1840 })).toBe(true);
+  expect(frameFits(png(1380, 60), { w: 1840, h: 53 })).toBe(false);
 });
