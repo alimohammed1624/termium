@@ -34,7 +34,8 @@ import {
   outputFrame,
   sessionPaths,
   sweepGraphicsFiles,
-  takeRestore,
+  readRestore,
+  restorePath,
   writeRestore,
   type Restore,
 } from "./session";
@@ -313,7 +314,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   }
   writeFileSync(paths.pid, `${process.pid}\n`, { mode: 0o600 });
   // Restarted (into an updated termium): what the session had open.
-  const restore = takeRestore(name);
+  // (Removed once it's reopened: a restart that fails before then keeps it for the next try.)
+  const restore = readRestore(name);
   if (restore) log(`restoring ${restore.layout.spaces.length} space(s) saved by termium ${restore.from}`);
 
   await sweepTemp();
@@ -425,6 +427,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     const c = client;
     if (!c) return;
     client = null;
+    stopCheck();
     setSink(null);
     c.releaseAcks();
     app?.detach();
@@ -470,6 +473,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         },
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
+      app.setUpdatesShown((lastHello ?? h).updateCheck === true);
       app.attach(terminalOf(lastHello ?? h));
       if (!client) app.detach();
       log(`start ${bin} dsf=${app.dsf}`);
@@ -480,7 +484,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
             ? `Restarted: termium ${restore.from} → ${version}`
             : `Restarted: termium ${version}`
           : undefined;
-        await app.start(args.url, restore?.layout, notice);
+        if (await app.start(args.url, restore?.layout, notice)) rmSync(restorePath(name), { force: true });
       } catch (e) {
         await shutdown(1, e);
         return;
@@ -501,7 +505,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   // made once in a session's life.
   const cacheFile = cachePath(logDir);
   let wantsUpdates = false;
-  let checking = false;
+  let checking: AbortController | null = null;
   let lastCheck = 0;
   let updating = false;
   /** The version a self-update installed (this session runs the old one until it restarts). */
@@ -510,22 +514,34 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   const runCheck = async () => {
     if (checking || !client || !wantsUpdates || !appReady || shuttingDown) return;
     if (lastCheck && Date.now() - lastCheck < MAX_AGE_MS) return;
-    checking = true;
+    const stop = (checking = new AbortController());
     lastCheck = Date.now();
+    let again = false;
     try {
-      const r = await checkAndCache(cacheFile, version);
+      const r = await checkAndCache(cacheFile, version, stop.signal);
+      if (stop.signal.aborted) {
+        // The terminal went away first: nothing recorded, and the next attach checks again.
+        lastCheck = 0;
+        again = true;
+        log("update check: stopped (the terminal went away)");
+        return;
+      }
       if (!r.ok) {
         log(`update check: ${r.error}`);
         return;
       }
-      if (isNewer(r.tag, version)) {
+      if (isNewer(r.tag, version) && client && wantsUpdates) {
         log(`update check: termium ${displayVersion(r.tag)} is available`);
         app?.updateAvailable(r.tag, loadCache(cacheFile)?.skipped !== r.tag);
       }
     } finally {
-      checking = false;
+      if (checking === stop) checking = null;
+      // Taken over meanwhile by a terminal that wants it: check for that one.
+      if (again && client && wantsUpdates) void runCheck();
     }
   };
+  /** The terminal it was for went away (detached, taken over): a check under way stops. */
+  const stopCheck = () => checking?.abort();
   setInterval(() => void runCheck(), 60 * 60 * 1000).unref?.();
 
   /** A terminal attached (and the UI is up): what's known at once, then a check if one is due. */
@@ -533,6 +549,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     if (!app) return;
     wantsUpdates = h.updateCheck === true;
     app.setUpdatesShown(wantsUpdates);
+    if (!wantsUpdates) stopCheck();
     // That terminal runs a newer termium: it's installed, and this session runs the old one.
     if (typeof h.version === "string") app.newerInstalled(h.version);
     if (installed) app.newerInstalled(installed);
@@ -548,13 +565,12 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     updating = true;
     log(`updating to ${tag}`);
     try {
-      await selfUpdate(tag, version, (step) => app?.updateStep(step));
-      installed = displayVersion(tag);
-      log(`updated the termium binary to ${tag}`);
-      app?.updateDone(tag, null);
+      installed = await selfUpdate(tag, version, (step) => app?.updateStep(step));
+      log(`updated: termium ${installed} is installed`);
+      app?.updateDone(tag, installed, null);
     } catch (e: any) {
       log(`update to ${tag} failed: ${e?.message ?? e}`);
-      app?.updateDone(tag, e?.message ?? String(e));
+      app?.updateDone(tag, null, e?.message ?? String(e));
     } finally {
       updating = false;
     }
@@ -611,6 +627,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           pid: process.pid,
           version,
           attached: !!client,
+          // Saves its layout and restarts into an updated termium itself (termium 0.3.0 on).
+          restarts: true,
           pages: app?.pages.size ?? 0,
           profile: args.incognito ? "(incognito)" : profile,
         });
@@ -647,6 +665,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         old.releaseAcks();
         void old.end({ t: "bye", reason: "takeover" });
         log("client taken over by a new attach");
+        stopCheck();
       }
       // Input the previous terminal had queued (typed before the browser was
       // ready, say) isn't this terminal's: it would act on it.
@@ -655,7 +674,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       client = c;
       everAttached = true;
       lastHello = h;
-      c.send({ t: "welcome", pid: process.pid });
+      c.send({ t: "welcome", pid: process.pid, version });
       setSink((data, done) => c.output(data, done));
       log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders} via=${h.via}`);
       // Its own server (it opened the URL at start) or another one (a client
@@ -666,6 +685,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         if (h.url) pendingUrls.push(h.url);
         void startApp(h);
       } else {
+        // Whether this terminal shows update news is settled before anything is drawn for it.
+        app.setUpdatesShown(h.updateCheck === true);
         app.attach(terminalOf(h));
         if (h.url) {
           if (appReady) app.openTab(h.url);
@@ -704,6 +725,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
 
   const onClose = (c: Conn) => {
     if (c !== client) return;
+    stopCheck();
     // The terminal went away (closed, killed, or the client detached).
     client = null;
     setSink(null);

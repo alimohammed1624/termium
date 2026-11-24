@@ -132,10 +132,6 @@ interface UpdateBox {
   state: "offer" | "working" | "done" | "failed" | "installed";
   step?: Step;
   error?: string;
-  /** When it was put on screen. */
-  shownAt: number;
-  /** Shown on its own (not asked for): keys right after it appears weren't meant for it. */
-  auto: boolean;
 }
 
 /** What the session server does for the update box. */
@@ -150,10 +146,6 @@ export interface UpdateHooks {
   restart(): void;
 }
 
-/** The update box ignores keys this long after it appears on its own (they were typed for the page). */
-const UPDATE_ARM_MS = 1000;
-/** It appears on its own only once the keyboard and mouse have been idle this long. */
-const UPDATE_IDLE_MS = 3000;
 
 export interface AppOptions {
   scale: number | null; // explicit device scale factor
@@ -348,7 +340,8 @@ export class App {
 
   // ---------------------------------------------------------- startup
 
-  async start(initialUrl: string | null, restore?: SavedLayout | null, notice?: string): Promise<void> {
+  /** Starts the UI; true if `restore` was reopened. */
+  async start(initialUrl: string | null, restore?: SavedLayout | null, notice?: string): Promise<boolean> {
     const cdp = this.cdp;
     cdp.on("Target.attachedToTarget", (p, parent) => this.onAttached(p, parent).catch((e) => this.opts.log(String(e))));
     cdp.on("Target.detachedFromTarget", (p) => {
@@ -498,7 +491,8 @@ export class App {
     this.onFirstPage = null;
     this.ready = true;
     this.fullRedraw();
-    if (notice) this.showToast(notice, 6000);
+    if (notice && restored) this.showToast(notice, 6000);
+    return restored;
   }
 
   /** Spaces, tabs and splits with their pages' addresses, for a restart. */
@@ -1263,8 +1257,6 @@ export class App {
     // Ctrl+B prefix would turn this one's first key into a command).
     this.resetInput();
     this.attached = true;
-    this.lastInputAt = Date.now();
-    if (this.updateBox && this.mode === "update") this.updateBox.shownAt = Date.now();
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
     const shown = new Set(this.tab ? leaves(this.tab.root) : []);
@@ -1943,9 +1935,11 @@ export class App {
     const mode = this.modeLabel();
     const zoom = this.zoom !== 1 ? ` ${Math.round(this.zoom * 100)}% ` : "";
     const toast = this.toast && this.toast.until > Date.now() ? ` ${this.toast.text} ` : "";
-    const right = toast + zoom;
-    const rightW = Math.min(width(right), Math.max(0, Math.floor(w / 2)));
     const modeW = width(mode);
+    // Update news, unless a toast has something to say right now; the address keeps 20 columns.
+    const notice = toast ? { text: "", style: "" } : this.notice(Math.max(0, w - 30 - modeW - width(zoom)));
+    const right = (toast || notice.text) + zoom;
+    const rightW = Math.min(width(right), Math.max(0, notice.text ? w - 30 - modeW : Math.floor(w / 2)));
 
     const prompt = this.prompt;
     if (prompt && prompt.kind === "confirm") {
@@ -2012,7 +2006,9 @@ export class App {
       s += bg(C.surface0) + " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2) + RESET;
     }
     s += barBg + " ";
-    if (rightW > 0) s += barBg + fg(C.peach) + fit(right, rightW);
+    const rightCol = urlStart + fieldW + 1;
+    this.noticeHit = notice.text && rightW > 0 ? [rightCol, rightCol + Math.min(width(notice.text), rightW)] : null;
+    if (rightW > 0) s += barBg + (notice.text ? notice.style : fg(C.peach)) + fit(right, rightW);
     if (modeW) s += bg(C.mauve) + fg(C.crust) + BOLD + mode;
     const used = (urlStart - col) + fieldW + 1 + rightW + modeW;
     if (used < w) s += RESET + barBg + " ".repeat(w - used);
@@ -2105,10 +2101,12 @@ export class App {
     // A newer termium: what it is and how to get it, across the top.
     const news: [style: string, text: string][] = [];
     const cur = this.opts.version;
-    if (this.updateInstalled) {
+    if (!this.updatesShown) {
+      // This terminal opted out of update news.
+    } else if (this.updateInstalled) {
       news.push([fg(C.yellow) + BOLD, `  restart to update  termium ${cur} → ${displayVersion(this.updateInstalled)}`]);
       news.push([fg(C.text), "  installed; this session runs the old one until it restarts: Ctrl+B U"]);
-    } else if (this.updateLatest && this.updatesShown) {
+    } else if (this.updateLatest) {
       news.push([fg(C.green) + BOLD, `  update available  termium ${cur} → ${displayVersion(this.updateLatest)}`]);
       news.push([fg(C.text), "  Ctrl+B U updates, or run:"]);
     }
@@ -2152,33 +2150,41 @@ export class App {
   }
 
   // ---------------------------------------------------------- updates
+  //
+  // Update news never takes the keyboard on its own: a newer release, an
+  // update's progress and the restart it needs show as a notice in the
+  // address line (when nothing else is open there) and a badge in the tab
+  // bar. Only Ctrl+B U, or a click on the notice or the badge, opens the
+  // update box, whose keys answer it; any other key closes the box and goes
+  // on as usual, and a paste always reaches the page.
 
-  /** A newer release (the tab bar's badge), if the attached terminal shows update news. */
+  /** A newer release (the tab bar's badge). */
   private updateLatest: string | null = null;
   /** A newer termium installed on disk: this session runs the old one until it restarts. */
   private updateInstalled: string | null = null;
-  /** The attached terminal wants update news (it didn't opt out). */
+  /** The attached terminal wants update news (it didn't opt out): otherwise none is shown. */
   private updatesShown = false;
+  /** What there is to answer or know (an offer, an update under way, its outcome, a restart due). */
   private updateBox: UpdateBox | null = null;
-  /** The box waits to appear on its own until nothing else is going on. */
-  private updatePending = false;
   /** Offers made in this session's life: each is made once. */
   private offered = new Set<string>();
-  private updateTimer: ReturnType<typeof setInterval> | null = null;
-  private idleCheck = false;
-  /** Last keyboard or mouse input. */
-  private lastInputAt = Date.now();
   private badgeHit: [number, number] | null = null;
-  /** Why `u` can't update here, worked out when the offer is shown. */
+  private noticeHit: [number, number] | null = null;
+  /** Why `u` can't update here, worked out when the box opens. */
   private updateBlocker: string | null = null;
 
+  /** Set before a terminal attaches: whether it shows update news at all. */
   setUpdatesShown(on: boolean): void {
     if (this.updatesShown === on) return;
     this.updatesShown = on;
+    if (!on && this.mode === "update") {
+      this.mode = "normal";
+      this.fullRedraw();
+    }
     this.queueChrome();
   }
 
-  /** The update check found newer release `tag`; with `offer` (not skipped) the box offers it, once. */
+  /** The update check found newer release `tag`; with `offer` (not skipped) it's offered, once. */
   updateAvailable(tag: string, offer: boolean): void {
     if (!isNewer(tag, this.opts.version)) return;
     if (this.updateInstalled && !isNewer(tag, this.updateInstalled)) return; // that one's installed already
@@ -2191,14 +2197,15 @@ export class App {
       // A newer tag replaces the one being offered.
       if (box.tag !== tag && isNewer(tag, box.tag)) {
         box.tag = tag;
-        this.redrawUpdate();
+        this.queueChrome();
       }
       return;
     }
     if (box) return; // an update under way (or done) isn't interrupted
     if (!offer || this.offered.has(`offer:${tag}`)) return;
     this.offered.add(`offer:${tag}`);
-    this.queueUpdateBox({ tag, state: "offer", shownAt: 0, auto: true });
+    this.updateBox = { tag, state: "offer" };
+    this.queueChrome();
   }
 
   /** A terminal running a newer termium attached: that one is installed, and this session runs the old one. */
@@ -2212,153 +2219,61 @@ export class App {
     if (box && box.state !== "offer") return;
     if (this.offered.has(`installed:${version}`)) return;
     this.offered.add(`installed:${version}`);
-    const next: UpdateBox = { tag: version, state: "installed", shownAt: Date.now(), auto: true };
-    if (this.mode === "update") {
-      this.updateBox = next;
-      this.redrawUpdate();
-    } else {
-      this.queueUpdateBox(next);
-    }
+    this.updateBox = { tag: version, state: "installed" };
   }
 
   updateStep(step: Step): void {
     const box = this.updateBox;
     if (box?.state !== "working") return;
     box.step = step;
-    this.redrawUpdate();
+    this.queueChrome();
   }
 
-  /** The self-update ended: restart offered (or why it failed); reopens the box if it was put away meanwhile. */
-  updateDone(tag: string, error: string | null): void {
-    if (!error) {
-      this.updateInstalled = tag;
+  /** The self-update ended: `installed` is the version now on disk, or `error` why it failed. */
+  updateDone(tag: string, installed: string | null, error: string | null): void {
+    if (installed) {
+      this.updateInstalled = installed;
       this.updateLatest = null;
     }
-    const box: UpdateBox = { tag, state: error ? "failed" : "done", error: error ?? undefined, shownAt: Date.now(), auto: false };
+    this.updateBox = { tag: installed ?? tag, state: error ? "failed" : "done", error: error ?? undefined };
     this.queueChrome();
-    if (this.mode === "update") {
-      this.updateBox = box;
-      this.redrawUpdate();
-    } else {
-      this.queueUpdateBox(box);
-    }
   }
 
-  private queueUpdateBox(box: UpdateBox): void {
-    this.updateBox = box;
-    this.updatePending = true;
-    if (!this.updateTimer) {
-      this.updateTimer = setInterval(() => void this.maybeShowUpdate(), 500);
-      this.updateTimer.unref?.();
-    }
-  }
-
-  private stopUpdateTimer(): void {
-    if (this.updateTimer) clearInterval(this.updateTimer);
-    this.updateTimer = null;
-  }
-
-  /** Nothing else is open or going on, and the keyboard and mouse have been idle a while. */
-  private idleForUpdate(): boolean {
-    const page = this.focused;
-    return (
-      this.attached && this.started && this.ready && !this.closingAll && this.mode === "normal" && !this.prompt &&
-      !this.drag && !this.mouseButtons && this.holds.size === 0 && !!page && !page.dialog && !page.fileChooser &&
-      Date.now() - this.lastInputAt >= UPDATE_IDLE_MS
-    );
-  }
-
-  /** A pending box appears once nothing else is open (no dialog, menu, address editing or help). */
-  private async maybeShowUpdate(): Promise<void> {
-    const box = this.updateBox;
-    if (!this.updatePending || !box) {
-      this.updatePending = false;
-      this.stopUpdateTimer();
-      return;
-    }
-    // An offer waits for a terminal that wants update news.
-    if (box.state === "offer" && !this.updatesShown) return;
-    if (this.idleCheck || !this.idleForUpdate()) return;
-    this.idleCheck = true;
-    let menu = true;
-    try {
-      menu = await this.menuOpen(this.focused!);
-    } finally {
-      this.idleCheck = false;
-    }
-    if (menu || !this.idleForUpdate() || this.updateBox !== box || !this.updatePending) return;
-    this.showUpdate(true);
-  }
-
-  /** Whether the page shows one of termium's in-page <select> menus (or doesn't answer). */
-  private menuOpen(page: Page): Promise<boolean> {
-    return Promise.race([
-      this.cdp
-        .send("Runtime.evaluate", { expression: `!!document.querySelector("termium-select")`, returnByValue: true }, page.sessionId)
-        .then((r) => r?.result?.value !== false, () => true),
-      Bun.sleep(500).then(() => true),
-    ]);
-  }
-
-  private showUpdate(auto: boolean): void {
-    const box = this.updateBox;
-    if (!box) return;
-    this.updatePending = false;
-    this.stopUpdateTimer();
-    box.auto = auto;
-    box.shownAt = Date.now();
-    this.updateBlocker = box.state === "offer" ? (this.opts.update ? this.opts.update.blocker() : "updates aren't available here") : null;
-    this.prompt = null;
-    this.mode = "update";
-    this.fullRedraw();
-  }
-
-  /** Puts the box away. An update under way carries on (the box comes back when it's done). */
-  private closeUpdate(): void {
-    if (this.updateBox?.state !== "working") this.updateBox = null;
-    this.updatePending = false;
-    this.stopUpdateTimer();
+  /** Puts the box away; with `answered`, what it asked is settled (an update under way carries on). */
+  private closeUpdate(answered: boolean): void {
+    if (answered && this.updateBox?.state !== "working") this.updateBox = null;
     this.mode = "normal";
     this.fullRedraw();
   }
 
-  private redrawUpdate(): void {
-    if (this.mode === "update") this.queueChrome();
-  }
-
-  /** Ctrl+B U, or a click on the badge: the box for what's known (restart, offer), else says there's nothing. */
+  /** Ctrl+B U, or a click on the notice or the badge: the box for what's known, else says there's nothing. */
   private openUpdate(): void {
+    if (!this.updatesShown) {
+      this.showToast("Update news is off in this terminal (--no-update-check, TERMIUM_NO_UPDATE_CHECK or CI)", 5000);
+      return;
+    }
     if (!this.updateBox) {
-      if (this.updateInstalled) this.updateBox = { tag: this.updateInstalled, state: "installed", shownAt: 0, auto: false };
-      else if (this.updateLatest) this.updateBox = { tag: this.updateLatest, state: "offer", shownAt: 0, auto: false };
+      if (this.updateInstalled) this.updateBox = { tag: this.updateInstalled, state: "installed" };
+      else if (this.updateLatest) this.updateBox = { tag: this.updateLatest, state: "offer" };
       else {
         this.showToast(`termium ${this.opts.version}: no newer release known (termium check-update checks now)`, 5000);
         return;
       }
     }
-    this.showUpdate(false);
+    this.updateBlocker = this.updateBox.state === "offer" ? (this.opts.update ? this.opts.update.blocker() : "updates aren't available here") : null;
+    this.prompt = null;
+    this.mode = "update";
+    this.fullRedraw();
   }
 
+  /** Keys while the box is open (it was opened on purpose). Keys it doesn't use close it and go on as usual. */
   private updateKey(ev: KeyEvent, combo: string): void {
     const box = this.updateBox;
-    if (!box) {
-      this.closeUpdate();
-      return;
-    }
-    // A key typed for the page just as the box appeared on its own: the box
-    // steps aside (as "later") and the key goes where it was meant to.
-    if (box.auto && box.state !== "working" && Date.now() - box.shownAt < UPDATE_ARM_MS) {
-      this.closeUpdate();
+    const pass = () => {
+      this.closeUpdate(box?.state === "failed");
       this.onKey(ev);
-      return;
-    }
-    // The prefix works as ever (Ctrl+B d detaches); the box is put away.
-    if (combo === "ctrl+b") {
-      this.closeUpdate();
-      this.mode = "prefix";
-      this.queueChrome();
-      return;
-    }
+    };
+    if (!box) return pass();
     const shown = displayVersion(box.tag);
     switch (box.state) {
       case "offer":
@@ -2366,39 +2281,66 @@ export class App {
           box.state = "working";
           box.step = "downloading";
           this.opts.update.start(box.tag);
-          this.redrawUpdate();
+          this.queueChrome();
         } else if (combo === "s") {
           this.opts.update?.skip(box.tag);
-          this.closeUpdate();
+          this.closeUpdate(true);
           this.showToast(`termium ${shown} skipped: not offered again`, 4000);
-        } else if (combo === "l" || combo === "escape" || combo === "q") {
-          this.closeUpdate();
-        }
+        } else if (combo === "l" || combo === "escape") {
+          this.closeUpdate(true);
+        } else pass();
         return;
       case "working":
-        return; // keys wait (Ctrl+B and Ctrl+Q still work)
+        if (combo === "escape") this.closeUpdate(false);
+        else pass();
+        return;
       case "done":
       case "installed":
         if (combo === "r" || combo === "enter") {
           this.opts.update?.restart();
-        } else if (combo === "escape" || combo === "l" || combo === "q") {
-          this.closeUpdate();
+        } else if (combo === "escape" || combo === "l") {
+          this.closeUpdate(true);
           this.showToast(`This session runs termium ${this.opts.version} until it restarts (Ctrl+B U restarts it)`, 5000);
-        }
+        } else pass();
         return;
       case "failed":
-        if (combo === "escape" || combo === "enter" || combo === "q") this.closeUpdate();
+        if (combo === "escape" || combo === "enter") this.closeUpdate(true);
+        else pass();
         return;
     }
+  }
+
+  /** The notice in the address line: the longest wording that fits `room` columns ("" if none). */
+  private notice(room: number): { text: string; style: string } {
+    const box = this.updateBox;
+    if (!box || !this.updatesShown || this.mode !== "normal" || this.prompt) return { text: "", style: "" };
+    const nv = displayVersion(box.tag);
+    const cur = this.opts.version;
+    const [style, options] =
+      box.state === "offer" ? [fg(C.green) + BOLD, [
+        `↑ termium ${nv} is available (you have ${cur}) · Ctrl+B U`,
+        `↑ termium ${nv} is available · Ctrl+B U`,
+        `↑ ${nv} · ^B U`,
+      ]] :
+      box.state === "working" ? [fg(C.yellow), [`updating to termium ${nv}: ${stepLabel(box.step ?? "downloading")}`, `updating…`]] :
+      box.state === "failed" ? [fg(C.red) + BOLD, [`✗ update to termium ${nv} failed · Ctrl+B U`, `✗ update failed · ^B U`, `✗ ^B U`]] :
+      [fg(C.yellow) + BOLD, [
+        `↻ termium ${nv} is installed; this session runs ${cur} · Ctrl+B U restarts`,
+        `↻ termium ${nv} installed · Ctrl+B U restarts`,
+        `↻ ${nv} · ^B U`,
+      ]];
+    const text = (options as string[]).map((t) => ` ${t} `).find((t) => width(t) <= room) ?? "";
+    return { text, style: style as string };
   }
 
   /** The tab bar's badge: a newer release (↑), or a newer termium installed and waiting for a restart (↻). */
   private badge(full: number): { text: string; style: string } | null {
     const short = full < 50;
+    if (!this.updatesShown) return null;
     if (this.updateInstalled) {
       return { text: short ? " ↻ " : ` ↻ v${displayVersion(this.updateInstalled)} `, style: bg(C.crust) + fg(C.yellow) + BOLD };
     }
-    if (this.updateLatest && this.updatesShown) {
+    if (this.updateLatest) {
       return { text: short ? " ↑ " : ` ↑ v${displayVersion(this.updateLatest)} `, style: bg(C.crust) + fg(C.green) + BOLD };
     }
     return null;
@@ -2457,7 +2399,7 @@ export class App {
         headline();
         blank();
         add([fg(C.yellow), ` updating to ${nv}: ${stepLabel(box.step ?? "downloading")}`]);
-        footer = "Ctrl+B leaves this box (it comes back when done)";
+        footer = "Esc puts this away (the update carries on)";
         break;
       case "done":
       case "installed":
@@ -2520,7 +2462,6 @@ export class App {
       void this.requestQuit();
       return;
     }
-    if (ev.type !== "focus") this.lastInputAt = Date.now();
     if (!this.ready || this.holds.size > 0) {
       this.early.push(ev);
       return;
@@ -2535,6 +2476,8 @@ export class App {
       case "mouse":
         return this.onMouse(ev);
       case "paste": {
+        // The update box steps aside: a paste always reaches the page.
+        if (this.mode === "update") this.closeUpdate(false);
         // Help, prefix, resize and space picking own the keyboard: a paste
         // then must not slip through to the page underneath.
         if (this.mode !== "normal") return;
@@ -3179,12 +3122,8 @@ export class App {
       return;
     }
     if (this.mode === "update") {
-      const box = this.updateBox;
-      if (ev.action !== "press" || box?.state === "working") return;
-      // Like a key: just as the box appeared on its own, the click was meant for the page.
-      const early = !!box?.auto && Date.now() - box.shownAt < UPDATE_ARM_MS;
-      this.closeUpdate();
-      if (early) this.onMouse(ev);
+      // A click anywhere puts the box away (unanswered; the notice stays).
+      if (ev.action === "press") this.closeUpdate(this.updateBox?.state === "failed");
       return;
     }
 
@@ -3261,6 +3200,7 @@ export class App {
         if (page.loading) this.cdp.send("Page.stopLoading", {}, page.sessionId).catch(() => {});
         else this.reload(page);
       } else if (col >= n.url[0] && col < n.url[1] && !this.prompt) this.openUrlPrompt(page);
+      else if (this.noticeHit && col >= this.noticeHit[0] && col < this.noticeHit[1]) this.openUpdate();
       return true;
     }
     if (ev.button === 7 || ev.button === 8) {

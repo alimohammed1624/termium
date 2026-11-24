@@ -3,13 +3,14 @@
 // one first if needed. It draws what the server sends and forwards input.
 
 import { spawn } from "node:child_process";
-import { closeSync, constants, existsSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lockHolder, pidAlive } from "./browser";
 import { VERSION } from "./version";
+import { isNewer } from "./update";
 import { InputParser, type InputEvent } from "./input";
 import type { Hello } from "./server";
 import { stateDir } from "./server";
@@ -47,6 +48,8 @@ export interface ClientOptions {
   updateCheck: boolean;
   /** argv that runs the termium on disk to start this session again after a restart (see "restart" below). */
   restartArgv: string[];
+  /** argv that runs this termium (the binary, or bun and the script). */
+  selfArgv: string[];
 }
 
 function fail(msg: string, code = 2): never {
@@ -181,6 +184,60 @@ export async function runClient(o: ClientOptions): Promise<void> {
     );
   }
 
+  // A session started by an older termium from before 0.3.0 (before an
+  // update) can't say so itself, nor restart: ask here, once per server.
+  let legacyNote = "";
+  if (sock) {
+    const info = await sessionInfo(o.name).catch(() => null);
+    if (info && !info.unresponsive && typeof info.version === "string" && !info.restarts && isNewer(o.version, info.version)) {
+      const restartCmd = `termium kill ${o.name} && termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`}`;
+      legacyNote =
+        `termium: session "${o.name}" runs termium ${info.version}, older than this termium (${o.version}), until it restarts. ` +
+        `To restart it (its pages close): ${restartCmd}`;
+      const asked = `${paths.sock.slice(0, -5)}.asked`;
+      let askedPid = "";
+      try {
+        askedPid = readFileSync(asked, "utf8").trim();
+      } catch {}
+      if (askedPid !== String(info.pid)) {
+        try {
+          writeFileSync(asked, `${info.pid}\n`, { mode: 0o600 });
+        } catch {}
+        process.stdout.write(
+          `termium: session "${o.name}" runs termium ${info.version}, older than this termium (${o.version}).\n` +
+            `It keeps running ${info.version} until it restarts, and termium ${info.version} can't reopen its pages: ` +
+            `restarting closes them (logins stay in the profile).\n` +
+            `Restart it now into termium ${o.version}? [y/N] `,
+        );
+        const answer = await new Promise<string>((resolve) => {
+          const onData = (b: Buffer) => {
+            process.stdin.off("data", onData);
+            process.stdin.pause();
+            resolve(b.toString().trim().toLowerCase());
+          };
+          process.stdin.on("data", onData);
+          process.stdin.resume();
+        });
+        if (answer === "y" || answer === "yes") {
+          sock.destroy();
+          const killed = Bun.spawnSync([...o.selfArgv, "kill", o.name], { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+          if (killed.exitCode !== 0) fail(`couldn't end session "${o.name}"`, 1);
+          // Start it again, as it was started, from this termium.
+          const argv = [...o.selfArgv, "--session", o.name];
+          if (info.profile === "(incognito)") argv.push("--incognito");
+          else if (typeof info.profile === "string" && info.profile.startsWith("/")) argv.push("--profile", info.profile);
+          if (!o.updateCheck) argv.push("--no-update-check");
+          if (o.url) argv.push(o.url);
+          try {
+            process.execve!(argv[0]!, argv, process.env);
+          } catch (e: any) {
+            fail(`session "${o.name}" ended, but termium couldn't start it again (${e?.message ?? e}); run termium again`, 1);
+          }
+        }
+      }
+    }
+  }
+
   // Not running: start the server now, so the browser launches while the
   // terminal answers our capability queries.
   let child: ReturnType<typeof spawn> | null = null;
@@ -298,6 +355,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     try {
       process.stdin.setRawMode(false);
     } catch {}
+    if (legacyNote && message && !then) message += `\n${legacyNote}`;
     if (message) (code === 0 ? console.log : console.error)(message);
     conn?.destroy();
     graphicsFiles.clear();
