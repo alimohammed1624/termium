@@ -126,6 +126,9 @@ class Agent {
     }
   }
 
+  /** Element ids the snapshot being made hands out. */
+  private issued = new Set<number>();
+
   /** Before a step that changes something: past the deadline, stop here, saying what was (not) done. */
   private step(soFar = "nothing was done"): void {
     if (Date.now() >= this.deadline) throw new CtlError(`timed out; ${soFar}`, EXIT.timeout);
@@ -244,7 +247,14 @@ class Agent {
     const m = /^(\d+):(\d+)$/.exec(ref ?? "");
     if (!m) throw new CtlError(`bad element id "${ref ?? ""}": ids look like 3:142 (take them from \`termium ctl snapshot\`)`, EXIT.usage);
     const page = this.page(Number(m[1]));
-    return { page, node: Number(m[2]) };
+    const node = Number(m[2]);
+    // Only ids a snapshot of the page's current document gave: node numbers are
+    // reused by a new document, where the same id would mean another element.
+    const ids = page.agentIds;
+    if (!ids || ids.gen !== (page.docGen ?? 0) || !ids.nodes.has(node)) {
+      throw new CtlError(`stale id ${ref}: the page changed since that snapshot; take a new snapshot`);
+    }
+    return { page, node };
   }
 
   private async open(req: CtlRequest, timeoutMs: number): Promise<unknown> {
@@ -388,8 +398,13 @@ class Agent {
   private async snapshot(page: Page): Promise<unknown> {
     const sid = page.sessionId;
     const lines: string[] = [];
+    const gen = page.docGen ?? 0;
     const tree = await this.cdp.send("Accessibility.getFullAXTree", {}, sid);
+    this.issued = new Set();
     await this.render(page, tree.nodes ?? [], lines, 0, 0);
+    // The ids handed out, for this document (a snapshot of it again adds to them).
+    if (page.agentIds?.gen === gen) for (const n of this.issued) page.agentIds.nodes.add(n);
+    else page.agentIds = { gen, nodes: this.issued };
     const t = this.describe(page);
     return { tab: page.num, url: t.url, title: t.title, snapshot: lines.join("\n") };
   }
@@ -420,7 +435,10 @@ class Agent {
       }
       let line = `${pad}- ${role}`;
       if (name) line += ` "${clip(name, 200)}"`;
-      if (n.backendDOMNodeId) line += ` [${page.num}:${n.backendDOMNodeId}]`;
+      if (n.backendDOMNodeId) {
+        line += ` [${page.num}:${n.backendDOMNodeId}]`;
+        this.issued.add(n.backendDOMNodeId);
+      }
       const value = n.value?.value;
       if (value !== undefined && value !== "" && VALUE_ROLES.has(role)) line += ` value="${clip(String(value), 200)}"`;
       for (const [p, v] of props) {
@@ -495,16 +513,23 @@ class Agent {
     return r?.result?.value;
   }
 
+  /**
+   * Clicks (count times). The deadline is checked before each press: a page
+   * slow to take the pointer (a heavy mousemove handler) stops it there; a
+   * press is always followed by its release, so no button is left held.
+   */
   private async mouseClick(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
     const sid = page.sessionId;
     const bit = button === "left" ? 1 : button === "right" ? 2 : 4;
     const send = (p: object) => this.cdp.send("Input.dispatchMouseEvent", p, sid);
     await send({ type: "mouseMoved", x, y, button: "none", buttons: 0 });
     for (let i = 1; i <= count; i++) {
+      this.step(i === 1 ? "not clicked (the page was slow to take the pointer)" : `clicked ${i - 1} of ${count} times`);
       await send({ type: "mousePressed", x, y, button, buttons: bit, clickCount: i });
       await send({ type: "mouseReleased", x, y, button, buttons: 0, clickCount: i });
     }
   }
+
 
   private async click(req: CtlRequest): Promise<unknown> {
     const button = req.button ?? "left";
@@ -522,24 +547,11 @@ class Agent {
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
     this.step("not clicked");
     const { x, y } = await this.centre(page, node);
-    // Something else on top (a cookie banner, an overlay) would take the click:
-    // then nothing is clicked, and the agent is told what covers it.
+    // Something else on top (a cookie banner, an overlay, also one over the
+    // frame the element is in) would take the click: then nothing is clicked,
+    // and the agent is told what covers it.
     const objectId = await this.objectOf(page, node);
-    const cover = await this.callOn(
-      page,
-      objectId,
-      `function (x, y) {
-        if (this.ownerDocument !== document) return null;
-        let e = document.elementFromPoint(x, y);
-        while (e && e.shadowRoot) { const inner = e.shadowRoot.elementFromPoint(x, y); if (!inner || inner === e) break; e = inner; }
-        if (!e || e === this || this.contains(e) || e.contains(this)) return null;
-        const r = this.getRootNode && this.getRootNode();
-        if (r && r.host && (r.host === e || r.host.contains(e))) return null;
-        const name = (e.getAttribute && (e.getAttribute("aria-label") || e.getAttribute("title"))) || (e.innerText || "").trim().replace(/\s+/g, " ");
-        return e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (name ? ' "' + name.slice(0, 40) + '"' : "");
-      }`,
-      [x, y],
-    ).catch(() => null);
+    const cover = await this.coverAt(page, node, objectId, x, y);
     if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
     this.step("not clicked");
     const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count));
@@ -547,6 +559,103 @@ class Agent {
     const label = dialog ? "an element" : await this.label(page, objectId);
     this.note(`clicked ${label}`);
     return { tab: page.num, ref: req.ref, x: Math.round(x), y: Math.round(y), ...(dialog ? { dialog } : {}) };
+  }
+
+  /**
+   * What the mouse would hit at (x, y) (the page's viewport, CSS px) if not
+   * the element or something inside it: looked up from the top document
+   * down through (same-origin) frames, as the browser routes a click. Null
+   * if it's the element; a description of the cover otherwise.
+   */
+  private async coverAt(page: Page, node: number, objectId: string, x: number, y: number): Promise<string | null> {
+    const sid = page.sessionId;
+    const r = await this.cdp
+      .send(
+        "Runtime.evaluate",
+        {
+          expression: `(() => {
+            let x = ${x}, y = ${y};
+            let e = document.elementFromPoint(x, y);
+            for (let i = 0; e && i < 32; i++) {
+              if (e.shadowRoot) {
+                const inner = e.shadowRoot.elementFromPoint(x, y);
+                if (inner && inner !== e) { e = inner; continue; }
+              }
+              if (e.tagName === "IFRAME" || e.tagName === "FRAME") {
+                let d = null;
+                try { d = e.contentDocument; } catch {}
+                if (!d) break;
+                const b = e.getBoundingClientRect();
+                x -= b.left + e.clientLeft;
+                y -= b.top + e.clientTop;
+                const inner = d.elementFromPoint(x, y);
+                if (!inner) break;
+                e = inner;
+                continue;
+              }
+              break;
+            }
+            return e;
+          })()`,
+        },
+        sid,
+      )
+      .catch(() => null);
+    const hitObject = r?.result?.objectId;
+    if (!hitObject) return null; // nothing there to say: the click goes ahead as aimed
+    try {
+      const { node: hit } = await this.cdp.send("DOM.describeNode", { objectId: hitObject }, sid);
+      if (hit.backendNodeId === node) return null;
+      // A frame that couldn't be looked into (another origin): taken as the element's own.
+      if ((hit.nodeName === "IFRAME" || hit.nodeName === "FRAME") && (await this.inFrame(page, objectId, hit.backendNodeId))) return null;
+      // Inside the element (or the element inside it, as a label's text is): it's the element.
+      const { object } = await this.cdp.send("DOM.resolveNode", { backendNodeId: hit.backendNodeId }, sid);
+      const related = await this.cdp
+        .send(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: "function (o) { return this === o || this.contains(o) || o.contains(this); }",
+            arguments: [{ objectId: object.objectId }],
+            returnByValue: true,
+          },
+          sid,
+        )
+        .then((v) => v?.result?.value === true, () => false);
+      if (related) return null;
+      const name = await this.cdp
+        .send(
+          "Runtime.callFunctionOn",
+          {
+            objectId: hitObject,
+            functionDeclaration: `function () {
+              const n = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("title"))) || (this.innerText || "").trim().replace(/\s+/g, " ");
+              return this.tagName.toLowerCase() + (this.id ? "#" + this.id : "") + (n ? ' "' + n.slice(0, 40) + '"' : "");
+            }`,
+            returnByValue: true,
+          },
+          sid,
+        )
+        .then((v) => String(v?.result?.value ?? "another element"), () => "another element");
+      return name;
+    } finally {
+      this.cdp.send("Runtime.releaseObject", { objectId: hitObject }, sid).catch(() => {});
+    }
+  }
+
+  /** Whether the element is in the document frame element `frameNode` shows (one we couldn't look into). */
+  private async inFrame(page: Page, objectId: string, frameNode: number): Promise<boolean> {
+    const sid = page.sessionId;
+    try {
+      const { node: f } = await this.cdp.send("DOM.describeNode", { backendNodeId: frameNode, depth: 1, pierce: true }, sid);
+      const inner = f?.contentDocument?.backendNodeId;
+      if (!inner) return false;
+      const doc = await this.cdp.send("Runtime.callFunctionOn", { objectId, functionDeclaration: "function () { return this.ownerDocument; }" }, sid);
+      const { node: d } = await this.cdp.send("DOM.describeNode", { objectId: doc.result.objectId }, sid);
+      return d?.backendNodeId === inner;
+    } catch {
+      return false;
+    }
   }
 
   private async label(page: Page, objectId: string): Promise<string> {
@@ -576,7 +685,9 @@ class Agent {
     const label = await this.label(page, objectId);
     this.step("nothing was typed");
     await this.centre(page, node).catch(() => {}); // scrolled into view, where the watcher sees it
-    const kind = await this.callOn(
+    let kind: any = null;
+    // An input handler may open a dialog as the text goes in: back at once, saying so.
+    const typingDialog = await this.untilDialog(page, this.callOn(
       page,
       objectId,
       `function (append, text) {
@@ -585,6 +696,10 @@ class Agent {
         if (this.tagName === "SELECT") {
           const opt = [...this.options].find((o) => o.value === text || o.label.trim() === text || o.text.trim() === text);
           if (!opt) return { select: false, options: [...this.options].map((o) => o.label.trim() || o.value).slice(0, 50) };
+          // A disabled option (or one in a disabled group) can't be chosen: the choice stays as it was.
+          if (opt.disabled || (opt.parentElement && opt.parentElement.tagName === "OPTGROUP" && opt.parentElement.disabled)) {
+            return { field: true, refused: "that option is disabled" };
+          }
           this.focus();
           this.value = opt.value;
           this.dispatchEvent(new Event("input", { bubbles: true }));
@@ -645,12 +760,16 @@ class Agent {
         return { field: true, secret, done: true };
       }`,
       [!!req.append, text],
-    );
+    ).then((v) => (kind = v)));
+    if (typingDialog) {
+      this.note(`tab ${page.num} shows a ${typingDialog.type} dialog`);
+      return { tab: page.num, ref: req.ref, dialog: typingDialog, note: "the page showed a dialog as the text went in: check the element once it's answered" };
+    }
     if (kind?.select === false) throw new CtlError(`no option "${text}" in that list; it has: ${kind.options.join(", ")}`);
     if (kind?.select === true) {
-      if (req.submit) await this.submit(page, objectId, req.ref!, `chose "${clip(text, 40)}" in ${req.ref}`);
+      const d = req.submit ? await this.submit(page, objectId, req.ref!, `chose "${clip(text, 40)}" in ${req.ref}`) : null;
       this.note(`chose "${clip(text, 40)}"`);
-      return { tab: page.num, ref: req.ref, selected: text, ...(req.submit ? { submitted: true } : {}) };
+      return { tab: page.num, ref: req.ref, selected: text, ...(req.submit ? { submitted: true } : {}), ...(d ? { dialog: d } : {}) };
     }
     if (kind?.field === false) throw new CtlError(`element ${req.ref} isn't a text field (click it, then use key)`);
     if (kind?.refused) throw new CtlError(`element ${req.ref} can't be typed into: ${kind.refused}; nothing was typed`);
@@ -681,10 +800,10 @@ class Agent {
       ).catch(() => false);
       if (!check) throw new CtlError(`typed, but element ${req.ref} didn't get the text (the page moved focus?); check the page`);
     }
-    if (req.submit) await this.submit(page, objectId, req.ref!, `typed ${text.length} characters into ${req.ref}`);
+    const submitDialog = req.submit ? await this.submit(page, objectId, req.ref!, `typed ${text.length} characters into ${req.ref}`) : null;
     // What was typed is never shown (nor is a password field's name worth the risk).
     this.note(kind.secret ? "typed into a password field" : `typed into ${label}`);
-    return { tab: page.num, ref: req.ref, typed: text.length };
+    return { tab: page.num, ref: req.ref, typed: text.length, ...(req.submit ? { submitted: true } : {}), ...(submitDialog ? { dialog: submitDialog } : {}) };
   }
 
   /**
@@ -692,9 +811,11 @@ class Agent {
    * (the page may have moved it after the text went in): checked and done in
    * one go; with no form, Enter (focus was just checked).
    */
-  private async submit(page: Page, objectId: string, ref: string, done: string): Promise<void> {
+  private async submit(page: Page, objectId: string, ref: string, done: string): Promise<{ type: string; message: string } | null> {
     this.step(`${done}, not submitted`);
-    const how = await this.callOn(
+    let how: any = null;
+    // A submit handler may open a dialog (form validation): back at once, saying so.
+    const dialog = await this.untilDialog(page, this.callOn(
       page,
       objectId,
       `function () {
@@ -711,9 +832,11 @@ class Agent {
         }
         return { enter: true };
       }`,
-    );
+    ).then((v) => (how = v)));
+    if (dialog) return dialog;
     if (how?.moved) throw new CtlError(`${done}, but the page moved focus to ${how.moved}; not submitted`);
-    if (how?.enter) await this.untilDialog(page, this.pressKey(page, "Enter"));
+    if (how?.enter) return this.untilDialog(page, this.pressKey(page, "Enter"));
+    return null;
   }
 
   private async pressKey(page: Page, spec: string): Promise<void> {

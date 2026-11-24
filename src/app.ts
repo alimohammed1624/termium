@@ -46,6 +46,10 @@ import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Ste
 export interface Page {
   /** A short number for the page, unique in the session (what `termium ctl` calls a tab). */
   num: number;
+  /** Bumped on every new document in the page (or its frames): see agentIds. */
+  docGen?: number;
+  /** Element ids `termium ctl snapshot` handed out for the document of generation `gen`. */
+  agentIds?: { gen: number; nodes: Set<number> };
   /** A size check waiting for the once-a-second limit (see trailingSizeCheck). */
   sizeRecheck?: ReturnType<typeof setTimeout>;
   /** An agent is closing it (see agentClose): "refused" once the page said it has unsaved changes. */
@@ -59,7 +63,7 @@ export interface Page {
   loading: boolean;
   crashed: boolean;
   /** A pending JavaScript dialog, and the session (page or iframe) to answer it on. */
-  dialog: { type: string; message: string; defaultPrompt: string; sessionId: string } | null;
+  dialog: { type: string; message: string; defaultPrompt: string; sessionId: string; edit?: LineEdit } | null;
   /** Set while termium is closing the page (beforeunload may still keep it). */
   closing: boolean;
   /** A file input waiting for a path (shown when the page is focused). */
@@ -424,6 +428,11 @@ export class App {
     };
     cdp.on("Page.frameStartedNavigating", navigating(true));
     cdp.on("Page.frameNavigated", navigating(false));
+    // A new document (in the page or one of its frames): element ids handed out before are void.
+    cdp.on("Page.frameNavigated", (_p, sid) => {
+      const page = this.ownerOf(sid);
+      if (page) page.docGen = (page.docGen ?? 0) + 1;
+    });
     cdp.on("Page.frameStoppedLoading", navigating(false));
     cdp.on("Page.navigatedWithinDocument", (p, sid) => {
       const page = sid ? this.pages.get(sid) : undefined;
@@ -884,10 +893,11 @@ export class App {
       if (middle) this.lastMiddlePress = 0; // one middle click, one background tab
       // A popup from a page you aren't looking at doesn't take focus either.
       // A page another DevTools client opens (no opener in termium) waits in the
-      // background while the person is editing the address, a prompt or help:
-      // their draft stays. Popups and links from pages keep opening in front
-      // (the person's own clicks and keys open those).
-      const background = middle || (!!opener && opener !== this.focused) || (!opener && this.humanEditing());
+      // background while the person is busy (editing the address, a prompt or
+      // help, or typing a moment ago): their draft and keys stay where they are.
+      // Popups and links from pages keep opening in front, as ever (the
+      // person's own clicks and keys open those).
+      const background = middle || (!!opener && opener !== this.focused) || (!opener && this.humanBusy());
       placement = { kind: "tab", space, index, editUrl: false, background };
     }
 
@@ -1048,7 +1058,9 @@ export class App {
     if (p && p.kind === "rename" && p.space !== this.space) this.prompt = null;
     if (this.prompt?.kind === "dialog" && !this.prompt.page.dialog) this.prompt = null;
     if (page?.dialog && !this.prompt) {
-      this.prompt = { kind: "dialog", edit: new LineEdit(page.dialog.defaultPrompt, true), page };
+      // (Its answer as typed so far lives with the dialog: it comes back as it was after help or the update box.)
+      const d = page.dialog;
+      this.prompt = { kind: "dialog", edit: (d.edit ??= new LineEdit(d.defaultPrompt, true)), page };
     }
     if (page?.fileChooser && !this.prompt) {
       const fc = page.fileChooser;
@@ -2650,7 +2662,8 @@ export class App {
 
   /** Ctrl+B U, or a click on the notice or the badge: the box for what's known, else says there's nothing. */
   private openUpdate(): void {
-    if (!this.updatesShown) {
+    // A restart into a termium already installed isn't update news: it's offered whatever the opt-outs.
+    if (!this.updatesShown && !(this.updateInstalled && (!this.updateBox || this.updateBox.state === "installed" || this.updateBox.state === "done"))) {
       this.showToast("Update news is off in this terminal (--no-update-check, TERMIUM_NO_UPDATE_CHECK or CI)", 5000);
       return;
     }

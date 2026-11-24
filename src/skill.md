@@ -144,11 +144,17 @@ The port changes each time the session starts: ask `termium devtools`.
   what it holds. `--submit` submits only that element's own form (or
   presses Enter in it), only if the text is right and the element still
   has focus; otherwise exit 1, not submitted. `dialog` doesn't wait its
-  turn: it can answer a dialog an `open`, `click` or `key` is stopped on
-  (they return as soon as the page shows one, with `dialog` in the reply).
-- `click ID` clicks only if the element itself is under its centre: if
-  something covers it (a banner, an overlay), it's exit 1 naming the
-  cover, and nothing is clicked.
+  turn: it can answer a dialog an `open`, `click`, `key` or `type`
+  (`--submit`) is stopped on (they return as soon as the page shows one,
+  with `dialog` in the reply). A disabled option (or one in a disabled
+  group) isn't chosen (exit 1).
+- `click ID` clicks only if the element itself is under its centre (looked
+  up from the top of the page, through frames): if something covers it (a
+  banner, an overlay, one over its frame), it's exit 1 naming the cover,
+  and nothing is clicked.
+- An id is good only for the document its snapshot saw: once the page (or
+  a frame in it) loads a new document, its ids are stale (exit 1, "take a
+  new snapshot"), even if the same number shows up again.
 - `shot` files are readable only by you. `shot --full` captures the whole
   page, in tiles if it's tall, up to 40 megapixels (about 29000 px of a
   1380 px wide page; exit 5 beyond: the top part, said on stderr).

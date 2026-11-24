@@ -391,7 +391,11 @@ function human(req: CtlRequest, r: any): string {
     case "click":
       return `clicked${r.ref ? ` ${r.ref}` : ""} at ${r.x},${r.y}${r.dialog ? `\nthe page shows a ${r.dialog.type} dialog: ${r.dialog.message}` : ""}`;
     case "type":
-      return r.selected !== undefined ? `chose "${r.selected}" in ${r.ref}` : `typed ${r.typed} characters into ${r.ref}`;
+      return (
+        (r.selected !== undefined ? `chose "${r.selected}" in ${r.ref}` : r.typed !== undefined ? `typed ${r.typed} characters into ${r.ref}` : `typing into ${r.ref}`) +
+        (r.submitted ? ", submitted" : "") +
+        (r.dialog ? `\nthe page shows a ${r.dialog.type} dialog: ${r.dialog.message}` : "")
+      );
     case "key":
       return `pressed ${r.keys.join(" ")}${r.dialog ? `\nthe page shows a ${r.dialog.type} dialog (${r.pressed} of ${r.of} keys pressed): ${r.dialog.message}` : ""}`;
     case "scroll":

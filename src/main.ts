@@ -257,7 +257,8 @@ async function update(): Promise<never> {
     const names = old.map((s) => s.name).join(", ");
     console.log(
       `Running session${old.length === 1 ? "" : "s"} (${names}) keep${old.length === 1 ? "s" : ""} running the old termium until restarted: ` +
-        `attach (termium attach NAME) and press r when asked, which reopens its spaces and tabs; or end it with termium kill NAME.`,
+        `attach (termium attach NAME) and press Ctrl+B U, then r (offered even with update checks off), which reopens its spaces and tabs; ` +
+        `or end it with termium kill NAME.`,
     );
   }
   process.exit(0);
