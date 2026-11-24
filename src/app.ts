@@ -39,7 +39,7 @@ import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
-import { UPGRADE_CMD, displayVersion, isNewer, stepLabel, type Step } from "./update";
+import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
 
 // ---------------------------------------------------------------- model
 
@@ -2239,6 +2239,26 @@ export class App {
     this.updateBox = null;
     if (this.mode === "update") this.closeUpdate(false);
     else this.queueChrome();
+  }
+
+  /**
+   * The latest release is `tag` (the newest stable one a check found): a
+   * badge or offer of a release newer than that (one pulled since, say), or
+   * not newer than this termium, is withdrawn.
+   */
+  latestRelease(tag: string): void {
+    if (!parseVersion(tag)) return;
+    const stale = (t: string | null) => !!t && (isNewer(t, tag) || !isNewer(t, this.opts.version));
+    if (stale(this.updateLatest)) {
+      this.updateLatest = isNewer(tag, this.opts.version) ? tag : null;
+      this.queueChrome();
+    }
+    const box = this.updateBox;
+    if (box?.state === "offer" && stale(box.tag)) {
+      this.updateBox = null;
+      if (this.mode === "update") this.closeUpdate(false);
+      else this.queueChrome();
+    }
   }
 
   /** The update check found newer release `tag`; `offer` is false when the user skipped it. */

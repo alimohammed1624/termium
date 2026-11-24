@@ -119,7 +119,14 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--no-update-check": args.noUpdateCheck = true; break;
       case "--restore": args.restore = true; break;
-      case "--browser": args.browser = value(); flag("--browser"); break;
+      case "--browser": {
+        // A path (not a name looked up on PATH) is made absolute: the session
+        // may restart from another directory.
+        const b = value();
+        args.browser = b.includes("/") ? resolve(b) : b;
+        flag("--browser");
+        break;
+      }
       case "--profile": args.profile = resolve(value()); flag("--profile"); break;
       case "--incognito": args.incognito = true; flag("--incognito"); break;
       case "--search": {

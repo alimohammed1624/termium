@@ -557,7 +557,10 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         log(`update check: ${r.error}`);
         return;
       }
-      if (client && wantsUpdates) app?.updateSkipped(loadCache(cacheFile)?.skipped);
+      if (client && wantsUpdates) {
+        app?.latestRelease(r.tag);
+        app?.updateSkipped(loadCache(cacheFile)?.skipped);
+      }
       if (isNewer(r.tag, version) && client && wantsUpdates) {
         log(`update check: termium ${displayVersion(r.tag)} is available`);
         app?.updateAvailable(r.tag, loadCache(cacheFile)?.skipped !== r.tag);
@@ -581,11 +584,12 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     // That terminal runs a newer termium: it's installed, and this session runs the old one.
     // (Offered only once that termium is found to run and report that version.)
     const argv = Array.isArray(h.argv) && h.argv.length && h.argv.every((a) => typeof a === "string") ? h.argv : null;
-    if (typeof h.version === "string" && argv && isNewer(h.version, version) && (!newerFrom || isNewer(h.version, newerFrom.version))) {
+    // (The same version from another path replaces the one known: the latest attach's copy is the one checked last.)
+    if (typeof h.version === "string" && argv && isNewer(h.version, version) && (!newerFrom || !isNewer(newerFrom.version, h.version))) {
       const v = h.version;
       void binaryVersionAsync(argv).then((got) => {
         if (got !== v) return log(`update: ${argv.join(" ")} doesn't report termium ${v} (${got ?? "doesn't run"}); no restart into it`);
-        if (newerFrom && !isNewer(v, newerFrom.version)) return;
+        if (newerFrom && isNewer(newerFrom.version, v)) return;
         newerFrom = { version: v, argv };
         app?.newerInstalled(v);
       });
@@ -593,7 +597,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     if (installed) app.newerInstalled(installed);
     if (!wantsUpdates) return;
     const c = loadCache(cacheFile);
-    // Skipped since (in another session, say): withdrawn here too.
+    // Skipped since (in another session, say), or no longer the latest: withdrawn here too.
+    if (c?.latest) app.latestRelease(c.latest);
     app.updateSkipped(c?.skipped);
     const tag = cachedNewer(c, version);
     if (tag) app.updateAvailable(tag, c?.skipped !== tag);
@@ -629,22 +634,32 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     // The termium to restart into: the newest known to be installed (the
     // binary this session's update replaced, or the one a newer terminal
     // runs), checked again now to still run and be that version.
-    const known = [installed && installedExe ? { version: installed, argv: [installedExe] } : null, newerFrom].filter(
-      (c): c is { version: string; argv: string[] } => !!c,
-    );
-    const target = known.sort((a, b) => (isNewer(a.version, b.version) ? -1 : isNewer(b.version, a.version) ? 1 : 0))[0];
-    if (target) {
-      restarting = true;
-      const got = await binaryVersionAsync(target.argv);
-      restarting = false;
-      if (got !== target.version) {
-        log(`restart: ${target.argv.join(" ")} is ${got ? `termium ${got}` : "gone"}, not termium ${target.version}`);
-        if (target === newerFrom) newerFrom = null;
-        else installed = installedExe = null;
-        app?.clearInstalled();
-        app?.showToast(`Can't restart: termium ${target.version} isn't at ${target.argv.join(" ")} any more`, 8000);
-        return;
+    // Newest first; one that's gone (or another version now) is forgotten and the next tried.
+    type Known = { version: string; argv: string[]; self: boolean };
+    const known = [
+      installed && installedExe ? { version: installed, argv: [installedExe], self: true } : null,
+      newerFrom ? { ...newerFrom, self: false } : null,
+    ].filter((c): c is Known => !!c);
+    known.sort((a, b) => (isNewer(a.version, b.version) ? -1 : isNewer(b.version, a.version) ? 1 : 0));
+    let target: Known | undefined;
+    let gone: Known | undefined;
+    restarting = true;
+    for (const k of known) {
+      const got = await binaryVersionAsync(k.argv);
+      if (got === k.version) {
+        target = k;
+        break;
       }
+      log(`restart: ${k.argv.join(" ")} is ${got ? `termium ${got}` : "gone"}, not termium ${k.version}`);
+      if (k.self) installed = installedExe = null;
+      else newerFrom = null;
+      gone ??= k;
+    }
+    restarting = false;
+    if (!target && gone) {
+      app?.clearInstalled();
+      app?.showToast(`Can't restart: termium ${gone.version} isn't at ${gone.argv.join(" ")} any more`, 8000);
+      return;
     }
     if (!app || shuttingDown || !client) return;
     const r: Restore = {
