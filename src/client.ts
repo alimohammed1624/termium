@@ -212,11 +212,21 @@ export async function runClient(o: ClientOptions): Promise<void> {
             `restarting closes them (logins stay in the profile).\n` +
             `Restart it now into termium ${o.version}? [y/N] `,
         );
+        // One key, read raw: y is yes; anything else (Enter, n, Ctrl+D...) is no; Ctrl+C leaves.
         const answer = await new Promise<string>((resolve) => {
+          process.stdin.setRawMode(true);
           const onData = (b: Buffer) => {
             process.stdin.off("data", onData);
             process.stdin.pause();
-            resolve(b.toString().trim().toLowerCase());
+            process.stdin.setRawMode(false);
+            const c = b.toString();
+            if (c.startsWith("\x03")) {
+              process.stdout.write("\n");
+              process.exit(130);
+            }
+            const yes = /^[yY]/.test(c);
+            process.stdout.write(yes ? "y\n" : "n\n");
+            resolve(yes ? "y" : "n");
           };
           process.stdin.on("data", onData);
           process.stdin.resume();
@@ -397,7 +407,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
    * server is gone, this process becomes that termium (exec), which starts
    * the session again with the layout the old server left behind.
    */
-  const restartInto = async (run?: string[], version?: string) => {
+  const restartInto = async (run?: string[], version?: string, keepEnv?: Record<string, unknown>) => {
     process.stdin.pause();
     process.stdin.removeAllListeners("data");
     for (let i = 0; i < 200 && serverPid && pidAlive(serverPid); i++) await Bun.sleep(50);
@@ -415,7 +425,14 @@ export async function runClient(o: ClientOptions): Promise<void> {
       }
     }
     try {
-      process.execve!(argv[0]!, argv, process.env);
+      // The session's own environment where it matters (data dirs, browser...), not this shell's.
+      const env: Record<string, string | undefined> = { ...process.env };
+      for (const [k, v] of Object.entries(keepEnv ?? {})) {
+        if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) continue;
+        if (typeof v === "string") env[k] = v;
+        else if (v === null) delete env[k];
+      }
+      process.execve!(argv[0]!, argv, env as Record<string, string>);
     } catch (e: any) {
       console.error(
         `termium: couldn't restart (${e?.message ?? e}). Run \`termium${o.name === DEFAULT_SESSION ? "" : ` -s ${o.name}`}\` ` +
@@ -812,7 +829,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
           return void leave(
             0,
             `[restarting session ${o.name} into the updated termium${run ? ` (${run.join(" ")})` : ""}]`,
-            () => restartInto(run, typeof m.version === "string" ? m.version : undefined),
+            () =>
+              restartInto(run, typeof m.version === "string" ? m.version : undefined, m.env && typeof m.env === "object" ? m.env : undefined),
           );
         }
         case "error": {

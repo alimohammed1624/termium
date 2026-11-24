@@ -46,6 +46,8 @@ import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Ste
 export interface Page {
   /** A short number for the page, unique in the session (what `termium ctl` calls a tab). */
   num: number;
+  /** An agent is closing it (see agentClose): "refused" once the page said it has unsaved changes. */
+  agentClosing?: "yes" | "force" | "refused";
   /** Its browser context (another DevTools client's newContext() makes others). */
   contextId?: string;
   targetId: string;
@@ -1096,6 +1098,14 @@ export class App {
   private onDialog(sid: string | undefined, p: any): void {
     const page = this.ownerOf(sid);
     if (!page || !sid) return;
+    // An agent's close never puts a "Leave this page?" in front of the person:
+    // it's answered here ("leave" for --force; else "stay", and the agent is told).
+    if (page.agentClosing && p.type === "beforeunload") {
+      const leave = page.agentClosing === "force";
+      if (!leave) page.agentClosing = "refused";
+      this.cdp.send("Page.handleJavaScriptDialog", { accept: leave }, sid).catch(() => {});
+      return;
+    }
     page.dialog = { type: p.type, message: p.message, defaultPrompt: p.defaultPrompt ?? "", sessionId: sid };
     const loc = this.locate(page);
     // A page termium is closing asks "leave?": show it. Otherwise a dialog in
@@ -3207,7 +3217,7 @@ export class App {
     }
     page.navStarted = 0;
     this.cdp
-      .send("Page.handleJavaScriptDialog", { accept, promptText }, page.dialog?.sessionId ?? page.sessionId)
+      .send("Page.handleJavaScriptDialog", { accept, promptText }, page.dialog?.sessionId ?? page.sessionId, { secret: true })
       .catch((e) => this.opts.log(`dialog: ${e}`));
     page.dialog = null;
     this.prompt = null;
@@ -3322,8 +3332,9 @@ export class App {
     const hold = `paste-${++this.pasteSeq}`;
     this.holdInput(hold);
     const sid = page.sessionId;
+    // (Pasted text is never traced.)
     const evaluate = (expression: string) =>
-      this.cdp.send("Runtime.evaluate", { expression, awaitPromise: true, userGesture: true, returnByValue: true }, sid);
+      this.cdp.send("Runtime.evaluate", { expression, awaitPromise: true, userGesture: true, returnByValue: true }, sid, { secret: true });
     let origin = "";
     const setClipboardAccess = (setting: "granted" | "prompt") =>
       Promise.all(
@@ -3369,7 +3380,7 @@ export class App {
             (a || d.body || d.documentElement).dispatchEvent(ev);
             return ev.defaultPrevented; })()`,
           returnByValue: true,
-        }, sid)
+        }, sid, { secret: true })
         .then((r) => r?.result?.value === true, () => false);
       if (!handled) await this.cdp.send("Input.insertText", { text }, sid).catch(() => {});
     } finally {
@@ -3816,13 +3827,18 @@ export class App {
   }
 
   /** Closes a page as Ctrl+W does (its "Leave this page?" may ask), or outright with `force`. */
-  agentClose(page: Page, force: boolean): void {
-    if (force) {
-      page.closing = true;
-      this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
-    } else {
-      this.closePage(page);
-    }
+  /**
+   * Closes a page for an agent, never switching the person's tab nor asking
+   * them anything: "unsaved" (not closed) if the page may have unsaved
+   * changes or shows a dialog, unless `force`, which discards them.
+   */
+  async agentClose(page: Page, force: boolean): Promise<"closing" | "unsaved"> {
+    if (!force && (page.dialog || (await this.wouldAsk(page)))) return "unsaved";
+    page.closing = true;
+    page.agentClosing = force ? "force" : "yes";
+    if (force && page.dialog) await this.cdp.send("Page.handleJavaScriptDialog", { accept: page.dialog.type === "beforeunload" }, page.dialog.sessionId).catch(() => {});
+    this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
+    return "closing";
   }
 
   isOpen(page: Page): boolean {

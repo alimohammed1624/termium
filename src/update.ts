@@ -51,15 +51,22 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 // ------------------------------------------------------------ versions
 
-/** `X.Y.Z` with an optional `v`; pre-releases (`-…`) and anything else are null. `+build` is ignored. */
+/** `X.Y.Z` with an optional `v`, nothing else (no pre-release, no +build): null otherwise. */
 export function parseVersion(s: string): [number, number, number] | null {
-  let v = s.trim();
-  if (v.startsWith("v") || v.startsWith("V")) v = v.slice(1);
-  v = v.split("+")[0]!;
-  const m = v.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  const m = s.trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/);
   if (!m) return null;
   const n = [Number(m[1]), Number(m[2]), Number(m[3])] as [number, number, number];
   return n.every(Number.isSafeInteger) ? n : null;
+}
+
+/**
+ * A release tag as it may come from GitHub (or a test server): a version,
+ * maybe a pre-release (v1.2.0-rc.1). Anything else (a `+build`, a path, odd
+ * characters) is refused wherever a tag comes in, so it never reaches a
+ * download URL or a version check.
+ */
+export function validTag(tag: string): boolean {
+  return /^v?\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(tag);
 }
 
 /** `latest` is a stable release newer than `current`. */
@@ -81,13 +88,14 @@ export function displayVersion(tag: string): string {
 export function tagFromLocation(loc: string): string | null {
   const i = loc.indexOf("/releases/tag/");
   if (i < 0) return null;
-  const tag = loc.slice(i + "/releases/tag/".length).split(/[?#/]/)[0]!.trim();
-  if (!tag) return null;
+  const raw = loc.slice(i + "/releases/tag/".length).split(/[?#/]/)[0]!.trim();
+  let tag: string;
   try {
-    return decodeURIComponent(tag);
+    tag = decodeURIComponent(raw);
   } catch {
-    return tag;
+    return null;
   }
+  return validTag(tag) ? tag : null;
 }
 
 // ------------------------------------------------------------ opt-outs
@@ -256,7 +264,7 @@ async function ask(url: string, version: string, signal: AbortSignal): Promise<s
   } catch (e: any) {
     throw new Error(signal.aborted ? describe(signal.reason) : "unexpected response");
   }
-  if (typeof j?.tag_name !== "string" || !j.tag_name) throw new Error("unexpected response");
+  if (typeof j?.tag_name !== "string" || !validTag(j.tag_name)) throw new Error("unexpected response");
   return j.tag_name;
 }
 
@@ -641,8 +649,11 @@ export async function selfUpdate(tag: string, version: string, step: (s: Step) =
   const base = (process.env[DOWNLOAD_ENV]?.trim() || DOWNLOAD_BASE).replace(/\/+$/, "");
   const asset = `termium-${target}.tar.gz`;
   step("downloading");
-  const sums = await download(`${base}/${tag}/SHA256SUMS`, version);
-  const archive = await download(`${base}/${tag}/${asset}`, version);
+  // Only a release version goes into a URL (and it's encoded all the same).
+  if (!parseVersion(tag)) throw new Error(`"${tag}" isn't a release version`);
+  const t = encodeURIComponent(tag);
+  const sums = await download(`${base}/${t}/SHA256SUMS`, version);
+  const archive = await download(`${base}/${t}/${asset}`, version);
   step("verifying");
   const want = sumFor(Buffer.from(sums).toString("utf8"), asset);
   if (!want) throw new Error(`SHA256SUMS has no entry for ${asset}`);

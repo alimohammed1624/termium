@@ -26,7 +26,8 @@ export class CtlError extends Error {
 export const EXIT = { ok: 0, failed: 1, usage: 2, noSession: 3, timeout: 4 } as const;
 
 /** Commands that act on pages or tabs: a session runs these one at a time (see onCtl in server.ts). */
-export const ACTING = new Set(["open", "select", "close", "click", "type", "key", "scroll", "dialog"]);
+// (Not `dialog`: answering one must work while an `open` waits on the page it blocks.)
+export const ACTING = new Set(["open", "select", "close", "click", "type", "key", "scroll"]);
 
 export interface CtlRequest {
   cmd: string;
@@ -226,6 +227,11 @@ class Agent {
     if (req.wait !== false) await this.waitLoad(page, Date.now() + timeoutMs - 500, true);
     const t: Record<string, unknown> = { ...this.describe(page) };
     if (held) t.background = "the person at the terminal was busy: opened in the background, not shown";
+    // The page stopped on a dialog (alert in its load): said at once; the page can't be asked anything until it's answered.
+    if (page.dialog) {
+      this.note(`tab ${page.num} shows a ${page.dialog.type} dialog`);
+      return { ...t, dialog: { type: page.dialog.type, message: page.dialog.message } };
+    }
     if (/^chrome-error:/.test(await this.evalValue(page, "location.href").catch(() => ""))) {
       throw new CtlError(`tab ${page.num}: couldn't load ${url} (${t.title || "error page"})`);
     }
@@ -236,21 +242,26 @@ class Agent {
     const page = this.page(req.tab, true);
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not closed");
     const t = this.describe(page);
-    this.app.agentClose(page, !!req.force);
+    const unsaved = () =>
+      new CtlError(
+        `tab ${page.num} may have unsaved changes (it would ask "Leave this page?"); not closed. ` +
+          "close --force discards them",
+      );
+    if ((await this.app.agentClose(page, !!req.force)) === "unsaved") throw unsaved();
     this.note(`closing tab ${page.num}`);
     const end = Date.now() + 5000;
     while (this.app.isOpen(page) && Date.now() < end) {
-      if (page.dialog?.type === "beforeunload") {
-        throw new CtlError(
-          `tab ${page.num} asks "Leave this page?" (it may have unsaved changes); not closed. ` +
-            "termium ctl dialog accept closes it, dismiss keeps it; or close --force",
-        );
+      if (page.agentClosing === "refused") {
+        page.closing = false;
+        page.agentClosing = undefined;
+        throw unsaved();
       }
       await Bun.sleep(50);
     }
     if (this.app.isOpen(page)) throw new CtlError(`tab ${page.num} didn't close`);
     return t;
   }
+
 
   private async dialog(req: CtlRequest): Promise<unknown> {
     let page: Page | undefined;
@@ -413,11 +424,13 @@ class Agent {
     }
   }
 
+  /** Calls `fn` on an element; its arguments (text to type, say) are never traced. */
   private async callOn(page: Page, objectId: string, fn: string, args: unknown[] = []): Promise<any> {
     const r = await this.cdp.send(
       "Runtime.callFunctionOn",
       { objectId, functionDeclaration: fn, arguments: args.map((value) => ({ value })), returnByValue: true, awaitPromise: true },
       page.sessionId,
+      { secret: args.length > 0 },
     );
     if (r?.exceptionDetails) throw new CtlError(exceptionText(r.exceptionDetails));
     return r?.result?.value;

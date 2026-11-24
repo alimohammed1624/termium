@@ -58,6 +58,12 @@ import {
   skipVersion,
 } from "./update";
 
+/** Environment a session runs with that a restart keeps (see restartSession). */
+const RESTART_ENV = ["XDG_DATA_HOME", "XDG_STATE_HOME", "TERMIUM_BROWSER", "TERMIUM_SEARCH", "TERMIUM_DOWNLOAD_DIR", "TMPDIR", "HOME"];
+
+/** A queued agent command whose time ran out before its turn. */
+const SKIPPED = Symbol("skipped");
+
 export interface LaunchOptions {
   url: string | null;
   browser?: string;
@@ -433,7 +439,13 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
     rmSync(browserTmp, { recursive: true, force: true });
     const bye = { t: "bye", reason: err ? "error" : (reason ?? "exited"), code, message: err ? (err instanceof Error ? err.message : String(err)) : undefined, ...extra };
-    await Promise.all([client?.end(bye), requester && requester !== client ? requester.end(bye) : undefined]);
+    // Agents waiting on an answer get one: why the session ended.
+    const why = err ? (err instanceof Error ? err.message : String(err)) : `session "${name}" ended`;
+    await Promise.all([
+      client?.end(bye),
+      requester && requester !== client ? requester.end(bye) : undefined,
+      ...[...ctlPending].map((c) => c.end({ t: "ctl", ok: false, code: 1, error: why })),
+    ]);
     process.exit(code);
   };
 
@@ -458,20 +470,20 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
 
   /** Creates the app for the first client: the browser must be up, and the terminal's size known (an agent's: a default). */
   let starting: Promise<void> | null = null;
+  /** Why the browser didn't start (for agents asking meanwhile). */
+  let startError: string | null = null;
   const startApp = (h: Partial<Hello>) =>
     (starting ??= (async () => {
       try {
         browser = await launching;
       } catch (e) {
+        startError = e instanceof Error ? e.message : String(e);
         await shutdown(1, e);
         return;
       }
       cdp = browser.cdp;
-      // (What's typed, by a person or an agent, is never written to the log: it may be a password.)
-      if (process.env.TERMIUM_DEBUG) {
-        cdp.trace = (dir, msg) =>
-          log(`${dir} ${/"Input\./.test(msg) ? msg.replace(/"(text|unmodifiedText)":"(?:[^"\\]|\\.)*"/g, '"$1":"(not logged)"') : msg}`);
-      }
+      // (What's typed or pasted is never traced: see CDP.send's `secret`.)
+      if (process.env.TERMIUM_DEBUG) cdp.trace = (dir, msg) => log(`${dir} ${msg}`);
       cdp.onClose = () => {
         if (!shuttingDown) void shutdown(1, new Error(`the browser went away (see ${join(logDir, "browser.log")})`));
       };
@@ -684,7 +696,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       v: 1,
       at: Date.now(),
       from: version,
-      launch: savedLaunch(args),
+      // What this session actually runs with (the browser found, the profile
+      // used), not what the restarting terminal's environment would pick.
+      launch: { ...savedLaunch(args), browser: args.browser ?? bin, profile: args.incognito ? undefined : profile },
       layout: app.layoutSnapshot(),
     };
     try {
@@ -694,7 +708,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       return;
     }
     log(`restarting into the updated termium${target ? ` (${target.argv.join(" ")}, ${target.version})` : ""}`);
-    void shutdown(0, undefined, undefined, "restart", target ? { argv: target.argv, version: target.version } : {});
+    // The new session gets this one's environment where it matters (data and
+    // state dirs, browser, search, downloads), whatever the terminal's shell has.
+    const env: Record<string, string | null> = {};
+    for (const k of RESTART_ENV) env[k] = process.env[k] ?? null;
+    void shutdown(0, undefined, undefined, "restart", { env, ...(target ? { argv: target.argv, version: target.version } : {}) });
   };
 
   let lastHello: Hello | null = null;
@@ -735,8 +753,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         return;
       }
       if (h.kind === "ctl") {
-        // Waits for its request (the next message): see onCtl.
+        // Waits for its request (the next message, promptly: see onCtl).
         ctlConns.add(c);
+        setTimeout(() => {
+          if (ctlConns.delete(c)) void c.end({ t: "ctl", ok: false, code: EXIT.usage, error: "no request came" });
+        }, 10_000).unref?.();
         return;
       }
       if (h.kind === "abandon") {
@@ -846,25 +867,46 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
    * don't wait their turn.
    */
   let ctlQueue: Promise<unknown> = Promise.resolve();
+  /** Agents' requests not answered yet: a session that ends answers them with why. */
+  const ctlPending = new Set<Conn>();
   const onCtl = async (c: Conn, req: CtlRequest) => {
-    const reply = (msg: object) => void c.end({ t: "ctl", ...msg });
+    // The command's time runs from now (its arrival), queued or not.
+    const budget = Math.min(Math.max(Number(req?.timeoutMs) || 30_000, 100), 10 * 60_000);
+    const deadline = Date.now() + budget;
+    const reply = (msg: object) => {
+      ctlPending.delete(c);
+      void c.end({ t: "ctl", ...msg });
+    };
+    const timedOut = (what: string) =>
+      reply({ ok: false, code: EXIT.timeout, error: `${req?.cmd}: timed out after ${budget / 1000}s (${what}); nothing was done` });
     if (shuttingDown) return reply({ ok: false, code: 1, error: `session "${name}" is ending` });
+    ctlPending.add(c);
     // An agent counts as using the session: it isn't ended for want of a terminal.
     everAttached = true;
     try {
-      // Still starting (a restart reopening its tabs, say): wait for it, as long as the command may take.
-      const budget = Math.min(Math.max(Number(req?.timeoutMs) || 30_000, 1000), 10 * 60_000);
+      // Still starting (a restart reopening its tabs, say): wait for it, within the command's time.
       const started = await Promise.race([startApp(lastHello ?? {}).then(() => true), Bun.sleep(budget).then(() => false)]);
-      if (!started && !shuttingDown) return reply({ ok: false, code: EXIT.timeout, error: `session "${name}" is still starting; try again` });
-      if (!app || !appReady || !cdp || shuttingDown) return reply({ ok: false, code: 1, error: `session "${name}" couldn't start its browser` });
+      if (!started && !shuttingDown) return timedOut(`session "${name}" is still starting; try again`);
+      if (!app || !appReady || !cdp || shuttingDown) {
+        return reply({ ok: false, code: 1, error: `session "${name}" couldn't start its browser${startError ? `: ${startError}` : ""}` });
+      }
       const a = app;
       const d = cdp;
-      const run = () => runCtl(a, d, req, { devtools: browser?.devtools ?? null, log });
+      // What's left of its time when its turn comes (the agent's timeout covers the wait too).
+      const run = () => runCtl(a, d, { ...req, timeoutMs: deadline - Date.now() }, { devtools: browser?.devtools ?? null, log });
       let result: unknown;
       if (ACTING.has(String(req?.cmd))) {
-        const turn = ctlQueue.then(run, run);
+        // Its turn may come after its time is up, or after its agent gave up
+        // (disconnected): then it's dropped, never run late.
+        let expired = false;
+        const turn = ctlQueue.then(() => (expired || c.closed || Date.now() >= deadline ? SKIPPED : run()));
         ctlQueue = turn.catch(() => {});
-        result = await turn;
+        const lapse = new Promise<typeof SKIPPED>((res) => setTimeout(() => res(SKIPPED), Math.max(0, deadline - Date.now())));
+        result = await Promise.race([turn, lapse]);
+        if (result === SKIPPED) {
+          expired = true;
+          return timedOut("waiting for earlier commands");
+        }
       } else {
         result = await run();
       }
@@ -875,6 +917,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       reply({ ok: false, code, error: e?.message ?? String(e) });
     }
   };
+
 
 
   const onClose = (c: Conn) => {

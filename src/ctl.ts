@@ -54,8 +54,9 @@ Options:
 Exit status: 0 done, 1 failed (bad id, page error...), 2 usage, 3 no such session, 4 timed out.
 Start a session without a terminal first: termium start -s NAME`;
 
+/** Exits with an error: always one line on stderr (as the skill promises). */
 function fail(msg: string, code: number = EXIT.usage): never {
-  console.error(`termium: ${msg}`);
+  console.error(`termium: ${msg.replace(/\s*\n\s*/g, " ").trim()}`);
   process.exit(code);
 }
 
@@ -277,7 +278,7 @@ export async function request(name: string, req: CtlRequest, waitMs = (req.timeo
   const info = await sessionInfo(name).catch(() => null);
   if (!info) fail(`no session "${name}" (start one without a terminal: termium start${name === DEFAULT_SESSION ? "" : ` -s ${name}`})`, EXIT.noSession);
   if (info.unresponsive) fail(`session "${name}" isn't responding${info.pid ? ` (pid ${info.pid})` : ""}`, EXIT.failed);
-  if (info.refused) fail(`${info.refused}\n  End it (termium kill ${name}) and start it again with this termium.`, EXIT.failed);
+  if (info.refused) fail(`${info.refused} End it (termium kill ${name}) and start it again with this termium.`, EXIT.failed);
   if (info.ctl !== true) {
     fail(
       `session "${name}" runs termium ${info.version ?? "(older)"}, which has no agent control. ` +
@@ -300,7 +301,7 @@ export async function request(name: string, req: CtlRequest, waitMs = (req.timeo
         clearTimeout(timer);
         sock.destroy();
         fail(
-          `${String(f.msg.message ?? `session "${name}" refused the request`)}\n  End it (termium kill ${name}) and start it again with this termium.`,
+          `${String(f.msg.message ?? `session "${name}" refused the request`)} End it (termium kill ${name}) and start it again with this termium.`,
           EXIT.failed,
         );
       }

@@ -129,9 +129,15 @@ The port changes each time the session starts: ask `termium devtools`.
   --new-tab` then opens the tab in the background and says so
   (`background` in `--json`). Every command takes `--tab N` to act on
   another tab without showing it.
-- Commands that act (open, select, close, click, type, key, scroll,
-  dialog) run one at a time per session, in order: several agents (or
-  parallel calls) never interleave their typing.
+- Commands that act (open, select, close, click, type, key, scroll) run
+  one at a time per session, in order: several agents (or parallel calls)
+  never interleave their typing. `--timeout` counts from when the session
+  gets the command, waiting included; one whose time runs out while it
+  waits its turn exits 4 at once and is never run. `dialog` doesn't wait
+  its turn: it can answer a dialog an `open` is stopped on (`open` returns
+  as soon as the page shows one, with `dialog` in its reply).
+- `close` never asks the person anything: a tab that may have unsaved
+  changes isn't closed (exit 1, says so); `close --force` discards them.
 - A session still starting (opening its tabs after a restart) makes a
   command wait for it, up to `--timeout` (then exit 4, "still starting").
 - In a session's first seconds, Helium's content blocker may abort a

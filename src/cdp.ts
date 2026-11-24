@@ -126,7 +126,12 @@ export class CDP {
     });
   }
 
-  send<T = any>(method: string, params: object = {}, sessionId?: string): Promise<T> {
+  /**
+   * Sends a command. With `secret` (and for every Input.* command: keys and
+   * text typed, by a person or an agent), its parameters are never traced
+   * (TERMIUM_DEBUG): they may carry a password.
+   */
+  send<T = any>(method: string, params: object = {}, sessionId?: string, opts?: { secret?: boolean }): Promise<T> {
     if (this.closed) return Promise.reject(new Error("CDP connection closed"));
     const id = this.nextId++;
     const msg: Record<string, unknown> = { id, method, params };
@@ -134,7 +139,7 @@ export class CDP {
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve, reject, method, sessionId });
       const text = JSON.stringify(msg);
-      this.trace?.("->", text);
+      if (this.trace) this.trace("->", opts?.secret || method.startsWith("Input.") ? JSON.stringify({ ...msg, params: "(not logged)" }) : text);
       this.write(text);
     });
   }
