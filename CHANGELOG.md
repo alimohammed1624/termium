@@ -12,8 +12,8 @@ All notable changes to termium are documented here. The format follows
   keeps its screen and keyboard and shows every action live): `tabs`,
   `open`, `select`, `close`, `snapshot` (accessibility tree with stable
   `TAB:NODE@DOC` element ids), `text`, `click`, `type`, `key`, `scroll`,
-  `shot`, `eval`, `wait`, `dialog`; `--json` output, exit status 0/1/2/3/4
-  (done, failed, usage, no session, timeout).
+  `shot`, `eval`, `wait`, `dialog`; `--json` output, exit status
+  0/1/2/3/4/5 (done, failed, usage, no session, timeout, partly done).
 - `termium start [-s NAME] [URL]` starts a session in the background with
   no terminal (pages opened then are 1280x800; a terminal that attaches
   sizes them, and they keep that size when it detaches).
@@ -51,7 +51,8 @@ All notable changes to termium are documented here. The format follows
   `termium update` from a shell, the next attach offers the same. Attaching to a session of termium 0.2.0 says it runs
   the older version and offers to restart it (its pages close).
 - `termium check-update` prints one line (exit 0 up to date, 100 newer
-  release available, 1 could not check).
+  release available, 1 could not check, 2 bad usage); `termium update`
+  exits 0 updated or up to date, 1 failed, 2 bad usage.
 - `--no-update-check`, `TERMIUM_NO_UPDATE_CHECK=1` or a set `CI`
   variable turn the check and all update news off for that terminal.
 - `termium ls` says which termium a session runs when it isn't this one.

@@ -3,6 +3,7 @@
 
 import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
+import { randomInt } from "node:crypto";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { CDP } from "./cdp";
 import type { InputEvent, KeyEvent, MouseEvent, Mods } from "./input";
@@ -194,8 +195,8 @@ export interface UpdateHooks {
   start(tag: string): void;
   /** Never offer `tag` again: resolves to whether that was saved (for later sessions too). */
   skip(tag: string): Promise<boolean>;
-  /** Restart the session into the termium on disk, reopening its spaces and tabs. */
-  restart(): void;
+  /** Restart the session into the termium on disk, reopening its spaces and tabs (`confirmed`: the person said yes to unsaved changes). */
+  restart(confirmed: boolean): void;
 }
 
 
@@ -620,7 +621,10 @@ export class App {
    * own dialog on screen doesn't count (an agent answering it), the person typing does.
    */
   humanBusy(dialogOf?: Page): boolean {
-    const prompt = this.prompt && !(dialogOf && this.prompt.kind === "dialog" && this.prompt.page === dialogOf);
+    // (That page's own dialog doesn't count, unless the person has started typing an answer into it.)
+    const own = !!dialogOf && this.prompt?.kind === "dialog" && this.prompt.page === dialogOf;
+    const edited = own && !!dialogOf.dialog?.edit && !["", dialogOf.dialog.defaultPrompt].includes(dialogOf.dialog.edit.text);
+    const prompt = this.prompt && (!own || edited);
     return this.attached && (this.mode !== "normal" || !!prompt || Date.now() - this.lastKeyAt < 1500);
   }
 
@@ -843,6 +847,9 @@ export class App {
 
     const page: Page = {
       num: 0, // numbered below, once it's known to stay
+      // Document generations start somewhere random: an id from before a
+      // restart (new server, new pages, same numbers) is never good again.
+      docGen: 1_000_000 + randomInt(999_000_000),
       contextId: targetInfo.browserContextId,
       targetId: targetInfo.targetId,
       sessionId,
@@ -2746,13 +2753,17 @@ export class App {
 
   /** Restarts into the installed termium; first asks if a page may have unsaved changes (as Ctrl+Q does). */
   private async requestRestart(): Promise<void> {
-    const restart = () => this.opts.update?.restart();
     const t = this.ticket();
     const asking = (await Promise.all([...this.pages.values()].map((page) => this.wouldAsk(page)))).filter(Boolean).length;
     // (A restart isn't update news: it goes ahead with update checks off too.)
     if (!t.valid()) return this.opts.log("restart: the terminal that asked left or opened something else meanwhile; dropped");
+    if (asking === 0 && this.downloads.size === 0) return this.opts.update?.restart(false);
+    this.askRestart(asking);
+  }
+
+  /** "Restart anyway?": yes restarts without asking again. */
+  private askRestart(asking: number): void {
     const downloading = this.downloads.size;
-    if (asking === 0 && downloading === 0) return restart();
     const reasons = [
       asking ? `${asking === 1 ? "a page" : `${asking} pages`} may have unsaved changes` : "",
       downloading ? `${downloading === 1 ? "a download is" : `${downloading} downloads are`} in progress` : "",
@@ -2761,11 +2772,29 @@ export class App {
       kind: "confirm",
       tag: "restart",
       message: `${reasons[0]!.toUpperCase()}${reasons.slice(1)}. Restart anyway?`,
-      onYes: restart,
+      onYes: () => this.opts.update?.restart(true),
       edit: new LineEdit("", false),
     };
     this.queueChrome();
   }
+
+  /**
+   * Right before a restart (after the checks that take a while): still fine?
+   * The person may have started typing into a page meanwhile: then they're
+   * asked again, and it's false; false too if they left or opened something.
+   */
+  async restartStillSafe(t: { valid: () => boolean }): Promise<boolean> {
+    const asking = (await Promise.all([...this.pages.values()].map((page) => this.wouldAsk(page)))).filter(Boolean).length;
+    if (!t.valid()) {
+      this.opts.log("restart: the terminal that asked left or opened something else meanwhile; dropped");
+      return false;
+    }
+    if (asking === 0 && this.downloads.size === 0) return true;
+    this.opts.log("restart: a page may have unsaved changes now; asking again");
+    this.askRestart(asking);
+    return false;
+  }
+
 
   /** The notice in the address line: the longest wording that fits `room` columns ("" if none). */
   private notice(room: number): { text: string; style: string } {
@@ -2922,7 +2951,8 @@ export class App {
       void this.requestQuit();
       return;
     }
-    if (ev.type === "key" && ev.event !== "release") this.lastKeyAt = Date.now();
+    // The person's input (keys, pastes, clicks): for a moment after, agents and other clients wait (see humanBusy).
+    if ((ev.type === "key" && ev.event !== "release") || ev.type === "paste" || (ev.type === "mouse" && ev.action === "press")) this.lastKeyAt = Date.now();
     if (!this.ready || this.holds.size > 0) {
       this.early.push(ev);
       return;

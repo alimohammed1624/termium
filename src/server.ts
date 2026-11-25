@@ -506,7 +506,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
             if (!saved) log("update: the cache stayed busy; the skipped version holds for this session only");
             return saved;
           },
-          restart: () => void restartSession(app!.ticket()),
+          restart: (confirmed) => void restartSession(app!.ticket(), confirmed),
         },
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
@@ -575,7 +575,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     try {
       // Shown as soon as it's known; the cache is written after (best effort, still stopped by a detach).
       const r = await checkNow(version, stop.signal);
-      if (!stop.signal.aborted) void recordCheck(cacheFile, r, stop.signal);
+      if (!stop.signal.aborted) {
+        // Still stoppable by a detach while it waits for the cache's lock.
+        recording.add(stop);
+        void recordCheck(cacheFile, r, stop.signal).finally(() => recording.delete(stop));
+      }
       if (stop.signal.aborted) {
         // The terminal went away first: nothing recorded, and the next attach checks again.
         lastCheck = 0;
@@ -602,8 +606,13 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       if (again && client && wantsUpdates) void runCheck();
     }
   };
-  /** The terminal it was for went away (detached, taken over): a check under way stops. */
-  const stopCheck = () => checking?.abort();
+  /** Answers still being written to the cache. */
+  const recording = new Set<AbortController>();
+  /** The terminal it was for went away (detached, taken over): a check under way stops, its cache write too. */
+  const stopCheck = () => {
+    checking?.abort();
+    for (const r of recording) r.abort();
+  };
   setInterval(() => void runCheck(), 60 * 60 * 1000).unref?.();
 
   /** A terminal attached (and the UI is up): what's known at once, then a check if one is due. */
@@ -661,7 +670,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
    */
   let restarting = false;
   /** `t`: the attached terminal that asked; a restart checked for one terminal isn't carried out for another. */
-  const restartSession = async (t: { valid: () => boolean }) => {
+  const restartSession = async (t: { valid: () => boolean }, confirmed = false) => {
     if (!app || shuttingDown || !client || restarting) return;
     // The termium to restart into: the newest known to be installed (the
     // binary this session's update replaced, or the one a newer terminal
@@ -697,6 +706,12 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       return;
     }
     if (!app || shuttingDown || !client) return;
+    // The last look, right before closing everything: a page may have got
+    // unsaved changes while the checks above ran (then the person is asked).
+    restarting = true;
+    const safe = confirmed ? t.valid() : await app.restartStillSafe(t);
+    restarting = false;
+    if (!safe || !app || shuttingDown || !client) return;
     const r: Restore = {
       v: 1,
       at: Date.now(),

@@ -474,6 +474,18 @@ export async function startSession(o: { name: string; url: string | null; launch
     if (o.launchFlags.length) {
       fail(`session "${o.name}" is already running, and ${o.launchFlags.join(", ")} only apply when starting one`, EXIT.failed);
     }
+    // A session of an older termium (or one that won't talk to this one) runs,
+    // but takes no agent commands: said so; it's still "already running".
+    const other = running.unresponsive
+      ? "not responding"
+      : running.refused || running.ctl !== true
+        ? `termium ${running.version ?? "(older)"}, no agent control`
+        : null;
+    if (other) {
+      if (o.url) fail(`session "${o.name}" is already running (${other}): couldn't open ${o.url} in it`, EXIT.failed);
+      console.log(`session "${o.name}" is already running (${other}; pid ${running.pid ?? "?"})`);
+      process.exit(0);
+    }
     if (o.url) {
       const r = await request(o.name, { cmd: "open", url: o.url, newTab: true });
       if (!r.ok) fail(String(r.error), Number(r.code) || EXIT.failed);

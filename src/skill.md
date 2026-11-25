@@ -25,7 +25,9 @@ termium kill agent                  # end a session you started
 - `-s NAME` picks the session for every command (default: `default`, the
   person's usual one). Each session has its own browser profile.
 - `termium start` is safe to repeat: on a running session it says
-  `already running` and exits 0 (a URL opens in a new tab).
+  `already running` and exits 0 (a URL opens in a new tab). A session of
+  an older termium is "already running (… no agent control)": exit 0
+  without a URL, 1 with one (it can't be opened there).
 - The person can watch your session with `termium attach agent` in a
   pane of their own.
 

@@ -637,6 +637,12 @@ class Agent {
     // frame the element is in) would take the click: then nothing is clicked,
     // and the agent is told what covers it.
     const objectId = await this.objectOf(page, node);
+    const disabled = await this.callOn(
+      page,
+      objectId,
+      `function () { return !!(this.disabled || (this.closest && this.closest("fieldset:disabled")) || (this.getAttribute && this.getAttribute("aria-disabled") === "true")); }`,
+    ).catch(() => false);
+    if (disabled) throw new CtlError(`element ${req.ref} is disabled; not clicked`);
     const cover = await this.coverAt(page, node, objectId, x, y);
     if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
     this.step("not clicked");
@@ -694,14 +700,15 @@ class Agent {
       if (hit.backendNodeId === node) return null;
       // A frame that couldn't be looked into (another origin): taken as the element's own.
       if ((hit.nodeName === "IFRAME" || hit.nodeName === "FRAME") && (await this.inFrame(page, objectId, hit.backendNodeId))) return null;
-      // Inside the element (or the element inside it, as a label's text is): it's the element.
+      // The element itself or something inside it (through shadow roots), never
+      // something around it (a card the element lets clicks through to).
       const { object } = await this.cdp.send("DOM.resolveNode", { backendNodeId: hit.backendNodeId }, sid);
       const related = await this.cdp
         .send(
           "Runtime.callFunctionOn",
           {
             objectId,
-            functionDeclaration: "function (o) { return this === o || this.contains(o) || o.contains(this); }",
+            functionDeclaration: "function (o) { for (let n = o; n; n = n.parentNode || n.host) if (n === this) return true; return false; }",
             arguments: [{ objectId: object.objectId }],
             returnByValue: true,
           },
@@ -780,18 +787,20 @@ class Agent {
         // Disabled or read-only, nothing is changed, whatever the element.
         if (this.disabled || (this.closest && this.closest("fieldset:disabled"))) return { field: true, refused: "it's disabled" };
         if (this.tagName === "SELECT") {
-          const opt = [...this.options].find((o) => o.value === text || o.label.trim() === text || o.text.trim() === text);
+          // By what it says first, then by value; chosen as that very option (several may share a value).
+          const opts = [...this.options];
+          const opt = opts.find((o) => o.label.trim() === text || o.text.trim() === text) || opts.find((o) => o.value === text);
           if (!opt) return { select: false, options: [...this.options].map((o) => o.label.trim() || o.value).slice(0, 50) };
           // A disabled option (or one in a disabled group) can't be chosen: the choice stays as it was.
           if (opt.disabled || (opt.parentElement && opt.parentElement.tagName === "OPTGROUP" && opt.parentElement.disabled)) {
             return { field: true, refused: "that option is disabled" };
           }
           this.focus();
-          this.value = opt.value;
+          this.selectedIndex = opt.index;
           this.dispatchEvent(new Event("input", { bubbles: true }));
           this.dispatchEvent(new Event("change", { bubbles: true }));
           // Held to the same rule as text: the choice must stick.
-          if (this.value !== opt.value) return { field: true, mismatch: "changed the choice back (a handler)" };
+          if (this.selectedIndex !== opt.index) return { field: true, mismatch: "changed the choice back (a handler)" };
           return { select: true };
         }
         const doc = this.ownerDocument, win = doc.defaultView;
