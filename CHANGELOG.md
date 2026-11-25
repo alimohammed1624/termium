@@ -6,6 +6,8 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-25
+
 ### Added
 - Agent control: `termium ctl` drives a session from a script or coding
   agent without a terminal and without attaching (the attached terminal
