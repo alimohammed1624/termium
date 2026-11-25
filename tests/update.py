@@ -100,7 +100,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/latest") or self.path.startswith("/slow"):
             HITS.append((time.time(), self.path, self.headers.get("User-Agent")))
-            if self.path.startswith("/slow"):
+            if self.path.startswith("/slowish"):
+                time.sleep(1.5)
+            elif self.path.startswith("/slow"):
                 time.sleep(10)
             tag = self.path.split("/")[2] if self.path.startswith("/latest/") else LATEST["tag"]
             self.send_response(302)
@@ -297,6 +299,23 @@ try:
     shown = cl.wait_for(lambda: badge(cl), 6)
     check(f"with the cache locked, the newer release still shows at once ({time.time() - t0:.1f}s after the page)", shown and time.time() - t0 < 3, cl.line(1))
     holder.wait(); stop("clock")
+
+    # ------------------------------------------------ detaching while the answer waits for the cache's lock: never written after
+    dc_cache = os.path.join(tmp, "st-dcache", "termium", "update-check.json")
+    os.makedirs(os.path.dirname(dc_cache), exist_ok=True)
+    holder = subprocess.Popen(["bun", "-e", f"const b = await import({json.dumps(os.path.join(ROOT, 'src', 'browser.ts'))}); "
+                               f"console.log(b.lockFile({json.dumps(dc_cache + '.lock')})); await Bun.stdin.text(); b.unlockFile({json.dumps(dc_cache + '.lock')});"],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    holder.stdout.readline()
+    dc = term(cur_bin, "-s", "dcache", "--incognito", PAGE, state="st-dcache", env={"TERMIUM_UPDATE_URL": f"{BASE}/slowish"})
+    dc.wait_for(lambda: badge(dc), 30, 0.03)
+    dc.key("ctrl+b"); dc.key("d"); exit_code(dc, 5)
+    time.sleep(0.1)
+    holder.stdin.close(); holder.wait(timeout=10)
+    time.sleep(2)
+    check("detached while the answer waited for the cache's lock: not written once the lock frees",
+          (cache("st-dcache") or {}).get("latest") is None, cache("st-dcache"))
+    stop("dcache")
 
     # ------------------------------------------------ detaching stops a check under way: nothing is written after
     ab = term(cur_bin, "-s", "abort", "--incognito", PAGE, state="st-abort", env={"TERMIUM_UPDATE_URL": f"{BASE}/slow"})
@@ -564,6 +583,11 @@ try:
     u.key("ctrl+b"); u.key("shift+n"); time.sleep(1.5)
     u.type(f"{BASE}/fixtures/anim.html"); u.key("enter")
     check("u: the notice appears", u.wait_for(lambda: notice(u), 40), u.line(2))
+    uctl = lambda *a: subprocess.run([cur_bin, "ctl", "-s", "upd", *a], env=dict(os.environ, **env_for("st-upd")), capture_output=True, text=True,
+                                     stdin=subprocess.DEVNULL, timeout=60)
+    # An element id taken before the restart (on the test page's tab).
+    ptab = next((t["id"] for t in json.loads(uctl("tabs", "--json").stdout or "[]") if t["url"].endswith("/page.html")), None)
+    pre_id = (re.search(r"\[(\d+:\d+@\d+)\]", uctl("snapshot", str(ptab)).stdout) or [None, None])[1]
     old_server = server_pid("upd")
     open_box(u); u.key("u")
     check("u: the update downloads, verifies and installs", u.wait_for(lambda: f"updated to termium {NEXT}" in u.text(), 60), u.text()[-600:])
@@ -591,6 +615,11 @@ try:
     urls = lambda: [p["url"] for p in json.loads(subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), prof3, "1"], capture_output=True, text=True, timeout=20).stdout or "[]")]
     check("r: every page reopened at its address", u.wait_for(lambda: sorted(x.split("/")[-1] for x in urls() if "fixtures" in x) == ["anim.html", "frame.html", "page.html", "reader.html"], 20), urls())
     check("r: no notice and no badge (it's up to date now)", not notice(u) and "↑" not in u.line(1) and "↻" not in u.line(1), u.line(1))
+    ptab2 = next((t["id"] for t in json.loads(uctl("tabs", "--json").stdout or "[]") if t["url"].endswith("/page.html")), None)
+    uctl("snapshot", str(ptab2))
+    r = uctl("click", pre_id or "1:1@1")
+    check("r: an element id from before the restart is stale, even after a new snapshot",
+          pre_id and r.returncode == 1 and ("stale" in r.stderr or "no tab" in r.stderr), (pre_id, r.returncode, r.stderr))
     check("r: the restore file is gone", not os.path.exists(os.path.join(sockdir, "upd.restore")))
     stop("upd")
 
@@ -807,6 +836,27 @@ try:
                          capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30).stdout
     check("...and it's what the page gets", '"draft"' in ans, ans)
     stop("pdraft")
+
+    # ------------------------------------------------ typing into a page while a restart's checks run: asked again, not restarted
+    rd = term(os.path.join(inst_o, "termium"), "-s", "rdraft", "--incognito", PAGE, state="st-rdraft", env={"TERMIUM_TEST_VERSION_DELAY_MS": "3000"})
+    rd.wait_text("termium test page", 40); rd.key("ctrl+b"); rd.key("d"); exit_code(rd)
+    rn = term(os.path.join(inst_n, "termium"), "attach", "rdraft", state="st-rdraft")
+    rn.wait_text("termium test page", 20); time.sleep(5); rn.key("ctrl+b"); rn.key("d"); exit_code(rn)
+    rd = term(os.path.join(inst_o, "termium"), "attach", "rdraft", state="st-rdraft")
+    rd.wait_for(lambda: f"termium {NEXT} is installed" in rd.line(2), 30)
+    rd.wait_idle(0.8, 10)
+    rctl = lambda *a: subprocess.run([cur_bin, "ctl", "-s", "rdraft", *a], env=dict(os.environ, **env_for("st-rdraft")), capture_output=True, text=True,
+                                     stdin=subprocess.DEVNULL, timeout=60)
+    gb = json.loads(rctl("eval", "(() => { const r = document.getElementById('guard').getBoundingClientRect(); return [r.x + 10, r.y + r.height / 2]; })()", "--json").stdout or "{}").get("value")
+    rd_pid = server_pid("rdraft")
+    open_box(rd); rd.key("r"); time.sleep(0.3)
+    rd.click(220 + int(gb[0]), 40 + int(gb[1])); time.sleep(0.2); rd.type("unsaved")
+    check("typing into a page while the restart checks the new binary: asked again, not restarted",
+          rd.wait_for(lambda: "Restart anyway?" in rd.line(2), 15) and server_pid("rdraft") == rd_pid, (rd.line(2), server_pid("rdraft"), rd_pid))
+    rd.key("escape"); time.sleep(1)
+    gv = json.loads(rctl("eval", "document.getElementById('guard').value", "--json").stdout or "{}").get("value")
+    check("...and what they typed is still there", gv == "unsaved" and server_pid("rdraft") == rd_pid, gv)
+    stop("rdraft")
 
     # ------------------------------------------------ a relative --browser survives a restart from another directory
     helium = shutil.which("helium-browser") or shutil.which("helium") or shutil.which("google-chrome")
@@ -1078,7 +1128,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "nv", "clock", "pdraft", "optr", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "nv", "clock", "pdraft", "optr", "rdraft", "dcache", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)

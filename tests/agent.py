@@ -436,6 +436,29 @@ try:
     if os.path.exists(sp2):
         os.remove(sp2)
 
+    # --- clicks hit the element itself (never a card around it); disabled ones aren't clicked
+    snap = ctl("snapshot").stdout
+    r = ctl("click", ref(snap, "button", "Card button"))
+    r2 = ctl("click", ref(snap, "button", "Passthrough button"))
+    check("click a disabled button inside a clickable card: exit 1 (disabled), the card isn't clicked",
+          r.returncode == 1 and "disabled" in r.stderr and page_value("window.cardClicked") is None, (r.returncode, r.stderr))
+    check("click a button that lets clicks through to its card: exit 1 (covered by the card), not clicked",
+          r2.returncode == 1 and "div#card2" in r2.stderr and page_value("window.card2Clicked") is None, (r2.returncode, r2.stderr))
+    # Options sharing a value: the one named is chosen.
+    r = ctl("type", ref(snap, "combobox", "Direction"), "West")
+    check("type into a select whose options share a value: the one named is chosen",
+          r.returncode == 0 and page_value("(() => { const s = document.getElementById('dup'); return [s.selectedIndex, s.options[s.selectedIndex].label]; })()") == [1, "West"],
+          (r.returncode, r.stderr))
+    # The person typing an answer into a prompt(): an agent's dialog accept waits for them.
+    ctl("eval", "setTimeout(() => { window.pans = prompt('Your answer?'); }, 0); 1")
+    h.wait_for(lambda: "Your answer?" in h.line(2), 10)
+    h.type("my draft"); time.sleep(2)
+    r = ctl("dialog", "accept", "--timeout", "1")
+    check("dialog accept while the person has typed into the prompt: exit 4, left to them", r.returncode == 4 and "my draft" in h.line(2), (r.returncode, r.stderr, h.line(2)))
+    h.key("enter"); time.sleep(0.5)
+    check("...and their answer is what the page gets", page_value("window.pans") == "my draft", page_value("window.pans"))
+    time.sleep(1.6)
+
     # --- a queued command whose time runs out is answered at once, and never runs
     hang = socket.socket(); hang.bind(("127.0.0.1", 0)); hang.listen(8)  # accepts nothing: a page that never loads
     HANG = f"http://127.0.0.1:{hang.getsockname()[1]}/never"
@@ -508,6 +531,22 @@ try:
           (page_value("document.getElementById('city').value"), [(t["url"][-12:], t["active"]) for t in ctl_json("tabs")]))
     for t in ctl_json("tabs"):
         if "typing=1" in t["url"]:
+            ctl("close", str(t["id"]), "--force")
+
+    # --- a paste counts as the person's input too
+    ctl("type", ref(ctl("snapshot").stdout, "textbox", "City"), "")
+    h.click(220 + int(cb[0]), 40 + int(cb[1])); time.sleep(1.6)
+    h.paste("PASTED")
+    creator = subprocess.Popen(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "create", f"http://127.0.0.1:{port}", f"{BASE}/page.html?pasting=1"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.4)
+    h.type("X")
+    creator.communicate(timeout=30); time.sleep(0.8)
+    check("a tab another client opens just after the person pasted: behind, their next key lands where they paste",
+          page_value("document.getElementById('city').value") == "PASTEDX" and [t["active"] for t in ctl_json("tabs")][0],
+          (page_value("document.getElementById('city').value"), [(t["url"][-12:], t["active"]) for t in ctl_json("tabs")]))
+    for t in ctl_json("tabs"):
+        if "pasting=1" in t["url"]:
             ctl("close", str(t["id"]), "--force")
 
     # --- screenshots: private files; tall pages whole (in tiles), or said to be cut
