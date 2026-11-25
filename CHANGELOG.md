@@ -11,7 +11,7 @@ All notable changes to termium are documented here. The format follows
   agent without a terminal and without attaching (the attached terminal
   keeps its screen and keyboard and shows every action live): `tabs`,
   `open`, `select`, `close`, `snapshot` (accessibility tree with stable
-  `TAB:NODE` element ids), `text`, `click`, `type`, `key`, `scroll`,
+  `TAB:NODE@DOC` element ids), `text`, `click`, `type`, `key`, `scroll`,
   `shot`, `eval`, `wait`, `dialog`; `--json` output, exit status 0/1/2/3/4
   (done, failed, usage, no session, timeout).
 - `termium start [-s NAME] [URL]` starts a session in the background with

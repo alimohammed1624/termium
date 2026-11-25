@@ -4,9 +4,10 @@
 // its screen and keyboard and shows what the agent does, as it happens.
 //
 // Pages are named by their number (a "tab" to the agent: one pane of a
-// termium tab), elements by "TAB:NODE", where NODE is the element's DOM
-// backend node id: stable for as long as the element exists, with no
-// state kept in the page.
+// termium tab), elements by "TAB:NODE@DOC": NODE is the element's DOM
+// backend node id, DOC the generation of the document it's in (bumped by
+// every new document in the tab), so an id never names an element of
+// another document, even where the browser reuses node numbers.
 
 import type { AgentTab, App, Page } from "./app";
 import type { DevToolsEndpoint } from "./browser";
@@ -34,7 +35,7 @@ export interface CtlRequest {
   cmd: string;
   /** Page number to act on; the focused page if absent. */
   tab?: number;
-  /** Element id "TAB:NODE" (from snapshot). */
+  /** Element id "TAB:NODE@DOC" (from snapshot). */
   ref?: string;
   url?: string;
   newTab?: boolean;
@@ -62,6 +63,12 @@ export interface CtlRequest {
 interface Ctx {
   devtools: DevToolsEndpoint | null;
   log: (msg: string) => void;
+  /**
+   * Given, once an acting command is answered, what of it the browser still
+   * has under way (input dispatched that the page hasn't finished handling):
+   * the session holds back the next acting command until it settles (bounded).
+   */
+  hold?: (underWay: Promise<unknown>) => void;
 }
 
 const DEFAULT_TIMEOUT = 30_000;
@@ -75,11 +82,19 @@ const DEFAULT_TIMEOUT = 30_000;
 export async function runCtl(app: App, cdp: CDP, req: CtlRequest, ctx: Ctx): Promise<unknown> {
   if (!req || typeof req.cmd !== "string") throw new CtlError("bad request", EXIT.usage);
   const timeoutMs = clampTimeout(req.timeoutMs);
-  const agent = new Agent(app, cdp, ctx, Date.now() + timeoutMs);
-  if (ACTING.has(req.cmd)) return agent.run(req, timeoutMs);
+  const acting = ACTING.has(req.cmd);
+  const agent = new Agent(app, cdp, ctx, Date.now() + timeoutMs, acting);
+  if (acting) {
+    try {
+      return await agent.run(req, timeoutMs);
+    } finally {
+      ctx.hold?.(agent.underWay());
+    }
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new CtlError(`${req.cmd}: timed out after ${timeoutMs / 1000}s`, EXIT.timeout)), timeoutMs);
+    // (A little after the command's own deadline, so its own account of a timeout comes first.)
+    timer = setTimeout(() => reject(new CtlError(`${req.cmd}: timed out after ${timeoutMs / 1000}s`, EXIT.timeout)), timeoutMs + 250);
   });
   try {
     return await Promise.race([agent.run(req, timeoutMs), timeout]);
@@ -94,13 +109,68 @@ function clampTimeout(ms: unknown): number {
 }
 
 class Agent {
+  /** DevTools, for this command: an acting one's every call ends at its deadline (see send). */
+  private cdp: Pick<CDP, "send">;
+  /** Calls the browser hasn't answered yet. */
+  private pending = new Set<Promise<unknown>>();
+  /** What input has gone to the page so far (for an accurate account of a timeout). */
+  private dispatched: string | null = null;
+
   constructor(
     private app: App,
-    private cdp: CDP,
+    private raw: CDP,
     private ctx: Ctx,
     /** When the command's time is up (checked before each step that changes anything). */
     private deadline: number,
-  ) {}
+    private acting = false,
+  ) {
+    this.cdp = { send: (method: string, params?: object, sessionId?: string, opts?: { secret?: boolean }) => this.send(method, params, sessionId, opts) };
+  }
+
+  /**
+   * An acting command's DevTools calls never wait past its deadline: a page
+   * slow to handle input (a heavy click handler) makes the command end then,
+   * saying what had been dispatched; the call itself is left to finish (and
+   * the session holds the next acting command until it has, see Ctx.hold).
+   */
+  private send(method: string, params: object = {}, sessionId?: string, opts?: { secret?: boolean; input?: string }): Promise<any> {
+    const call = this.raw.send(method, params, sessionId, opts);
+    if (!this.acting) return call;
+    this.pending.add(call);
+    call.then(
+      () => this.pending.delete(call),
+      () => this.pending.delete(call),
+    );
+    const what =
+      opts?.input ??
+      (method === "Input.dispatchMouseEvent" && (params as any).type === "mousePressed" ? "the click"
+        : method === "Input.dispatchKeyEvent" ? "keys"
+        : method === "Input.insertText" ? "the text"
+        : method === "Input.dispatchMouseEvent" && (params as any).type === "mouseWheel" ? "the scroll"
+        : null);
+    if (what) this.dispatched ??= what;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new CtlError(
+              this.dispatched
+                ? `timed out: ${this.dispatched} went to the page, but it didn't finish handling it in time`
+                : "timed out; nothing was done",
+              EXIT.timeout,
+            ),
+          ),
+        Math.max(0, this.deadline - Date.now()),
+      );
+    });
+    return Promise.race([call, late]).finally(() => clearTimeout(timer));
+  }
+
+  /** What the browser still has under way (settled or not), for the session to wait on. */
+  underWay(): Promise<unknown> {
+    return Promise.allSettled([...this.pending]);
+  }
 
   /**
    * Waits for an input action, unless the page opens a dialog meanwhile (an
@@ -120,14 +190,19 @@ class Agent {
     try {
       const done = action.then(() => null);
       done.catch(() => {}); // (settled after a dialog: nobody waits on it then)
-      return await Promise.race([done, dialog]);
+      const d = await Promise.race([done, dialog]);
+      // Held by a dialog, the browser finishes the action only once it's answered:
+      // the next command mustn't wait for that (it may be the one answering).
+      if (d) this.pending.clear();
+      return d;
     } finally {
       stop = true;
     }
   }
 
-  /** Element ids the snapshot being made hands out. */
+  /** Element ids the snapshot being made hands out, and the document generation they're for. */
   private issued = new Set<number>();
+  private gen = 0;
 
   /** Before a step that changes something: past the deadline, stop here, saying what was (not) done. */
   private step(soFar = "nothing was done"): void {
@@ -244,14 +319,15 @@ class Agent {
 
   /** The element an id names: its page and backend node id. */
   private element(ref: string | undefined): { page: Page; node: number } {
-    const m = /^(\d+):(\d+)$/.exec(ref ?? "");
-    if (!m) throw new CtlError(`bad element id "${ref ?? ""}": ids look like 3:142 (take them from \`termium ctl snapshot\`)`, EXIT.usage);
+    const m = /^(\d+):(\d+)@(\d+)$/.exec(ref ?? "");
+    if (!m) throw new CtlError(`bad element id "${ref ?? ""}": ids look like 3:142@2 (take them from \`termium ctl snapshot\`)`, EXIT.usage);
     const page = this.page(Number(m[1]));
     const node = Number(m[2]);
-    // Only ids a snapshot of the page's current document gave: node numbers are
-    // reused by a new document, where the same id would mean another element.
+    // Only for the document it was given in (its generation is in the id
+    // itself): node numbers are reused by a new document, where the same
+    // number would be another element. And only ids a snapshot gave.
     const ids = page.agentIds;
-    if (!ids || ids.gen !== (page.docGen ?? 0) || !ids.nodes.has(node)) {
+    if (Number(m[3]) !== (page.docGen ?? 0) || !ids || ids.gen !== Number(m[3]) || !ids.nodes.has(node)) {
       throw new CtlError(`stale id ${ref}: the page changed since that snapshot; take a new snapshot`);
     }
     return { page, node };
@@ -278,7 +354,7 @@ class Agent {
       this.app.agentNavigate(page, url);
       this.note(`going to ${url}`);
     }
-    if (req.wait !== false) await this.waitLoad(page, Date.now() + timeoutMs - 500, true);
+    if (req.wait !== false) await this.waitLoad(page, this.deadline, true);
     const t: Record<string, unknown> = { ...this.describe(page) };
     if (held) t.background = "the person at the terminal was busy: opened in the background, not shown";
     // The page stopped on a dialog (alert in its load): said at once; the page can't be asked anything until it's answered.
@@ -398,7 +474,7 @@ class Agent {
   private async snapshot(page: Page): Promise<unknown> {
     const sid = page.sessionId;
     const lines: string[] = [];
-    const gen = page.docGen ?? 0;
+    const gen = (this.gen = page.docGen ?? 0);
     const tree = await this.cdp.send("Accessibility.getFullAXTree", {}, sid);
     this.issued = new Set();
     await this.render(page, tree.nodes ?? [], lines, 0, 0);
@@ -436,7 +512,7 @@ class Agent {
       let line = `${pad}- ${role}`;
       if (name) line += ` "${clip(name, 200)}"`;
       if (n.backendDOMNodeId) {
-        line += ` [${page.num}:${n.backendDOMNodeId}]`;
+        line += ` [${page.num}:${n.backendDOMNodeId}@${this.gen}]`;
         this.issued.add(n.backendDOMNodeId);
       }
       const value = n.value?.value;
@@ -502,12 +578,13 @@ class Agent {
   }
 
   /** Calls `fn` on an element; its arguments (text to type, say) are never traced. */
-  private async callOn(page: Page, objectId: string, fn: string, args: unknown[] = []): Promise<any> {
-    const r = await this.cdp.send(
+  /** `input`: what this call does to the page (typing, a submit), for the account of a timeout. */
+  private async callOn(page: Page, objectId: string, fn: string, args: unknown[] = [], input?: string): Promise<any> {
+    const r = await (this.cdp.send as (m: string, p: object, s: string, o: object) => Promise<any>)(
       "Runtime.callFunctionOn",
       { objectId, functionDeclaration: fn, arguments: args.map((value) => ({ value })), returnByValue: true, awaitPromise: true },
       page.sessionId,
-      { secret: args.length > 0 },
+      { secret: args.length > 0, input },
     );
     if (r?.exceptionDetails) throw new CtlError(exceptionText(r.exceptionDetails));
     return r?.result?.value;
@@ -525,7 +602,16 @@ class Agent {
     await send({ type: "mouseMoved", x, y, button: "none", buttons: 0 });
     for (let i = 1; i <= count; i++) {
       this.step(i === 1 ? "not clicked (the page was slow to take the pointer)" : `clicked ${i - 1} of ${count} times`);
-      await send({ type: "mousePressed", x, y, button, buttons: bit, clickCount: i });
+      try {
+        await send({ type: "mousePressed", x, y, button, buttons: bit, clickCount: i });
+      } catch (e) {
+        // Timed out while the page handled the press: its release still goes (never a button left
+        // held), without waiting on it (the session waits on it before the next command).
+        const release = this.raw.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: i }, sid);
+        this.pending.add(release);
+        release.then(() => this.pending.delete(release), () => this.pending.delete(release));
+        throw e;
+      }
       await send({ type: "mouseReleased", x, y, button, buttons: 0, clickCount: i });
     }
   }
@@ -629,7 +715,7 @@ class Agent {
           {
             objectId: hitObject,
             functionDeclaration: `function () {
-              const n = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("title"))) || (this.innerText || "").trim().replace(/\s+/g, " ");
+              const n = (this.getAttribute && (this.getAttribute("aria-label") || this.getAttribute("title"))) || (this.innerText || "").trim().replace(/\\s+/g, " ");
               return this.tagName.toLowerCase() + (this.id ? "#" + this.id : "") + (n ? ' "' + n.slice(0, 40) + '"' : "");
             }`,
             returnByValue: true,
@@ -750,7 +836,7 @@ class Agent {
         // What it holds now must be what was asked for (a maxlength, a mask or a
         // handler may have cut or changed it): said exactly (never echoing a secret).
         const want = append ? before + text : text;
-        const norm = (v) => (field ? v : v.replace(/\s+$/, ""));
+        const norm = (v) => (field ? v : v.replace(/\\s+$/, ""));
         if (norm(after) !== norm(want)) {
           const how = after === before ? "rejected it (unchanged)"
             : want.startsWith(after) ? \`cut it to \${after.length} of \${want.length} characters\${field && this.maxLength > 0 ? " (maxlength " + this.maxLength + ")" : ""}\`
@@ -760,6 +846,7 @@ class Agent {
         return { field: true, secret, done: true };
       }`,
       [!!req.append, text],
+      "the text",
     ).then((v) => (kind = v)));
     if (typingDialog) {
       this.note(`tab ${page.num} shows a ${typingDialog.type} dialog`);
@@ -832,6 +919,8 @@ class Agent {
         }
         return { enter: true };
       }`,
+      [],
+      "the submit",
     ).then((v) => (how = v)));
     if (dialog) return dialog;
     if (how?.moved) throw new CtlError(`${done}, but the page moved focus to ${how.moved}; not submitted`);
@@ -968,7 +1057,7 @@ class Agent {
   private async wait(req: CtlRequest, timeoutMs: number): Promise<unknown> {
     const page = this.page(req.tab);
     const what = req.what ?? "load";
-    const deadline = Date.now() + timeoutMs - 300;
+    const deadline = Date.now() + timeoutMs;
     const t0 = Date.now();
     if (what === "load") {
       await this.waitLoad(page, deadline, false);

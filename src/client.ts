@@ -213,21 +213,65 @@ export async function runClient(o: ClientOptions): Promise<void> {
             `restarting closes them (logins stay in the profile).\n` +
             `Restart it now into termium ${o.version}? [y/N] `,
         );
-        // One key, read raw: y is yes; anything else (Enter, n, Ctrl+D...) is no; Ctrl+C leaves.
+        // A deliberate answer only: "y" or "yes" typed, then Enter. Anything
+        // pasted (bracketed, or several characters at once that aren't just
+        // "y" and Enter) is ignored; Enter alone, n, Ctrl+D are no; Ctrl+C leaves.
         const answer = await new Promise<string>((resolve) => {
           process.stdin.setRawMode(true);
-          const onData = (b: Buffer) => {
+          process.stdout.write("\x1b[?2004h"); // pastes come marked
+          let line = "";
+          let pasting = false;
+          const done = (yes: boolean) => {
             process.stdin.off("data", onData);
             process.stdin.pause();
+            process.stdout.write("\x1b[?2004l");
             process.stdin.setRawMode(false);
-            const c = b.toString();
+            process.stdout.write(yes ? "\n" : line ? "\n" : "n\n");
+            resolve(yes ? "y" : "n");
+          };
+          const onData = (b: Buffer) => {
+            let c = b.toString();
+            // A bracketed paste (or what's left of one across chunks) never counts.
+            for (;;) {
+              if (pasting) {
+                const end = c.indexOf("\x1b[201~");
+                if (end < 0) return;
+                pasting = false;
+                c = c.slice(end + 6);
+              }
+              const start = c.indexOf("\x1b[200~");
+              if (start < 0) break;
+              pasting = true;
+              c = c.slice(0, start) + c.slice(start + 6);
+            }
+            if (!c) return;
             if (c.startsWith("\x03")) {
-              process.stdout.write("\n");
+              process.stdout.write("\x1b[?2004l\n");
               process.exit(130);
             }
-            const yes = /^[yY]/.test(c);
-            process.stdout.write(yes ? "y\n" : "n\n");
-            resolve(yes ? "y" : "n");
+            if (c === "\x04") return done(false);
+            if (c.length > 1) {
+              // Several characters at once: only "y"/"yes" with Enter, typed as one burst, is an answer.
+              const m = c.match(/^(y|yes|n|no)[\r\n]$/i);
+              if (m && !line) {
+                process.stdout.write(m[1]!);
+                line = m[1]!;
+                return done(/^y/i.test(m[1]!));
+              }
+              return;
+            }
+            if (c === "\r" || c === "\n") return done(/^(y|yes)$/i.test(line));
+            if (c === "\x7f" || c === "\b") {
+              if (line) {
+                line = line.slice(0, -1);
+                process.stdout.write("\b \b");
+              }
+              return;
+            }
+            if (c >= " " && line.length < 8) {
+              line += c;
+              process.stdout.write(c);
+            }
           };
           process.stdin.on("data", onData);
           process.stdin.resume();

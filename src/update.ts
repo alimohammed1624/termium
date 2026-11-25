@@ -644,6 +644,8 @@ export async function installRelease(
   exe: string,
   tag: string,
   check: (staged: string, tag: string) => Promise<void> | void = checkRuns,
+  /** Told whether this call changed the binary (another update may have got there first). */
+  outcome: { changed?: boolean } = {},
 ): Promise<string> {
   const release = await waitLock(join(dirname(exe), ".termium-update.lock"));
   try {
@@ -653,8 +655,10 @@ export async function installRelease(
       const now = await binaryVersionAsync([exe]);
       if (now && !isNewer(tag, now)) throw new AlreadyInstalled(now);
     });
+    outcome.changed = true;
     return displayVersion(tag);
   } catch (e) {
+    outcome.changed = false;
     if (e instanceof AlreadyInstalled) return e.version;
     throw e;
   } finally {
@@ -667,7 +671,12 @@ export async function installRelease(
  * running binary (unless that's already that release or newer). `step` is
  * told each step as it starts. Returns the version installed afterwards.
  */
-export async function selfUpdate(tag: string, version: string, step: (s: Step) => void = () => {}): Promise<string> {
+export async function selfUpdate(
+  tag: string,
+  version: string,
+  step: (s: Step) => void = () => {},
+  outcome: { changed?: boolean } = {},
+): Promise<string> {
   const blocker = selfUpdateBlocker();
   if (blocker) throw new Error(blocker);
   const target = assetTarget()!;
@@ -695,7 +704,7 @@ export async function selfUpdate(tag: string, version: string, step: (s: Step) =
   const problem = nativeProblem(bin, process.platform, process.arch, refSize);
   if (problem) throw new Error(`${asset} doesn't hold a termium binary for this machine (${problem}); nothing was changed`);
   step("installing");
-  return installRelease(bin, exe, tag);
+  return installRelease(bin, exe, tag, checkRuns, outcome);
 }
 
 export function stepLabel(s: Step): string {

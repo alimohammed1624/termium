@@ -898,7 +898,10 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       const a = app;
       const d = cdp;
       // What's left of its time when its turn comes (the agent's timeout covers the wait too).
-      const run = () => runCtl(a, d, { ...req, timeoutMs: deadline - Date.now() }, { devtools: browser?.devtools ?? null, log });
+      // What an answered command left under way in the browser (see Ctx.hold).
+      let underWay: Promise<unknown> = Promise.resolve();
+      const run = () =>
+        runCtl(a, d, { ...req, timeoutMs: deadline - Date.now() }, { devtools: browser?.devtools ?? null, log, hold: (p) => (underWay = p) });
       let result: unknown;
       if (ACTING.has(String(req?.cmd))) {
         // Its time covers waiting for its turn: one whose time runs out first
@@ -912,7 +915,12 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           started = true;
           return run();
         });
-        ctlQueue = turn.catch(() => {});
+        // The next acting command waits until what this one dispatched has been
+        // handled by the page (so they never interleave), but never more than 10 s.
+        ctlQueue = turn.then(
+          () => Promise.race([underWay, Bun.sleep(10_000)]),
+          () => Promise.race([underWay, Bun.sleep(10_000)]),
+        );
         let lapseTimer: ReturnType<typeof setTimeout> | undefined;
         const lapse = new Promise<typeof SKIPPED>((res) => {
           lapseTimer = setTimeout(() => !started && res(SKIPPED), Math.max(0, deadline - Date.now()));

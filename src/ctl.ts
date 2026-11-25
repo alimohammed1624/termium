@@ -4,7 +4,8 @@
 // (The server side is src/agent.ts.)
 
 import { spawn } from "node:child_process";
-import { chmodSync, closeSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { EXIT, type CtlRequest } from "./agent";
@@ -19,7 +20,7 @@ Drives a running session without attaching to it (no terminal needed); a
 terminal attached to the session shows every action as it happens.
 
 Commands (TAB is a number from \`tabs\`; the focused tab if left out.
-ID is an element id from \`snapshot\`, like 3:142):
+ID is an element id from \`snapshot\`, like 3:142@2):
   tabs                          list tabs: id, title, address, space, tab, pane; * = focused
   open URL [--new-tab] [--background] [--no-wait]
                                 go to URL in the focused tab (or --tab N), or in a new tab;
@@ -230,7 +231,7 @@ export function parseCtl(argv: string[]): Parsed {
       req.keys = pos.splice(0);
       break;
     case "scroll": {
-      if (pos.length && /^\d+:\d+$/.test(pos[0]!)) req.ref = pos.shift();
+      if (pos.length && /^\d+:\d+@\d+$/.test(pos[0]!)) req.ref = pos.shift();
       const dir = pos.shift() ?? "down";
       if (!["up", "down", "left", "right"].includes(dir)) fail(`scroll goes up, down, left or right, not "${dir}"`);
       req.direction = dir as CtlRequest["direction"];
@@ -339,11 +340,22 @@ export async function runCtl(argv: string[]): Promise<never> {
   }
   const r = reply.result;
   if (p.req.cmd === "shot") {
-    const path = resolve(p.out ?? join(tmpdir(), `termium-shot-${r.tab}-${Date.now()}.png`));
+    // Readable only by you (a page can show anything), whatever the umask. The default
+    // file has an unguessable name and is created afresh, never through a planted link.
+    const path = resolve(p.out ?? join(tmpdir(), `termium-shot-${r.tab}-${randomBytes(8).toString("hex")}.png`));
     try {
-      // Readable only by you (a page can show anything), whatever the umask; an existing file too.
-      writeFileSync(path, Buffer.from(String(r.png), "base64"), { mode: 0o600 });
-      chmodSync(path, 0o600);
+      const png = Buffer.from(String(r.png), "base64");
+      if (p.out) {
+        writeFileSync(path, png, { mode: 0o600 });
+        chmodSync(path, 0o600);
+      } else {
+        const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+        try {
+          for (let off = 0; off < png.length; ) off += writeSync(fd, png, off);
+        } finally {
+          closeSync(fd);
+        }
+      }
     } catch (e: any) {
       fail(`can't write ${path}: ${e?.message ?? e}`, EXIT.failed);
     }

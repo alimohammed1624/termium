@@ -2749,7 +2749,8 @@ export class App {
     const restart = () => this.opts.update?.restart();
     const t = this.ticket();
     const asking = (await Promise.all([...this.pages.values()].map((page) => this.wouldAsk(page)))).filter(Boolean).length;
-    if (!t.valid() || !this.updatesShown) return this.opts.log("restart: asked from a terminal that's gone; dropped");
+    // (A restart isn't update news: it goes ahead with update checks off too.)
+    if (!t.valid()) return this.opts.log("restart: the terminal that asked left or opened something else meanwhile; dropped");
     const downloading = this.downloads.size;
     if (asking === 0 && downloading === 0) return restart();
     const reasons = [

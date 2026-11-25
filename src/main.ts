@@ -243,15 +243,20 @@ async function update(): Promise<never> {
   }
   console.log(`Updating termium ${VERSION} → ${next}`);
   let installed: string;
+  const outcome: { changed?: boolean } = {};
   try {
-    installed = await selfUpdate(r.tag, VERSION, (step) => console.log(`  ${stepLabel(step)}`));
+    installed = await selfUpdate(r.tag, VERSION, (step) => console.log(`  ${stepLabel(step)}`), outcome);
   } catch (e: any) {
     console.error(`termium: update failed: ${e?.message ?? e}`);
     console.error(`Update by hand:\n  ${UPGRADE_CMD}`);
     process.exit(1);
   }
   // Another update may have got there first (with this release or a newer one).
-  console.log(installed === next ? `Updated to termium ${next}.` : `termium ${installed} is already installed; nothing was changed.`);
+  console.log(
+    outcome.changed
+      ? `Updated to termium ${next}.`
+      : `termium ${installed} was already installed by another update; nothing was changed.`,
+  );
   const old = (await runningSessions()).filter((s) => s.version !== installed);
   if (old.length) {
     const names = old.map((s) => s.name).join(", ");

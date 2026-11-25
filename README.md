@@ -144,9 +144,9 @@ stays in the background. Agents' acting commands run one at a time.
 termium start -s agent [url]   # start a session without a terminal (returns once it's up)
 termium attach agent           # watch it (in a pane of your own)
 termium ctl -s agent open https://example.com --new-tab
-termium ctl -s agent snapshot  # accessibility tree, elements with ids like [3:142]
-termium ctl -s agent click 3:142
-termium ctl -s agent type 3:57 "hello" --submit
+termium ctl -s agent snapshot  # accessibility tree, elements with ids like [3:142@2]
+termium ctl -s agent click 3:142@2
+termium ctl -s agent type 3:57@2 "hello" --submit
 termium ctl -s agent wait text "Thanks"
 termium ctl -s agent text      # the page's text; also: shot, eval, key, scroll, tabs...
 termium devtools agent         # http://127.0.0.1:PORT for Puppeteer, Playwright, MCP
@@ -157,9 +157,10 @@ termium --skill                # a SKILL.md that teaches an agent all this
   needed) and acts through the session's own DevTools connection:
   `tabs`, `open`, `select`, `close`, `snapshot`, `text`, `click`, `type`,
   `key`, `scroll`, `shot`, `eval`, `wait`, `dialog` (`termium ctl --help`).
-  Tabs are numbered (one per pane); element ids are `TAB:NODE`, stable
-  while the element exists. `--json` for machine-readable output; exit
-  status 0 done, 1 failed, 2 usage, 3 no such session, 4 timed out.
+  Tabs are numbered (one per pane); element ids are `TAB:NODE@DOC`, good
+  while the element exists in that document (a new document makes them
+  stale). `--json` for machine-readable output; exit status 0 done, 1
+  failed, 2 usage, 3 no such session, 4 timed out, 5 partly done.
 - **`termium start`** starts a session in the background with no
   terminal (pages opened then are 1280x800; a terminal that attaches sizes
   them to its panes, and they keep that size when it detaches). On a

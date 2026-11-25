@@ -33,18 +33,19 @@ termium kill agent                  # end a session you started
 
 ```sh
 termium ctl -s agent open https://example.com/login --new-tab   # waits for the load
-termium ctl -s agent snapshot              # accessibility tree, ids like [3:142]
-termium ctl -s agent type 3:57 "ada@example.com"
-termium ctl -s agent type 3:58 "hunter2" --submit                # Enter after
+termium ctl -s agent snapshot              # accessibility tree, ids like [3:142@2]
+termium ctl -s agent type 3:57@2 "ada@example.com"
+termium ctl -s agent type 3:58@2 "hunter2" --submit                # Enter after
 termium ctl -s agent wait text "Welcome"   # or: wait selector CSS | wait url PART | wait load
 termium ctl -s agent text                  # read the result
 termium ctl -s agent snapshot              # ids for the new page
 ```
 
-Snapshot lines look like `- button "Sign in" [3:58] disabled`. An id is
-`TAB:NODE`: it names its tab, so `click 3:58` acts on tab 3 whichever tab
-is focused. Ids stay valid while the element exists; after a navigation or
-a big change, take a new snapshot (a stale id fails with exit 1).
+Snapshot lines look like `- button "Sign in" [3:58@2] disabled`. An id is
+`TAB:NODE@DOC`: it names its tab, so `click 3:58@2` acts on tab 3 whichever
+tab is focused, and the document it was taken from (DOC). Ids stay valid
+while the element exists in that document; once the tab (or a frame in
+it) loads a new document they're stale (exit 1): take a new snapshot.
 
 | Command | Does |
 | --- | --- |
@@ -138,7 +139,9 @@ The port changes each time the session starts: ask `termium devtools`.
   gets the command, waiting included; one whose time runs out while it
   waits its turn exits 4 at once and is never run. One that has started
   stops itself at its timeout and says how far it got ("pressed 23 of 50
-  keys"). `type` succeeds only if the element ends up holding exactly the
+  keys"); if the page was still handling input it had already received
+  (a slow click handler), exit 4 says that input went to the page, and the
+  next acting command waits until the page is done with it (up to 10 s). `type` succeeds only if the element ends up holding exactly the
   text asked for (or, with `--append`, its old text plus that); a field
   that cuts it (`maxlength`), changes or rejects it is exit 1, saying
   what it holds. `--submit` submits only that element's own form (or
