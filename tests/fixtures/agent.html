@@ -23,6 +23,8 @@
 <button id=slowmove onmousemove="const e = Date.now() + 1500; while (Date.now() < e);" onclick="window.slowClicked = 1">Slow to hover</button>
 <div style="position:relative;display:inline-block"><iframe id=fr srcdoc="<button onclick='parent.frameBtn = 1'>Covered frame button</button>" style="width:220px;height:50px"></iframe><div id=frcover onclick="window.frameCover = 1" style="position:absolute;inset:0"></div></div>
 <iframe id=fr2 srcdoc="<button onclick='parent.frameBtn2 = 1'>Open frame button</button>" style="width:220px;height:50px"></iframe>
+<button id=slowclick onclick="const e = Date.now() + 1400; while (Date.now() < e); window.slowHandled = (window.slowHandled || 0) + 1">Slow to handle</button>
+<div id=clipper contenteditable role=textbox aria-label="Clipper" oninput="if (this.innerText.length > 3) this.innerText = this.innerText.slice(0, 3)" style="min-height:1.5em;border:1px solid"></div>
 <div style="position:relative;display:inline-block"><button id=under onclick="window.underClicked = 1">Under button</button><div id=cover onclick="window.coverClicked = 1" style="position:absolute;inset:0;background:rgba(0,0,0,0.1)"></div></div>
 <p id=notes-label>Notes</p><div id=ed contenteditable role=textbox aria-labelledby=notes-label style="min-height:2em;border:1px solid"></div>
 <div id=host></div>

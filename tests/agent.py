@@ -87,7 +87,7 @@ def wait_until(pred, timeout):
     return False
 
 def ref(snapshot, role, name):
-    m = re.search(rf'- {role} "{re.escape(name)}" \[(\d+:\d+)\]', snapshot)
+    m = re.search(rf'- {role} "{re.escape(name)}" \[(\d+:\d+@\d+)\]', snapshot)
     return m.group(1) if m else None
 
 try:
@@ -373,6 +373,9 @@ try:
     check("an id from before a navigation is stale (exit 1), and nothing on the new page is clicked",
           r.returncode == 1 and "stale" in r.stderr and out_now != "Hello,  (r)", (r.returncode, r.stderr, out_now))
     new_greet = ref(ctl("snapshot", str(st)).stdout, "button", "Greet")
+    r = ctl("click", old_greet)
+    check("...and stays stale after a snapshot of the new document (which may hand out the same node number)",
+          r.returncode == 1 and "stale" in r.stderr and old_greet != new_greet, (r.returncode, r.stderr, old_greet, new_greet))
     check("...a new snapshot's id works", ctl("click", new_greet).returncode == 0)
     # Frames: a cover over a frame is seen from the top; a frame's own button works.
     fsnap = ctl("snapshot", str(st)).stdout
@@ -404,6 +407,34 @@ try:
     for t in ctl_json("tabs"):
         if t["id"] != first:
             ctl("close", str(t["id"]), "--force")
+
+    # --- a page slow to handle a click: the command ends at its deadline saying so; the next waits for the page
+    snap = ctl("snapshot").stdout
+    t0 = time.time()
+    r = ctl("click", ref(snap, "button", "Slow to handle"), "--timeout", "0.3")
+    took = time.time() - t0
+    r2 = ctl("type", ref(snap, "textbox", "City"), "after slow")
+    check(f"a click whose handler takes 1.4 s, with --timeout 0.3: exit 4 at once ({took:.1f}s) saying the click went to the page",
+          r.returncode == 4 and took < 1.2 and "the click went to the page" in r.stderr, (r.returncode, r.stderr, took))
+    check("...the click did happen, and the next command ran after the page finished with it",
+          r2.returncode == 0 and page_value("[window.slowHandled, document.getElementById('city').value]") == [1, "after slow"],
+          (r2.returncode, r2.stderr, page_value("[window.slowHandled, document.getElementById('city').value]")))
+    ctl("type", ref(snap, "textbox", "City"), "")
+    # A contenteditable that cuts the text: said (regexes in page code once lost a backslash and hid this).
+    r = ctl("type", ref(snap, "textbox", "Clipper"), "pass")
+    check("type into a contenteditable that keeps 3 characters: exit 1, cut", r.returncode == 1 and "cut it to 3 of 4" in r.stderr, (r.returncode, r.stderr))
+    # wait waits its whole timeout.
+    t0 = time.time()
+    r = ctl("wait", "text", "never there", "--timeout", "1")
+    took = time.time() - t0
+    check(f"wait --timeout 1 waits the full second ({took:.2f}s)", r.returncode == 4 and took >= 1.0, (r.returncode, took))
+    # The default shot file: unguessable name, created afresh, 0600.
+    r = ctl("shot")
+    sp2 = r.stdout.strip()
+    check("shot without -o: a random, private file", r.returncode == 0 and re.search(r"termium-shot-\d+-[0-9a-f]{16}\.png$", sp2)
+          and stat.S_IMODE(os.stat(sp2).st_mode) == 0o600, (sp2, r.stderr))
+    if os.path.exists(sp2):
+        os.remove(sp2)
 
     # --- a queued command whose time runs out is answered at once, and never runs
     hang = socket.socket(); hang.bind(("127.0.0.1", 0)); hang.listen(8)  # accepts nothing: a page that never loads
@@ -526,7 +557,8 @@ try:
     check(f"an agent connection that sends no request is let go ({time.time() - t0:.0f}s)", b"no request came" in got and time.time() - t0 < 14, got[:200])
 
     # --- errors and exit statuses
-    r = ctl("click", f"{first}:999999")
+    cur_gen = ref(ctl("snapshot").stdout, "button", "Greet").split("@")[1]
+    r = ctl("click", f"{first}:999999@{cur_gen}")
     check("an element that's gone: exit 1, says to snapshot again", r.returncode == 1 and "snapshot" in r.stderr, (r.returncode, r.stderr))
     r = ctl("click", "nonsense")
     check("a malformed element id: exit 2", r.returncode == 2, (r.returncode, r.stderr))

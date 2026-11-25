@@ -695,7 +695,7 @@ try:
     rb.key("enter"); time.sleep(2)
     rclog = open(os.path.join(tmp, "st-nw", "termium", "termium.log")).read()
     check("a restart confirmation started by one terminal never reaches the next, nor restarts for it",
-          "asked from a terminal that's gone; dropped" in rclog and "Restart anyway" not in rb.text() and server_pid("rc") == rc_pid and not update_ui(rb),
+          "restart: the terminal that asked left or opened something else meanwhile; dropped" in rclog and "Restart anyway" not in rb.text() and server_pid("rc") == rc_pid and not update_ui(rb),
           (rb.line(2), server_pid("rc"), rc_pid, rclog[-400:]))
     stop("rc")
     # The same terminal opens the address bar while its slow probe runs: the question doesn't replace their edit.
@@ -910,6 +910,20 @@ try:
     check("restart with agents: ...but not the isolated context's (it'd lose its isolation)", not any("iso=1" in u for u in page_urls(after)), page_urls(after))
     stop("agr")
 
+    # ------------------------------------------------ with update checks off, the restart into an installed termium still works
+    t1 = term(os.path.join(inst_o, "termium"), "-s", "optr", "--incognito", PAGE, state="st-optr", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
+    t1.wait_text("termium test page", 40); t1.key("ctrl+b"); t1.key("d"); exit_code(t1)
+    t2 = term(os.path.join(inst_n, "termium"), "attach", "optr", state="st-optr", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
+    t2.wait_text("termium test page", 20); time.sleep(2); t2.key("ctrl+b"); t2.key("d"); exit_code(t2)
+    t3 = term(os.path.join(inst_o, "termium"), "attach", "optr", state="st-optr", env={"TERMIUM_NO_UPDATE_CHECK": "1"})
+    t3.wait_text("termium test page", 20); time.sleep(1.6)
+    old_pid = server_pid("optr")
+    open_box(t3); t3.key("r")
+    check("opted out: Ctrl+B U, r restarts into the installed termium",
+          t3.wait_for(lambda: server_pid("optr") not in (None, old_pid), 30) and t3.wait_for(lambda: "Restarted:" in t3.text(), 40)
+          and f"(termium {NEXT})" in ls_row("optr", "st-optr"), (output(t3)[-300:], ls_row("optr", "st-optr")))
+    stop("optr")
+
     # ------------------------------------------------ two updaters at once never downgrade
     for i in range(3):
         cc = os.path.join(tmp, f"inst-race{i}"); os.makedirs(cc)
@@ -920,6 +934,14 @@ try:
         got = subprocess.run([os.path.join(cc, "termium"), "--version"], capture_output=True, text=True).stdout.strip()
         check(f"concurrent updaters (run {i + 1}): both succeed and the newer release stays", all(p.returncode == 0 for p in procs) and got == f"termium {LATER}"
               and sorted(os.listdir(cc)) == ["termium"], (got, [p.returncode for p in procs], outs, os.listdir(cc)))
+    # Two updaters to the same release: one updates, the other says another update got there first.
+    cc = os.path.join(tmp, "inst-same"); os.makedirs(cc)
+    shutil.copy(cur_bin, os.path.join(cc, "termium"))
+    procs = [subprocess.Popen([os.path.join(cc, "termium"), "update"], env=dict(os.environ, **env_for("cli", TERMIUM_UPDATE_URL=f"{BASE}/latest/v{LATER}")),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    outs = [p.communicate(timeout=120)[0] for p in procs]
+    check("two updaters to one release: one says updated, the other that another update already installed it",
+          sorted(("Updated to termium" in o, "already installed by another update" in o) for o in outs) == [(False, True), (True, False)], outs)
 
     # ------------------------------------------------ termium update from the shell; a newer client attaching
     inst2 = os.path.join(tmp, "inst2"); os.makedirs(inst2)
@@ -1010,6 +1032,17 @@ try:
         check("0.2.0: a question about a session replaced meanwhile expires, and the new one is left alone",
               exit_code(g1, 15) == 1 and "changed while you answered" in output(g1) and server_pid("lgx") == new_pid, (output(g1)[-300:], new_pid, server_pid("lgx")))
         stop("lgx")
+        # A paste at the question (bracketed or not) is never an answer; Enter alone is no.
+        if os.path.exists(os.path.join(sockdir, "legacy.asked")):
+            os.remove(os.path.join(sockdir, "legacy.asked"))
+        lp = term(cur_bin, "attach", "legacy", state="st-legacy")
+        lp.wait_for(lambda: "[y/N]" in output(lp), 10)
+        lp.write("\x1b[200~yellow pasted text\r\x1b[201~"); time.sleep(0.5)
+        lp.write("yellow pasted text\r"); time.sleep(0.5)
+        check("0.2.0: a paste at the question isn't taken for yes", server_pid("legacy") == old_pid and "termium test page" not in lp.text())
+        lp.write("\r")
+        check("0.2.0: ...and Enter alone then means no: it attaches", lp.wait_text("termium test page", 20) and server_pid("legacy") == old_pid, output(lp)[-300:])
+        lp.key("ctrl+b"); lp.key("d"); exit_code(lp)
         # Ctrl+D (end of input) at the question is a no, not a hang.
         os.remove(os.path.join(sockdir, "legacy.asked")) if os.path.exists(os.path.join(sockdir, "legacy.asked")) else None
         le = term(cur_bin, "attach", "legacy", state="st-legacy")
@@ -1045,7 +1078,7 @@ finally:
             except Exception:
                 pass
             t.alive = False
-    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "nv", "clock", "pdraft", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
+    for name in ("t0", "t1", "t2", "t3", "t4", "abort", "offer", "skip", "bad", "later", "skip2", "skx", "sky", "two", "nw", "nw2", "nw3", "nw4", "rc", "rc2", "sk2", "relb", "ag", "agr", "renv", "rname", "slowv", "nv", "clock", "pdraft", "optr", "pulled", "lgx", "sklock", "rf", "rf2", "rf3", "rf4", "rf5", "upd", "shell", "proto", "legacy"):
         stop(name)
     httpd.shutdown()
     time.sleep(1)
