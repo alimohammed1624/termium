@@ -126,3 +126,10 @@ export function encodeRegion(r: Raster, x: number, y: number, w: number, h: numb
   ihdr[9] = ch === 4 ? 6 : 2;
   return Buffer.concat([SIGNATURE, chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level: 1 })), chunk("IEND", Buffer.alloc(0))]);
 }
+
+/** A base64 PNG's height in pixels, read from its header (0 if it isn't one). */
+export function pngHeight(base64Png: string): number {
+  const b = Buffer.from(base64Png.slice(0, 32), "base64");
+  if (b.length < 24 || !b.subarray(0, 8).equals(SIGNATURE) || b.toString("latin1", 12, 16) !== "IHDR") return 0;
+  return b.readUInt32BE(20);
+}

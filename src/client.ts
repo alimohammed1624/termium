@@ -47,6 +47,8 @@ export interface ClientOptions {
   version: string;
   /** Wants update news from the session (no --no-update-check, TERMIUM_NO_UPDATE_CHECK or CI). */
   updateCheck: boolean;
+  /** Turn the session's chromeless mode on (--chromeless). */
+  chromeless?: boolean;
   /** argv that runs the termium on disk to start this session again after a restart (see "restart" below). */
   restartArgv: string[];
   /** argv that runs this termium (the binary, or bun and the script). */
@@ -311,6 +313,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
           if (info.profile === "(incognito)") argv.push("--incognito");
           else if (typeof info.profile === "string" && info.profile.startsWith("/")) argv.push("--profile", info.profile);
           if (!o.updateCheck) argv.push("--no-update-check");
+          if (o.chromeless) argv.push("--chromeless");
           if (o.url) argv.push(o.url);
           try {
             process.execve!(argv[0]!, argv, process.env);
@@ -927,6 +930,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     url: o.url,
     starter: child?.pid,
     updateCheck: o.updateCheck,
+    chromeless: o.chromeless || undefined,
     argv: o.selfArgv,
   } satisfies Hello);
   for (const ev of pending.splice(0)) send({ t: "input", ev });

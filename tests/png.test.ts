@@ -1,7 +1,7 @@
 import { frameFits } from "../src/app";
 import { expect, test } from "bun:test";
 import { deflateSync } from "node:zlib";
-import { decodePng, encodeRegion } from "../src/png";
+import { decodePng, encodeRegion, pngHeight } from "../src/png";
 
 // A PNG built here with every filter type, so decoding can be checked exactly.
 function makePng(w: number, h: number, channels: 3 | 4, px: (x: number, y: number, c: number) => number): { png: Buffer; data: Uint8Array } {
@@ -80,4 +80,11 @@ test("a screencast frame must have its viewport's shape", () => {
   expect(frameFits(png(1380, 40), { w: 1840, h: 53 })).toBe(true);
   expect(frameFits(png(40, 1380), { w: 53, h: 1840 })).toBe(true);
   expect(frameFits(png(1380, 60), { w: 1840, h: 53 })).toBe(false);
+});
+
+test("a PNG's height is read from its header (0 for anything else)", () => {
+  const png = encodeRegion({ width: 3, height: 7, channels: 3, data: new Uint8Array(3 * 7 * 3) }, 0, 0, 3, 7);
+  expect(pngHeight(png.toString("base64"))).toBe(7);
+  expect(pngHeight(Buffer.from("not a png at all, really not").toString("base64"))).toBe(0);
+  expect(pngHeight("")).toBe(0);
 });

@@ -253,6 +253,8 @@ export interface SavedLayout {
   spaces: { name: string; active: number; tabs: { root: SavedNode; focus: number; zoomed: boolean }[] }[];
   activeSpace: number;
   sidebar: boolean;
+  /** No tab bar, address bar or sidebar (Ctrl+B f). */
+  chromeless?: boolean;
   zoom: number;
   /** Pages left out (other browser contexts' tabs). */
   notKept?: number;

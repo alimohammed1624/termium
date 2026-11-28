@@ -66,7 +66,8 @@ Options: `--browser <path>` (default: Helium on `PATH`, or
 started with `-s NAME`), `--incognito`, `--scale <n>` (device
 pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
 They apply when a session starts. `--no-update-check` turns off the
-[update check](#updates).
+[update check](#updates). `--chromeless` turns on chromeless mode (see
+below), in a new session or one that's running.
 
 ### Sessions
 
@@ -211,6 +212,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
 | `N` / `W` / `D` | new / rename / close space |
 | `b` | show or hide the sidebar |
+| `f` | chromeless: hide the tab bar, address bar and sidebar |
 | `Ctrl+B` | send Ctrl+B to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |
@@ -223,6 +225,13 @@ shows its shortcut. ↑/↓ (or Ctrl+P/N, the wheel) pick a row, Enter or a
 click runs it; the first row (go to or search for what's typed) is picked
 until you move, so Enter always goes. Start with `>` to list only actions
 and tabs.
+
+Chromeless mode (`Ctrl+B f`, the palette's "Toggle chromeless",
+`termium --chromeless` or `termium ctl chromeless on|off|toggle`) gives the
+page every row and column of the terminal. Ctrl+L still opens the box above;
+`Ctrl+B n` / `p` / `1`-`9` switch tabs. A line over the top shows briefly
+for a toast, a tab switch, a page loading, a question or the `Ctrl+B`
+prefix. The session keeps the setting across restarts and updates.
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
 `Ctrl+B` prefix still work, and Ctrl+W closes the tab as in Chrome; its own

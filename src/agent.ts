@@ -255,6 +255,10 @@ class Agent {
         return this.wait(req, timeoutMs);
       case "dialog":
         return this.dialog(req);
+      case "chromeless":
+        // (A view setting, not an action on a page: no waiting for the person.)
+        if (req.value === undefined) return { chromeless: this.app.chromeless };
+        return { chromeless: this.app.setChromeless(req.value === "toggle" ? null : req.value === "on") };
       default:
         throw new CtlError(`unknown command "${req.cmd}"`, EXIT.usage);
     }
