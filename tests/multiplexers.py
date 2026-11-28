@@ -191,8 +191,8 @@ try:
     # a pane wider than placeholders can address (297 cells) is cut into tiles
     t.resize(360, 45)
     tiles = lambda: sorted(r for r in t.placeholder_images().values() if r[0] == 3)
-    want_tiles = [(3, 23, 169, 43), (3, 192, 169, 43)]
-    check("tmux: a 338-cell-wide page is drawn as two tiles", t.wait_for(lambda: tiles() == want_tiles, 20), (tiles(), want_tiles))
+    want_tiles = [(3, 23, 168, 43), (3, 191, 169, 43)]  # 337 cells: the last column is the scrollbar
+    check("tmux: a 337-cell-wide page is drawn as two tiles", t.wait_for(lambda: tiles() == want_tiles, 20), (tiles(), want_tiles))
     time.sleep(1)
     from PIL import Image as _Image
     import io as _io
@@ -200,10 +200,10 @@ try:
         shown = [i for i, r in t.placeholder_images().items() if r[0] == 3]  # (takes the lock itself)
         with t.lock:
             return sorted(_Image.open(_io.BytesIO(t.images[i])).size for i in shown if i in t.images)
-    check("tmux: ...each tile holds its half of the page at full resolution", tile_sizes() == [(1690, 860), (1690, 860)], tile_sizes())
+    check("tmux: ...each tile holds its half of the page at full resolution", tile_sizes() == [(1680, 860), (1690, 860)], tile_sizes())
     t.shot(f"{OUT}/tmux-wide.png")
     t.resize(160, 45)
-    check("tmux: back to one image when it fits again", t.wait_for(lambda: tiles() == [(3, 23, 138, 43)], 20), tiles())
+    check("tmux: back to one image when it fits again", t.wait_for(lambda: tiles() == [(3, 23, 137, 43)], 20), tiles())
 
     # large pictures (random pixels barely compress), both ways of sending them (pane still zoomed)
     t.write("\x0c"); time.sleep(0.4); t.write(f"{BASE}/noise.html\r")

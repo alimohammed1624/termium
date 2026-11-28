@@ -64,12 +64,11 @@ export function thumb(m: ScrollMetrics | null | undefined, rows: number): Thumb 
   return { top, len };
 }
 
-/** The scroll offset that puts the thumb's top at `top` (eighths). */
+/** The scroll offset that puts the thumb's top at `top` (eighths); unchanged if the thumb can't move. */
 export function offsetFor(m: ScrollMetrics, rows: number, top: number): number {
   const t = thumb(m, rows);
-  if (!t) return 0;
-  const room = rows * 8 - t.len;
-  if (room <= 0) return 0;
+  const room = rows * 8 - (t?.len ?? 0);
+  if (!t || room <= 0) return m.y;
   const max = m.total - m.view;
   return Math.round((Math.max(0, Math.min(room, top)) * max) / room);
 }

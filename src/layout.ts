@@ -83,8 +83,8 @@ function clamp(n: number, lo: number, hi: number): number {
  * title bar (it doubles as the divider between stacked panes); side-by-side
  * panes are divided by a one-column separator.
  */
-/** Narrower panes get no scrollbar. */
-const BAR_MIN_COLS = 8;
+/** A one-column pane gets no scrollbar (the page keeps that column). */
+const BAR_MIN_COLS = 2;
 
 export function computeLayout<T>(
   root: Node<T>,

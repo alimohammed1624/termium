@@ -39,6 +39,9 @@ describe("scrollbar", () => {
     expect(offsetFor(m, 10, 60)).toBe(300);
     expect(offsetFor(m, 10, 500)).toBe(300);
     expect(offsetFor(m, 10, -5)).toBe(0);
+    // A thumb that fills the track can't move: the offset stays.
+    expect(offsetFor({ y: 1, view: 1520, total: 1522 }, 38, 300)).toBe(1);
+    expect(offsetFor({ y: 5, view: 100, total: 400 }, 1, 8)).toBe(5);
     // Round trip.
     expect(thumb({ ...m, y: offsetFor(m, 10, 42) }, 10)!.top).toBe(42);
   });
@@ -65,8 +68,9 @@ describe("scrollbar", () => {
     expect(a!.bar).toEqual({ col: 50, row: 2, cols: 1, rows: 39 });
     expect(b!.bar).toEqual({ col: 101, row: 2, cols: 1, rows: 39 });
     // Too narrow for one: the pane keeps every column.
-    const narrow = computeLayout(leaf("a"), { col: 1, row: 1, cols: 7, rows: 5 }, false, true).panes[0]!;
+    const narrow = computeLayout(leaf("a"), { col: 1, row: 1, cols: 1, rows: 5 }, false, true).panes[0]!;
     expect(narrow.bar).toBeUndefined();
-    expect(narrow.content.cols).toBe(7);
+    expect(narrow.content.cols).toBe(1);
+    expect(computeLayout(leaf("a"), { col: 1, row: 1, cols: 2, rows: 5 }, false, true).panes[0]!.bar).toEqual({ col: 2, row: 1, cols: 1, rows: 5 });
   });
 });

@@ -1566,6 +1566,7 @@ export class App {
     this.mouseCapture = null;
     this.mouseButtons = 0;
     this.drag = null;
+    this.barDrag = null;
     this.hoverPage = null;
     this.pageKeysDown.clear();
     this.syntheticDown.clear();
@@ -1978,6 +1979,9 @@ export class App {
   private onFrame(p: any, sid: string | undefined): void {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page) return;
+    // Any frame may mean it scrolled, even one that isn't painted (at HiDPI,
+    // one with the same picture as the last).
+    if (this.geom.get(page)?.bar) this.trackScroll(page);
     const m = p.metadata;
     // Just after a resize or a restarted screencast (until a frame of the new
     // shape comes, for 2 s at most), a frame of the viewport as it was can
@@ -2048,7 +2052,6 @@ export class App {
     if (!g || !page.lastFrame || this.covered() || this.closingAll || page === this.panelPage) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
-    if (g.bar) this.trackScroll(page);
     if (this.placeholders) return this.paintPlaceholders(page, r, done);
     const id = this.nextImage++;
     if (this.nextImage > 0xfffffff0) this.nextImage = 1;
@@ -3677,6 +3680,14 @@ export class App {
     const col = Math.floor(px / this.cellW) + 1;
     const row = Math.floor(py / this.cellH) + 1;
 
+    // A thumb drag ends when the button is let go, wherever (a move without
+    // it held means the release went elsewhere).
+    if (this.barDrag) {
+      if (ev.action === "move" && ev.button === 0 && !this.covered()) return this.dragBar(py);
+      if (ev.action === "release" || ev.action === "move") this.endBarDrag();
+      if (ev.action === "release") return;
+    }
+
     if (this.mode === "help") {
       if (ev.action === "press") {
         this.mode = "normal";
@@ -3695,17 +3706,6 @@ export class App {
       if (ev.action === "release") {
         this.drag = null;
         this.relayoutAndRedraw();
-      }
-      return;
-    }
-
-    if (this.barDrag) {
-      if (ev.action === "move") this.dragBar(py);
-      else if (ev.action === "release") {
-        const page = this.barDrag.page;
-        this.barDrag = null;
-        this.redrawScrollbar(page);
-        this.trackScroll(page);
       }
       return;
     }
@@ -3736,9 +3736,14 @@ export class App {
       this.focusPage(g.item);
     }
     if (barPane) {
-      // The wheel scrolls the page (pageMouse puts the pointer at its right edge).
-      if (ev.action === "wheel") this.pageMouse(g.item, ev, px, py);
-      else if (ev.action === "press" && ev.button === 0) this.pressBar(g.item, barPane.bar!, py);
+      const page = g.item;
+      // Inert while a dialog is up (a scroll would wait for it, then jump).
+      if (page.dialog || page === this.panelPage) return;
+      const m = page.scroll;
+      // The wheel scrolls the document (whatever is under the page's right edge).
+      if (ev.action === "wheel" && m && (ev.wheel === "up" || ev.wheel === "down")) {
+        this.scrollPageTo(page, Math.max(0, Math.min(m.total - m.view, m.y + (ev.wheel === "up" ? -60 : 60))), true);
+      } else if (ev.action === "press" && ev.button === 0) this.pressBar(page, barPane.bar!, py);
       return;
     }
     this.pageMouse(g.item, ev, px, py);
@@ -3837,6 +3842,13 @@ export class App {
     }
   }
 
+  private endBarDrag(): void {
+    const page = this.barDrag!.page;
+    this.barDrag = null;
+    this.redrawScrollbar(page);
+    this.trackScroll(page);
+  }
+
   private dragBar(py: number): void {
     const { page, grab } = this.barDrag!;
     const bar = this.geom.get(page)?.bar;
@@ -3849,8 +3861,16 @@ export class App {
     this.scrollPageTo(page, y);
   }
 
-  /** Scrolls the page's document to `y` (CSS px) at once; while dragging, only the latest position is sent. */
-  private scrollPageTo(page: Page, y: number): void {
+  /**
+   * Scrolls the page's document to `y` (CSS px) at once; while dragging,
+   * only the latest position is sent. `follow`: show the new position now
+   * (wheel steps build on it).
+   */
+  private scrollPageTo(page: Page, y: number, follow = false): void {
+    if (follow && page.scroll) {
+      page.scroll = { ...page.scroll, y };
+      this.redrawScrollbar(page);
+    }
     const expression = `(document.scrollingElement || document.documentElement).scrollTo({ top: ${y}, behavior: "instant" })`;
     this.queueMove(page, () => this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {}));
   }
