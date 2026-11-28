@@ -249,7 +249,7 @@ const at = (row: number, col: number) => `\x1b[${row};${col}H`;
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
 const PROMPT_GLOBALS = new Set([
-  "ctrl+t", "ctrl+w", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
+  "ctrl+t", "ctrl+shift+t", "ctrl+w", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
   "alt+=", "alt++", "alt+-", "alt+0",
 ]);
 /**
@@ -1388,16 +1388,23 @@ export class App {
   }
 
   /** Reopens a closed tab or space (the most recent with none given) where it was, with its pages' histories where they could be read. */
-  private async reopen(c = this.closed[this.closed.length - 1]): Promise<void> {
-    if (!c) return void this.showToast("Nothing closed to reopen");
+  private reopen(c = this.closed[this.closed.length - 1]): Promise<void> {
+    if (!c) return Promise.resolve(void this.showToast("Nothing closed to reopen"));
     const i = this.closed.indexOf(c);
-    if (i < 0) return; // reopened already
+    if (i < 0) return Promise.resolve(); // reopened already
     this.closed.splice(i, 1);
     if (c.toast !== undefined) this.dismissToast(c.toast);
+    // One at a time: each goes back to its place among those reopened before it.
+    return (this.reopening = this.reopening.then(() => this.reopenNow(c)).catch((e) => this.opts.log(`reopen: ${e}`)));
+  }
+
+  private reopening = Promise.resolve();
+
+  private async reopenNow(c: Closed): Promise<void> {
     if (c.kind === "tab") {
       const space = this.spaces.includes(c.space) ? c.space : this.space!;
       await this.reopenTab(space, c.tab, false);
-      return;
+      return this.relayoutAndRedraw();
     }
     let space = this.spaces.includes(c.space) ? c.space : null;
     if (!space) {
@@ -1406,6 +1413,8 @@ export class App {
       const at = Math.min(c.index, this.spaces.length);
       this.spaces.splice(at, 0, space);
       if (this.activeSpace >= at && this.spaces.length > 1) this.activeSpace++;
+      // Tabs closed from it earlier go back into it.
+      for (const o of this.closed) if (o.space === c.space) o.space = space;
     }
     const tabs: (Tab | null)[] = [];
     for (const ct of c.tabs) tabs.push(await this.reopenTab(space, ct, true));
@@ -1439,29 +1448,51 @@ export class App {
   /**
    * Loads the rest of a reopened page's history into it, one address after
    * another, then goes back to the entry it was on. It stops if the page
-   * goes or navigates elsewhere meanwhile.
+   * goes, or anything else navigates it meanwhile (the person, the page, an
+   * agent); if a step fails or takes too long, it goes straight to the entry
+   * it was on, losing the rest of its history but never its address.
    */
   private async replayHistory(page: Page, plan: ReturnType<typeof replayPlan>): Promise<void> {
     if (!plan || (plan.urls.length < 2 && plan.forward === 0)) return;
+    const current = plan.urls[plan.urls.length - 1 - plan.forward]!;
+    const norm = (u: string) => URL.canParse(u) ? new URL(u).href : u;
+    let expected = norm(plan.urls[0]!);
+    let foreign = false;
+    // Only our own navigations, to the address of the step, are expected.
+    const watch = (p: any, sid?: string) => {
+      if (sid !== page.sessionId || p.frameId !== page.targetId || /sameDocument/i.test(p.navigationType ?? "")) return;
+      if (p.navigationType !== "differentDocument" || norm(String(p.url)) !== expected) foreign = true;
+    };
+    this.cdp.on("Page.frameStartedNavigating", watch);
     // Each navigation (the first is the placement's) must answer before the next starts.
     const answered = async (seq: number) => {
-      for (const end = Date.now() + 15_000; Date.now() < end; await Bun.sleep(50)) {
-        if (!this.pages.has(page.sessionId) || page.navSeq !== seq) return false;
+      for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(50)) {
+        if (foreign || !this.pages.has(page.sessionId) || page.navSeq !== seq) return false;
         if (page.navStarted === 0) return true;
       }
       return false;
     };
-    for (const end = Date.now() + 15_000; page.navSeq === 0; await Bun.sleep(50)) {
-      if (Date.now() > end || !this.pages.has(page.sessionId)) return;
-    }
-    let seq = page.navSeq;
-    for (const url of plan.urls.slice(1)) {
-      if (!(await answered(seq))) return;
-      this.navigate(page, url);
+    let seq = 0;
+    try {
+      for (const end = Date.now() + 15_000; page.navSeq === 0; await Bun.sleep(50)) {
+        if (Date.now() > end || !this.pages.has(page.sessionId)) return;
+      }
       seq = page.navSeq;
+      for (const url of plan.urls.slice(1)) {
+        if (!(await answered(seq))) break;
+        expected = norm(url);
+        this.navigate(page, url);
+        seq = page.navSeq;
+      }
+      if (await answered(seq)) {
+        if (plan.forward > 0) await this.history(page, -plan.forward);
+        return;
+      }
+    } finally {
+      this.cdp.off("Page.frameStartedNavigating", watch);
     }
-    if (!(await answered(seq)) || plan.forward === 0) return;
-    await this.history(page, -plan.forward);
+    // Stopped: unless something else took the page elsewhere, it goes to where it was.
+    if (!foreign && this.pages.has(page.sessionId) && page.navSeq === seq) this.navigate(page, current);
   }
 
   /**

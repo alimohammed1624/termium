@@ -5,20 +5,26 @@ Real termium + real headless Helium in a Ghostty-like PTY.
 
 Usage: python3 tests/reopen.py
 """
-import json, os, shutil, socket, subprocess, sys, tempfile, time
+import functools, http.server, json, os, shutil, socket, subprocess, sys, tempfile, threading, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 from drive import Term
 
 tmp = tempfile.mkdtemp(prefix="termium-reopen-")
 profile = os.path.join(tmp, "profile")
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0)); PORT = sock.getsockname()[1]
-PY = shutil.which("python3") or sys.executable
-srv = subprocess.Popen([PY, "-m", "http.server", str(PORT), "--bind", "127.0.0.1",
-                        "--directory", os.path.join(ROOT, "tests", "fixtures")],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(0.5)
+# The fixtures, where an address with "slow" in it answers SLOW seconds late.
+SLOW = 0
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if "slow" in self.path and SLOW:
+            time.sleep(SLOW)
+        super().do_GET()
+    def log_message(self, *a):
+        pass
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=os.path.join(ROOT, "tests", "fixtures")))
+srv.daemon_threads = True
+PORT = srv.server_address[1]
+threading.Thread(target=srv.serve_forever, daemon=True).start()
 BASE = f"http://127.0.0.1:{PORT}/page.html"
 SESSION = "pr22-reopen"
 
@@ -134,9 +140,83 @@ try:
     # 4. Nothing left: says so.
     t.key("ctrl+shift+t")
     check("nothing to reopen says so", t.wait_text("Nothing closed to reopen", 5), t.text()[-400:])
+
+    def new_tab(url):
+        t.key("ctrl+t"); time.sleep(0.6); t.type(url); t.key("enter")
+        return wait(lambda: active()[2] == url.split("?", 1)[-1])
+
+    # 5. A history entry that doesn't answer in time: the page still ends up where it was.
+    new_tab(f"{BASE}?f=1"); go(f"{BASE}?slow=1"); wait(lambda: active()[2] == "slow=1")
+    go(f"{BASE}?f=cur"); wait(lambda: active()[2] == "f=cur")
+    SLOW = 30
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "f=cur" for x in tabs()))
+    t.key("ctrl+shift+t")
+    check("a slow history entry: the page still comes back on its address", wait(lambda: active()[2] == "f=cur", 25), active())
+    SLOW = 0
+
+    # 6. Something else navigating the page while its history is rebuilt wins.
+    new_tab(f"{BASE}?g=1"); go(f"{BASE}?slow=2"); wait(lambda: active()[2] == "slow=2")
+    go(f"{BASE}?g=cur"); wait(lambda: active()[2] == "g=cur")
+    SLOW = 4
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "g=cur" for x in tabs()))
+    t.key("ctrl+shift+t")
+    wait(lambda: active()[2] == "slow=2", 10); time.sleep(1)
+    ctl("eval", "location.href = '?person'; 1")
+    check("a link followed during the rebuild is where the page goes", wait(lambda: active()[2] == "person", 10), active())
+    time.sleep(8)
+    check("...and stays", active()[2] == "person", active())
+    SLOW = 0
+
+    # 7. A tab closed from a space that was then closed and reopened goes back into that space.
+    t.key("ctrl+b"); t.key("shift+n"); time.sleep(0.6); t.type(f"{BASE}?y=1"); t.key("enter")
+    wait(lambda: active()[2] == "y=1")
+    new_tab(f"{BASE}?y=2")
+    space2 = active()[0]
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "y=2" for x in tabs()))
+    t.key("ctrl+b"); t.key("shift+d"); wait(lambda: all(x[0] != space2 for x in tabs()))
+    t.key("ctrl+b"); t.key("u"); wait(lambda: (space2, 1, "y=1") in tabs())
+    t.key("ctrl+b"); t.key("w"); time.sleep(0.3); t.key("1"); wait(lambda: active()[0] != space2)
+    t.key("ctrl+shift+t")
+    check("...the tab goes back into its reopened space, in its place", wait(lambda: (space2, 2, "y=2") in tabs()), tabs())
+
+    # 8. Ctrl+Shift+T works with the address bar open (closing the last tab opens a blank one, editing its address).
+    for _ in range(5):
+        names = {x[0] for x in tabs()}
+        if len(names) == 1: break
+        t.key("ctrl+b"); t.key("shift+d"); wait(lambda: len({x[0] for x in tabs()}) < len(names))
+    last = tabs()
+    t.key("ctrl+b"); t.key("shift+d")
+    check("closing the only space leaves a blank tab", wait(lambda: len(tabs()) == 1), tabs())
+    t.key("ctrl+shift+t")
+    check("Ctrl+Shift+T from the blank tab's address bar reopens the space", wait(lambda: len(tabs()) == len(last) + 1, 30), (tabs(), last))
+
+    # 9. A split tab: its pane sizes, focus and zoom come back.
+    new_tab(f"{BASE}?z=a")
+    t.key("ctrl+b"); t.key("v"); time.sleep(0.6); t.type(f"{BASE}?z=b"); t.key("enter"); wait(lambda: active()[2] == "z=b")
+    t.key("ctrl+b"); t.key("r")
+    for _ in range(4): t.key("l"); time.sleep(0.1)
+    t.key("escape"); time.sleep(0.8)
+    width = lambda: ctl("eval", "innerWidth").get("value")
+    w1 = width()
+    t.key("ctrl+b"); t.key("z"); time.sleep(0.5)
+    t.key("ctrl+b"); t.key("shift+x"); wait(lambda: all(x[2] != "z=b" for x in tabs()))
+    t.key("ctrl+shift+t")
+    zoomed = lambda: sorted((x["url"].split("?")[-1], x["visible"]) for x in ctl("tabs") if "z=" in x["url"])
+    check("split: both panes back, zoomed on the focused one", wait(lambda: zoomed() == [("z=a", False), ("z=b", True)], 20), zoomed())
+    t.key("ctrl+b"); t.key("z"); time.sleep(0.8)
+    check("...with the pane sizes it had", wait(lambda: active()[2] == "z=b" and abs(width() - w1) <= 12, 5), (w1, width()))
+
+    # 10. Several reopened at once (keys in one burst) each go back to their own place.
+    for r in ("r=1", "r=2", "r=3"):
+        new_tab(f"{BASE}?{r}")
+    order = tabs()
+    for r in ("r=3", "r=2", "r=1"):
+        t.key("ctrl+w"); wait(lambda: all(x[2] != r for x in tabs()))
+    t.write("\x1b[116;6u\x1b[116;6u\x1b[116;6u")
+    check("three at once come back in their order", wait(lambda: tabs() == order, 30), (tabs(), order))
 finally:
     t.close()
-    srv.terminate()
+    srv.shutdown()
     shutil.rmtree(tmp, ignore_errors=True)
 
 print(f"\n{len(failures)} failure(s)" if failures else "\nall passed")
