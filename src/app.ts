@@ -1223,8 +1223,10 @@ export class App {
     }
   }
 
-  navigate(page: Page, url: string, attempt = 0): void {
+  navigate(page: Page, url: string, attempt = 0, wasLoading = page.loading): void {
     page.url = url;
+    // A load already running (before the first attempt) carries on if this
+    // navigation is refused: its own events end it.
     page.loading = true;
     page.load = started(page.load, Date.now());
     this.tickProgress();
@@ -1234,7 +1236,7 @@ export class App {
     // A navigation refused, or failed without the page starting a load,
     // sends no load events: nothing else would end its loading.
     const refused = () => {
-      if (page.navSeq !== seq || page.loadStarts !== starts || !page.loading) return;
+      if (wasLoading || page.navSeq !== seq || (page.loadStarts ?? 0) !== starts || !page.loading) return;
       page.loading = false;
       page.load = finished(page.load, Date.now());
       this.queueChrome();
@@ -1250,7 +1252,7 @@ export class App {
         const web = /^https?:/i.test(url);
         if (r?.errorText === "net::ERR_ABORTED" && web && !r.isDownload && startup && page.navSeq === seq && attempt < 2 && this.pages.has(page.sessionId)) {
           setTimeout(() => {
-            if (page.navSeq === seq) this.navigate(page, url, attempt + 1);
+            if (page.navSeq === seq) this.navigate(page, url, attempt + 1, wasLoading);
           }, 250);
         } else if (r?.errorText) refused();
       })
