@@ -1,8 +1,8 @@
 // Which tabs play sound, and muting them. The DevTools protocol has neither
 // (no per-tab "audible" state, no per-tab mute command), but the browser's
 // own tab audio state is there for extensions (chrome.tabs: audible,
-// mutedInfo). So termium loads a tiny extension of its own over its private
-// DevTools pipe (Extensions.loadUnpacked: pipe only, and only with
+// mutedInfo). So termium loads a tiny extension of its own over its DevTools
+// pipe (Extensions.loadUnpacked, which Chrome allows only with
 // --enable-unsafe-extension-debugging) and asks its service worker.
 //
 // That's the browser's real tab mute, the one Chrome's tab strip uses: it
@@ -73,7 +73,8 @@ export interface AudioState {
 export class TabAudio {
   private sid: string | null = null;
   private stopped = false;
-  private failures = 0;
+  /** The browser can't load the extension (it never worked): no indicator, no muting. */
+  private unsupported = false;
 
   constructor(
     private cdp: CDP,
@@ -84,69 +85,125 @@ export class TabAudio {
     private onChange: (states: Map<string, AudioState>) => void,
   ) {}
 
-  /** Loads the extension and follows tab audio until stop(); false if this browser can't. */
-  async start(): Promise<boolean> {
-    try {
-      mkdirSync(this.dir, { recursive: true });
-      writeFileSync(join(this.dir, "manifest.json"), JSON.stringify(MANIFEST, null, 2));
-      writeFileSync(join(this.dir, "worker.js"), WORKER);
-      const { id } = await this.cdp.send("Extensions.loadUnpacked", { path: this.dir });
-      // Its service worker starts as the extension loads.
-      for (let i = 0; i < 50 && !this.stopped && !this.sid; i++) {
-        // (Asked for by type: getTargets otherwise lists what setDiscoverTargets follows, pages only.)
-        const { targetInfos } = await this.cdp.send("Target.getTargets", { filter: [{ type: "service_worker" }] });
-        const worker = targetInfos.find((t: any) => t.type === "service_worker" && String(t.url).startsWith(`chrome-extension://${id}/`));
-        if (worker) this.sid = (await this.cdp.send("Target.attachToTarget", { targetId: worker.targetId, flatten: true })).sessionId;
-        else await Bun.sleep(100);
+  /**
+   * Loads the extension and follows tab audio until stop() or the browser
+   * goes. A worker that dies or stops answering is started again (loading
+   * the extension again does that), backing off while it keeps failing.
+   */
+  async run(): Promise<void> {
+    let seen = -1;
+    let delay = 1000;
+    let worked = false;
+    while (!this.stopped && !this.cdp.closed) {
+      if (!this.sid) {
+        if (!(await this.connect(worked))) {
+          if (this.unsupported) return;
+          await Bun.sleep(delay);
+          delay = Math.min(delay * 2, 30_000);
+          continue;
+        }
+        if (worked) this.log("audio: tab audio is back");
+        worked = true;
+        delay = 1000;
+        seen = -1;
       }
-      if (!this.sid) throw new Error("its service worker didn't start");
-    } catch (e) {
-      this.log(`audio: no tab audio state or muting (${e instanceof Error ? e.message : e})`);
-      this.sid = null;
-      return false;
+      const sid = this.sid!;
+      try {
+        // next() answers within 20 s (at once if something changed).
+        const r = await this.call(sid, `termiumAudio.next(${seen})`, 30_000);
+        seen = r.ver;
+        this.onChange(new Map((r.tabs as [string, boolean, boolean][]).map(([t, audible, muted]) => [t, { audible, muted }])));
+      } catch (e) {
+        if (this.stopped || this.cdp.closed) return;
+        this.log(`audio: ${e instanceof Error ? e.message : e}; starting it again`);
+        this.drop(sid);
+      }
     }
-    void this.follow();
-    return true;
   }
 
   stop(): void {
     this.stopped = true;
+    if (this.sid) this.drop(this.sid);
   }
 
-  get available(): boolean {
-    return this.sid !== null;
+  /** Writes and loads the extension, attaches to its worker, and checks that it answers. */
+  private async connect(worked: boolean): Promise<boolean> {
+    let sid: string | null = null;
+    try {
+      mkdirSync(this.dir, { recursive: true });
+      writeFileSync(join(this.dir, "manifest.json"), JSON.stringify(MANIFEST, null, 2));
+      writeFileSync(join(this.dir, "worker.js"), WORKER);
+      // Loaded again, a loaded extension restarts (its worker too).
+      let id: string;
+      try {
+        ({ id } = await withTimeout(this.cdp.send("Extensions.loadUnpacked", { path: this.dir }), 10_000, "loading the extension"));
+      } catch (e) {
+        // Never loaded: this browser can't (or won't) load it; don't keep trying.
+        if (!worked) this.unsupported = true;
+        throw e;
+      }
+      for (let i = 0; i < 50 && !this.stopped && !sid; i++) {
+        // (Asked for by type: getTargets otherwise lists what setDiscoverTargets follows, pages only.)
+        const { targetInfos } = await this.cdp.send("Target.getTargets", { filter: [{ type: "service_worker" }] });
+        const worker = targetInfos.find((t: any) => String(t.url).startsWith(`chrome-extension://${id}/`));
+        if (worker) sid = (await this.cdp.send("Target.attachToTarget", { targetId: worker.targetId, flatten: true })).sessionId;
+        else await Bun.sleep(100);
+      }
+      if (!sid) throw new Error("its service worker didn't start");
+      this.cdp.send("Runtime.runIfWaitingForDebugger", {}, sid).catch(() => {});
+      // Its script may not have run yet (a worker just started waits for its debuggers).
+      for (let i = 0; (await this.call(sid, "typeof termiumAudio", 5000)) !== "object"; i++) {
+        if (i >= 50) throw new Error("its service worker doesn't answer");
+        await Bun.sleep(100);
+      }
+      this.sid = sid;
+      return true;
+    } catch (e) {
+      this.log(`audio: no tab audio state or muting (${e instanceof Error ? e.message : e})`);
+      if (sid) this.drop(sid);
+      return false;
+    }
   }
 
-  private async call(expression: string): Promise<any> {
-    if (!this.sid) throw new Error("tab audio isn't available with this browser");
-    const r = await this.cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, this.sid);
+  /** Lets go of a worker session (calls still waiting on it fail). */
+  private drop(sid: string): void {
+    if (this.sid === sid) this.sid = null;
+    this.cdp.failSession(sid);
+    this.cdp.send("Target.detachFromTarget", { sessionId: sid }).catch(() => {});
+  }
+
+  private async call(sid: string, expression: string, ms: number): Promise<any> {
+    const r = await withTimeout(this.cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sid), ms, "its service worker");
     if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
     return r?.result?.value;
   }
 
-  private async follow(): Promise<void> {
-    let seen = -1;
-    while (!this.stopped && this.sid) {
+  /** Mutes or unmutes the page's tab; false if the browser doesn't know it as a tab. */
+  async setMuted(targetId: string, muted: boolean): Promise<boolean> {
+    for (let attempt = 0; ; attempt++) {
+      // Starting (just after startup, or after its worker went): wait for that a while.
+      for (let i = 0; i < 150 && !this.sid && !this.unsupported && !this.stopped; i++) await Bun.sleep(100);
+      const sid = this.sid;
+      if (!sid) {
+        throw new Error(
+          this.unsupported
+            ? "muting isn't available with this browser (see the session log)"
+            : "tab audio isn't ready (its extension is starting again); try again",
+        );
+      }
       try {
-        const r = await this.call(`termiumAudio.next(${seen})`);
-        seen = r.ver;
-        this.failures = 0;
-        this.onChange(new Map((r.tabs as [string, boolean, boolean][]).map(([t, audible, muted]) => [t, { audible, muted }])));
+        return !!(await this.call(sid, `termiumAudio.mute(${JSON.stringify(targetId)}, ${muted})`, 5000));
       } catch (e) {
-        if (this.stopped || this.cdp.closed) return;
-        // Its worker went away (a crash, or stopped): loading the extension again starts it.
-        this.log(`audio: ${e instanceof Error ? e.message : e}`);
-        this.sid = null;
-        if (++this.failures > 3) return;
-        await Bun.sleep(1000 * this.failures);
-        if (!(await this.start())) return;
-        return; // start() follows again
+        // Its worker went: run() starts it again (dropping the session wakes it); then once more.
+        this.drop(sid);
+        if (attempt > 0 || this.stopped) throw new Error(`muting failed (${e instanceof Error ? e.message : e}); try again`);
       }
     }
   }
+}
 
-  /** Mutes or unmutes the page's tab; false if the browser doesn't know it as a tab. */
-  async setMuted(targetId: string, muted: boolean): Promise<boolean> {
-    return !!(await this.call(`termiumAudio.mute(${JSON.stringify(targetId)}, ${muted})`));
-  }
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`${what} didn't answer in ${ms / 1000} s`)), ms)));
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }

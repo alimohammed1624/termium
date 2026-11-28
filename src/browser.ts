@@ -427,7 +427,9 @@ export async function launchBrowser(
     "--disable-blink-features=AutomationControlled",
     // Crash dumps stay with this profile rather than the user's own Helium config.
     `--crash-dumps-dir=${join(profileDir, "crashes")}`,
-    // Lets termium's own pipe (never the DevTools port) load its tab audio extension (see audio.ts).
+    // Lets termium load its tab audio extension (see audio.ts). DevTools
+    // clients on the port can load extensions too, but they already control
+    // the whole browser (and the port is on loopback only).
     "--enable-unsafe-extension-debugging",
   ];
   // A DevTools port for other programs (agents, Puppeteer, Playwright,

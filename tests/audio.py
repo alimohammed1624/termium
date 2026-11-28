@@ -61,7 +61,8 @@ def rms(secs=1.0):
     r = subprocess.run(["timeout", "-s", "INT", str(secs), "parec", "--latency-msec=20", "-d", "termiumtest.monitor",
                         "--format=s16le", "--channels=1", "--rate=8000", "--raw"], env=AENV, capture_output=True)
     a = array.array("h", r.stdout[: len(r.stdout) // 2 * 2])
-    return math.sqrt(sum(x * x for x in a) / max(1, len(a)))
+    # Nothing captured (parec failed) is no measurement: -1, never "silent".
+    return math.sqrt(sum(x * x for x in a) / len(a)) if len(a) > 1000 else -1
 
 # ---- fixtures on two sites (127.0.0.1 and localhost: the iframe is cross-site, its own process)
 with socket.socket() as so:
@@ -108,6 +109,15 @@ def cell_of(row, ch):
 def tabbar():
     return t.line(1)
 
+def seg(n):
+    """Tab n's text on the tab bar ("" if not shown)."""
+    line = tabbar()
+    i = line.find(f" {n} ")
+    return line[i:].split("│")[0] if i >= 0 else ""
+
+def is_silent(q):
+    return 0 <= q < 50
+
 def prefix(k):
     t.key("ctrl+b"); t.key(k)
     time.sleep(0.3)
@@ -120,24 +130,26 @@ try:
     ids = {m: next(x["id"] for x in tabs if f"mode={m}" in x["url"]) for m in ("media", "osc", "frame")}
     check("nothing plays yet: no icon", "♪" not in tabbar() and "🔇" not in tabbar(), tabbar())
 
+    pos = {"media": 1, "osc": 2, "frame": 3}
+
     def play(mode):
         ctl("eval", "start()", "--tab", str(ids[mode]))
         ok = t.wait_for(lambda: tab(ids[mode]).get("audible") is True, 15, 0.3)
         check(f"{mode}: ctl tabs says it plays", ok, json.dumps(tab(ids[mode])))
-        check(f"{mode}: ♪ on its tab", t.wait_for(lambda: "♪" in tabbar(), 5), tabbar())
+        check(f"{mode}: ♪ on its tab", t.wait_for(lambda: "♪" in seg(pos[mode]), 5), tabbar())
         check(f"{mode}: ♪ on its space in the sidebar", "♪" in t.line(3), t.line(3))
         q = rms()
         check(f"{mode}: sound reaches the sink", q > 1000, f"rms {q:.0f}")
 
     def silent(mode, how):
         check(f"{mode}: muted ({how}) per ctl tabs", t.wait_for(lambda: tab(ids[mode]).get("muted") is True, 5, 0.3), json.dumps(tab(ids[mode])))
-        check(f"{mode}: 🔇 on its tab ({how})", t.wait_for(lambda: "🔇" in tabbar(), 5), tabbar())
+        check(f"{mode}: 🔇 on its tab ({how})", t.wait_for(lambda: "🔇" in seg(pos[mode]), 5), tabbar())
         q = rms()
-        check(f"{mode}: silent at the sink ({how})", q < 50, f"rms {q:.0f}")
+        check(f"{mode}: silent at the sink ({how})", is_silent(q), f"rms {q:.0f}")
 
     def loud(mode, how):
         check(f"{mode}: unmuted ({how}) per ctl tabs", t.wait_for(lambda: tab(ids[mode]).get("muted") is False, 5, 0.3), json.dumps(tab(ids[mode])))
-        check(f"{mode}: back to ♪ ({how})", t.wait_for(lambda: "♪" in tabbar() and "🔇" not in tabbar(), 5), tabbar())
+        check(f"{mode}: back to ♪ ({how})", t.wait_for(lambda: "♪" in seg(pos[mode]) and "🔇" not in tabbar(), 5), tabbar())
         q = rms()
         check(f"{mode}: sound again ({how})", q > 1000, f"rms {q:.0f}")
 
@@ -160,9 +172,9 @@ try:
     # Survives switching to it and away.
     for n in ("1", "3"):
         prefix(n)
-        check(f"media: still muted after switching to tab {n}", tab(ids["media"]).get("muted") is True and "🔇" in tabbar(), tabbar())
+        check(f"media: still muted after switching to tab {n}", tab(ids["media"]).get("muted") is True and "🔇" in seg(1), tabbar())
     q = rms()
-    check("media: still silent after the switches", q < 50, f"rms {q:.0f}")
+    check("media: still silent after the switches", is_silent(q), f"rms {q:.0f}")
     t.click_cell(cell_of(1, "🔇"), 1)
     loud("media", "click")
     stop("media")
@@ -192,6 +204,64 @@ try:
     prefix("m")
     loud("frame", "Ctrl+B m")
     stop("frame")
+
+    # 4. A split tab: one pane muted, sound from the other. The tab shows ♪
+    # (sound comes out of it) and one toggle silences it; the next unmutes both.
+    prefix("2")
+    r = ctl("mute", str(ids["osc"]))
+    prefix("v")
+    t.key("escape")
+    time.sleep(0.5)
+    split = next((x["id"] for x in ctl_json("tabs") if x.get("tab") == 2 and x.get("pane") == 2), None)
+    ctl("open", f"{BASE}?mode=osc", "--tab", str(split))
+    ctl("eval", "start()", "--tab", str(split))
+    ok = t.wait_for(lambda: tab(split).get("audible") is True, 15, 0.3)
+    check("split: the unmuted pane plays, the tab shows ♪", ok and t.wait_for(lambda: "♪" in seg(2) and "🔇" not in seg(2), 5), tabbar())
+    q = rms()
+    check("split: sound reaches the sink", q > 1000, f"rms {q:.0f}")
+    prefix("m")
+    check("split: one Ctrl+B m mutes both panes", t.wait_for(lambda: tab(split).get("muted") is True and tab(ids["osc"]).get("muted") is True, 5, 0.3),
+          json.dumps([tab(split), tab(ids["osc"])]))
+    check("split: 🔇 on the tab", t.wait_for(lambda: "🔇" in seg(2), 5), tabbar())
+    q = rms()
+    check("split: silent", is_silent(q), f"rms {q:.0f}")
+    prefix("m")
+    check("split: the next one unmutes both", t.wait_for(lambda: tab(split).get("muted") is False and tab(ids["osc"]).get("muted") is False, 5, 0.3),
+          json.dumps([tab(split), tab(ids["osc"])]))
+    q = rms()
+    check("split: sound again", q > 1000, f"rms {q:.0f}")
+    prefix("m")
+    check("split: muted again", t.wait_for(lambda: tab(split).get("muted") is True, 5, 0.3), json.dumps(tab(split)))
+
+    # 5. Its extension's worker goes (closed by another DevTools client): it comes back, mute still works.
+    port = ctl_json("devtools").get("port")
+    workers = [x for x in json.loads(subprocess.run(["curl", "-s", f"http://127.0.0.1:{port}/json/list"], capture_output=True, text=True).stdout)
+               if x.get("type") == "service_worker" and x.get("url", "").endswith("/worker.js")]
+    check("worker: found", len(workers) == 1, str(workers))
+    for w in workers:
+        subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "close", f"http://127.0.0.1:{port}", w["id"]], cwd=ROOT, capture_output=True, timeout=30)
+    t0 = time.time()
+    r = ctl("unmute", str(split), "--timeout", "40")
+    check("worker: unmute works once it's back", r.returncode == 0, f"{r.returncode} {r.stderr} after {time.time() - t0:.1f}s")
+    check("worker: and the state follows again", t.wait_for(lambda: tab(split).get("muted") is False and tab(split).get("audible") is True, 40, 0.5),
+          json.dumps(tab(split)))
+    q = rms()
+    check("worker: sound again", q > 1000, f"rms {q:.0f}")
+
+    # 6. A tab bar too narrow for the icon: clicking what's left of the tab (its "…") never mutes.
+    prefix("b")  # no sidebar
+    t.resize(9, t.rows)
+    time.sleep(1.5)
+    line = tabbar()
+    cut = [x for x in range(1, t.cols + 1) if line[x - 1:x] == "…"]
+    check("narrow: the tab is cut before its icon", "♪" not in line and cut, line)
+    for x in cut:
+        t.click_cell(x, 1)
+    time.sleep(1)
+    check("narrow: clicking the cut tab doesn't mute", tab(split).get("muted") is False, line + " | " + json.dumps(tab(split)))
+    t.resize(160, t.rows)
+    prefix("b")
+    ctl("eval", "stop()", "--tab", str(split))
 
     r = ctl("mute", "99")
     check("ctl mute of no such tab fails", r.returncode == 1 and "no tab 99" in r.stderr, r.stderr)

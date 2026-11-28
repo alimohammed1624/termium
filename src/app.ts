@@ -251,13 +251,16 @@ const RESET = "\x1b[0m";
 const at = (row: number, col: number) => `\x1b[${row};${col}H`;
 
 /**
- * A tab's audio icon: muted (any of its pages: clicking it unmutes), playing
- * sound, or none. For a space, `sounding`: sound coming out of any of its
- * pages shows first (that's the space to look in).
+ * The sound of a tab's (or space's) pages: "playing" if sound comes out of
+ * any of them, else "muted" if any is muted, else null. Its icon, and what
+ * clicking it does: ♪ mutes, 🔇 unmutes.
  */
-function audioIcon(pages: Page[], sounding = false): string {
-  if (sounding && pages.some((p) => p.audible && !p.muted)) return "♪";
-  return pages.some((p) => p.muted) ? "🔇" : pages.some((p) => p.audible) ? "♪" : "";
+function audioOf(pages: Page[]): "playing" | "muted" | null {
+  return pages.some((p) => p.audible && !p.muted) ? "playing" : pages.some((p) => p.muted) ? "muted" : null;
+}
+function audioIcon(pages: Page[]): string {
+  const a = audioOf(pages);
+  return a === "playing" ? "♪" : a === "muted" ? "🔇" : "";
 }
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
@@ -521,7 +524,7 @@ export class App {
     // Which tabs play sound, and muting them (in the background: startup doesn't wait for it).
     if (this.opts.audioExtension) {
       this.audio = new TabAudio(cdp, this.opts.audioExtension, this.opts.log, (states) => this.onAudio(states));
-      void this.audio.start();
+      void this.audio.run();
     }
 
     // Present as regular Chrome: "HeadlessChrome" in the user agent and
@@ -1148,17 +1151,17 @@ export class App {
 
   /** Mutes or unmutes a page (the browser's tab mute: it covers its frames, and stays across tab switches and navigation). */
   async setMuted(page: Page, muted: boolean): Promise<void> {
-    if (!this.audio?.available) throw new Error("muting isn't available with this browser (see the session log)");
+    if (!this.audio) throw new Error("muting isn't available in this session");
     if (!(await this.audio.setMuted(page.targetId, muted))) throw new Error(`tab ${page.num} isn't a browser tab that can be muted`);
     // Shown at once; the browser confirms it (and anything else that changed) right after.
     page.muted = muted;
     this.queueChrome();
   }
 
-  /** Mutes every page of a tab, or unmutes them all if any is muted. */
+  /** As its icon says: mutes every page of a tab if sound comes out of it (or there's no icon), else unmutes them. */
   private toggleMute(tab: Tab): void {
     const pages = leaves(tab.root);
-    const mute = !pages.some((p) => p.muted);
+    const mute = audioOf(pages) !== "muted";
     for (const p of pages) this.setMuted(p, mute).catch((e) => this.showToast(e instanceof Error ? e.message : String(e)));
   }
 
@@ -2241,7 +2244,7 @@ export class App {
       const active = i === this.activeSpace;
       const cursor = this.mode === "spaces" && i === this.spaceCursor;
       const marker = cursor ? "▸" : active ? "●" : " ";
-      const sound = audioIcon(space.tabs.flatMap((t) => leaves(t.root)), true);
+      const sound = audioIcon(space.tabs.flatMap((t) => leaves(t.root)));
       const count = `${sound ? `${sound} ` : ""}${space.tabs.length}`;
       const name = truncate(`${marker} ${i + 1} ${space.name}`, w - count.length - 2);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
@@ -2271,7 +2274,7 @@ export class App {
     const space = this.space;
     const tabs = space?.tabs ?? [];
     // Where each tab's audio icon sits in its text (it's clicked to mute).
-    const icons: { at: number; w: number }[] = [];
+    const icons: { at: number; w: number; drawn: string }[] = [];
     const items = tabs.map((tab, i) => {
       const pages = leaves(tab.root);
       const title = pageTitle(tab.focused);
@@ -2279,12 +2282,13 @@ export class App {
       const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
       const sound = audioIcon(pages);
       const head = ` ${i + 1} ${dot}`;
-      icons[i] = { at: width(head), w: width(sound) };
+      icons[i] = { at: width(head), w: width(sound), drawn: head + sound };
       return `${head}${sound ? `${sound} ` : ""}${truncate(title, 22)}${extra} `;
     });
-    const iconHit = (i: number, start: number, shown: number) => {
-      const { at: off, w } = icons[i]!;
-      if (w && off + w <= shown) this.audioHits.push({ start: start + off, end: start + off + w, index: i });
+    // Only where the icon is drawn (a tab cut short may end before it).
+    const iconHit = (i: number, start: number, text: string) => {
+      const { at: off, w, drawn } = icons[i]!;
+      if (w && text.startsWith(drawn)) this.audioHits.push({ start: start + off, end: start + off + w, index: i });
     };
     const plus = " + ";
     // Scroll so the active tab is visible.
@@ -2313,7 +2317,7 @@ export class App {
       const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
       s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
-      iconHit(i, col + used, tw);
+      iconHit(i, col + used, text);
       used += tw + 1;
     }
     if (last < first && items.length > 0) {
@@ -2322,7 +2326,7 @@ export class App {
       const text = truncate(items[active]!, room);
       s += bg(C.base) + fg(C.text) + BOLD + text + RESET + bg(C.crust);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
-      iconHit(active, col + used, width(text));
+      iconHit(active, col + used, text);
       used += width(text);
       last = active;
     }
