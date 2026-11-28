@@ -652,7 +652,13 @@ class Agent {
    * slow to take the pointer (a heavy mousemove handler) stops it there; a
    * press is always followed by its release, so no button is left held.
    */
-  private async mouseClick(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
+  private mouseClick(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
+    // Not while termium takes a screenshot of the page: input sent meanwhile lands
+    // as if at a pixel ratio of 1 (at HiDPI, half way to the page's corner).
+    return this.app.withPage(page, () => this.mouseClickNow(page, x, y, button, count));
+  }
+
+  private async mouseClickNow(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
     const sid = page.sessionId;
     const bit = button === "left" ? 1 : button === "right" ? 2 : 4;
     const send = (p: object) => this.cdp.send("Input.dispatchMouseEvent", p, sid);

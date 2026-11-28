@@ -143,14 +143,15 @@ try:
     check(f"typing {b7['label'].upper()} clicks button 7 (a trusted click)", clicked, page(s, "window.clicks"))
     check("...and the labels are gone", t.wait_for(lambda: overlay_count(s) == 0, 5) and "HINTS" not in t.line(2), t.line(2))
 
-    # Typing the label of the button in the frame clicks it (its labels line up: checked above).
-    fb = by_id(hints, "frame button")
-    t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s) == 1, 10)
-    page(s, "window.clicks = []")
-    for ch in fb["label"]:
-        t.key(ch)
-    check(f"typing {fb['label'].upper()} clicks the button in the frame",
-          t.wait_for(lambda: [c.get("id") for c in page(s, "window.clicks") or []] == ["fb"], 10), page(s, "window.clicks"))
+    # Typing the label of a button in a frame (one scaled by a transform too) clicks it (their labels line up: checked above).
+    for name, fid in (("frame button", "fb"), ("scaled frame button", "fb2")):
+        fb = by_id(hints, name)
+        t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s) == 1, 10)
+        page(s, "window.clicks = []")
+        for ch in fb["label"]:
+            t.key(ch)
+        check(f"typing {fb['label'].upper()} clicks the {name}",
+              t.wait_for(lambda: [c.get("id") for c in page(s, "window.clicks") or []] == [fid], 10), page(s, "window.clicks"))
 
     # A dialog coming up while the labels are up takes the keys (they don't go to the labels).
     t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s) == 1, 10)
@@ -237,11 +238,26 @@ try:
     t.wait_idle(1, 10)
     check("HiDPI: devicePixelRatio is 2", page(s2, "devicePixelRatio") == 2, page(s2, "devicePixelRatio"))
     hints = labels_line_up(t, s2, "hidpi")
-    # Each click right after its labels go (a new frame, and a screenshot of it, under way).
+    t.key("escape")
+    # Something always moving: termium keeps taking screenshots of the page (as at HiDPI it does on every change).
+    page(s2, "(() => { const d = document.createElement('div'); d.id = 'spinner'; d.style.cssText = 'position:fixed;right:4px;bottom:4px;width:30px;height:30px;background:red';"
+             " d.animate([{ transform: 'rotate(0)' }, { transform: 'rotate(360deg)' }], { duration: 400, iterations: Infinity }); document.body.appendChild(d); })()")
+    time.sleep(0.5)
+    hints = ctl_json(s2, "hints").get("hints") or []
+    bad = []
+    for want in ("button 1", "button 5", "link 12", "button 24", "frame button", "scaled frame button"):
+        h = by_id(hints, want)
+        page(s2, "window.clicks = []")
+        r = ctl(s2, "click", h["label"])
+        got = [c.get("id") for c in page(s2, "window.clicks") or []]
+        if r.returncode != 0 or got != [{"frame button": "fb", "scaled frame button": "fb2"}.get(want, want.replace("button ", "b").replace("link ", "l"))]:
+            bad.append((want, r.returncode, r.stderr.strip(), got))
+    check("HiDPI, while the page keeps changing: ctl click LABEL clicks the right element every time", not bad, bad)
+    hints = ctl_json(s2, "hints").get("hints") or []
+    # Typed labels too, each click right after its labels go (a new frame, and a screenshot of it, under way).
     for want in ("button 3", "link 21", "button 20"):
         h = by_id(hints, want)
-        if want != "button 3":
-            t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s2) == 1, 10)
+        t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s2) == 1, 10)
         page(s2, "window.clicks = []")
         for ch in h["label"]:
             t.key(ch)

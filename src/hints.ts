@@ -70,6 +70,12 @@ const INSTALL = String.raw`(() => {
   const owns = (el, n) => { for (; n; n = n.parentNode || n.host) if (n === el) return true; return false; };
   // A same-origin frame's document (null for another origin's).
   const inner = (f) => { try { return f.contentDocument; } catch { return null; } };
+  // Where a frame's content starts in its parent's viewport, and its scale there (a CSS transform).
+  const frameBox = (f) => {
+    const b = f.getBoundingClientRect();
+    const s = f.offsetWidth > 0 ? b.width / f.offsetWidth : 1;
+    return { dx: b.left + f.clientLeft * s, dy: b.top + f.clientTop * s, s: s > 0 ? s : 1 };
+  };
   // What a click at (x, y) of the top viewport lands on: through shadow roots and same-origin frames.
   const hitAt = (x, y) => {
     let e = document.elementFromPoint(x, y);
@@ -80,9 +86,9 @@ const INSTALL = String.raw`(() => {
       }
       const d = (e.tagName === 'IFRAME' || e.tagName === 'FRAME') && inner(e);
       if (!d) break;
-      const b = e.getBoundingClientRect();
-      x -= b.left + e.clientLeft;
-      y -= b.top + e.clientTop;
+      const f = frameBox(e);
+      x = (x - f.dx) / f.s;
+      y = (y - f.dy) / f.s;
       const s = d.elementFromPoint(x, y);
       if (!s) break;
       e = s;
@@ -97,9 +103,8 @@ const INSTALL = String.raw`(() => {
       right = Math.min(w.innerWidth, right); bottom = Math.min(w.innerHeight, bottom);
       const f = w.frameElement;
       if (!f) return { left, top, right, bottom };
-      const b = f.getBoundingClientRect();
-      const dx = b.left + f.clientLeft, dy = b.top + f.clientTop;
-      left += dx; right += dx; top += dy; bottom += dy;
+      const { dx, dy, s } = frameBox(f);
+      left = dx + left * s; right = dx + right * s; top = dy + top * s; bottom = dy + bottom * s;
       w = f.ownerDocument.defaultView;
     }
     return null;
@@ -215,6 +220,7 @@ const INSTALL = String.raw`(() => {
     target(slot, i) {
       if (owner === slot) takeDown();
       const el = (sets[slot] || [])[i];
+      delete sets[slot];
       const p = el && place(el);
       return p ? { x: p.x, y: p.y, link: isLink(el) } : null;
     },

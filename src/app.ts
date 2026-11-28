@@ -3348,17 +3348,19 @@ export class App {
     this.mode = "normal";
     this.queueChrome();
     const page = h.page;
-    if (!this.pages.has(page.sessionId)) return;
-    const t = await h.hints.target(i);
-    if (!t) return this.showToast("That element is gone or covered now");
-    const newTab = h.newTab && t.link;
-    const modifiers = newTab ? (process.platform === "darwin" ? 4 : 2) : 0;
-    if (newTab) this.lastMiddlePress = Date.now();
-    const send = (p: object) =>
-      this.cdp.send("Input.dispatchMouseEvent", { x: t.x, y: t.y, modifiers, ...p }, page.sessionId).catch(() => {});
+    const doc = page.docGen;
     // Not while a screenshot of the page is being taken (see captureSharp): input sent
     // meanwhile is placed as if at a pixel ratio of 1 (at HiDPI, half way to the corner).
+    // Where to click is found once it's the click's turn, in the same document.
     await this.serial(page, async () => {
+      if (!this.pages.has(page.sessionId) || page.docGen !== doc) return;
+      const t = await h.hints.target(i);
+      if (!t || page.docGen !== doc) return this.showToast("That element is gone or covered now");
+      const newTab = h.newTab && t.link;
+      const modifiers = newTab ? (process.platform === "darwin" ? 4 : 2) : 0;
+      if (newTab) this.lastMiddlePress = Date.now();
+      const send = (p: object) =>
+        this.cdp.send("Input.dispatchMouseEvent", { x: t.x, y: t.y, modifiers, ...p }, page.sessionId).catch(() => {});
       await send({ type: "mouseMoved", button: "none", buttons: 0 });
       await send({ type: "mousePressed", button: "left", buttons: 1, clickCount: 1 });
       await send({ type: "mouseReleased", button: "left", buttons: 0, clickCount: 1 });
