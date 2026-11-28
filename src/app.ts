@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { TabAudio, type AudioState } from "./audio";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -122,6 +123,10 @@ export interface Page {
   foreignTries?: number;
   loadingTries?: number;
   foreignPolls?: number;
+  /** Sound is coming out of it (the browser's own measure; see audio.ts). */
+  audible?: boolean;
+  /** Muted (the browser's tab mute: it stays until unmuted). */
+  muted?: boolean;
 }
 
 /** A page as `termium ctl tabs` lists it. */
@@ -140,6 +145,9 @@ export interface AgentTab {
   pane: number;
   loading: boolean;
   dialog: { type: string; message: string } | null;
+  /** Playing sound (muted or not). */
+  audible: boolean;
+  muted: boolean;
 }
 
 interface Tab {
@@ -206,6 +214,8 @@ export interface AppOptions {
   downloadDir: string;
   /** Where downloads land (under generated names) before being moved to downloadDir. */
   downloadStaging: string;
+  /** Where termium's tab audio extension is written (no audio indicator or muting without it). */
+  audioExtension?: string;
   quit: () => void;
   /** Detaches the terminal; the session keeps running. */
   detach: () => void;
@@ -239,6 +249,16 @@ const bg = (hex: string) => `\x1b[48;2;${rgb(hex)}m`;
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
 const at = (row: number, col: number) => `\x1b[${row};${col}H`;
+
+/**
+ * A tab's audio icon: muted (any of its pages: clicking it unmutes), playing
+ * sound, or none. For a space, `sounding`: sound coming out of any of its
+ * pages shows first (that's the space to look in).
+ */
+function audioIcon(pages: Page[], sounding = false): string {
+  if (sounding && pages.some((p) => p.audible && !p.muted)) return "♪";
+  return pages.some((p) => p.muted) ? "🔇" : pages.some((p) => p.audible) ? "♪" : "";
+}
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
 const PROMPT_GLOBALS = new Set([
@@ -300,6 +320,7 @@ const HELP: [string, string][] = [
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
+  ["m", "mute / unmute tab"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
@@ -497,6 +518,11 @@ export class App {
     await cdp
       .send("Browser.setPermission", { permission: { name: "notifications" }, setting: "prompt" })
       .catch((e) => this.opts.log(`permissions: ${e}`));
+    // Which tabs play sound, and muting them (in the background: startup doesn't wait for it).
+    if (this.opts.audioExtension) {
+      this.audio = new TabAudio(cdp, this.opts.audioExtension, this.opts.log, (states) => this.onAudio(states));
+      void this.audio.start();
+    }
 
     // Present as regular Chrome: "HeadlessChrome" in the user agent and
     // client hints gets pages to serve bot checks (DuckDuckGo does).
@@ -1103,6 +1129,38 @@ export class App {
   }
 
   private titlePoll: ReturnType<typeof setInterval> | null = null;
+  private audio: TabAudio | null = null;
+  /** Where the audio icons on the tab bar are, to click (index: the tab). */
+  private audioHits: { start: number; end: number; index: number }[] = [];
+
+  private onAudio(states: Map<string, AudioState>): void {
+    let changed = false;
+    for (const page of this.pages.values()) {
+      const st = states.get(page.targetId);
+      const audible = !!st?.audible;
+      const muted = !!st?.muted;
+      if (page.audible !== audible || page.muted !== muted) changed = true;
+      page.audible = audible;
+      page.muted = muted;
+    }
+    if (changed) this.queueChrome();
+  }
+
+  /** Mutes or unmutes a page (the browser's tab mute: it covers its frames, and stays across tab switches and navigation). */
+  async setMuted(page: Page, muted: boolean): Promise<void> {
+    if (!this.audio?.available) throw new Error("muting isn't available with this browser (see the session log)");
+    if (!(await this.audio.setMuted(page.targetId, muted))) throw new Error(`tab ${page.num} isn't a browser tab that can be muted`);
+    // Shown at once; the browser confirms it (and anything else that changed) right after.
+    page.muted = muted;
+    this.queueChrome();
+  }
+
+  /** Mutes every page of a tab, or unmutes them all if any is muted. */
+  private toggleMute(tab: Tab): void {
+    const pages = leaves(tab.root);
+    const mute = !pages.some((p) => p.muted);
+    for (const p of pages) this.setMuted(p, mute).catch((e) => this.showToast(e instanceof Error ? e.message : String(e)));
+  }
 
   private async pollTitles(): Promise<void> {
     if (this.closingAll || this.cdp.closed) return;
@@ -2183,7 +2241,8 @@ export class App {
       const active = i === this.activeSpace;
       const cursor = this.mode === "spaces" && i === this.spaceCursor;
       const marker = cursor ? "▸" : active ? "●" : " ";
-      const count = `${space.tabs.length}`;
+      const sound = audioIcon(space.tabs.flatMap((t) => leaves(t.root)), true);
+      const count = `${sound ? `${sound} ` : ""}${space.tabs.length}`;
       const name = truncate(`${marker} ${i + 1} ${space.name}`, w - count.length - 2);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
       const style = cursor
@@ -2211,13 +2270,22 @@ export class App {
     this.badgeHit = badge && bw ? [col + w, col + full] : null;
     const space = this.space;
     const tabs = space?.tabs ?? [];
+    // Where each tab's audio icon sits in its text (it's clicked to mute).
+    const icons: { at: number; w: number }[] = [];
     const items = tabs.map((tab, i) => {
       const pages = leaves(tab.root);
       const title = pageTitle(tab.focused);
       const extra = pages.length > 1 ? ` ⊞${pages.length}` : "";
       const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
-      return ` ${i + 1} ${dot}${truncate(title, 22)}${extra} `;
+      const sound = audioIcon(pages);
+      const head = ` ${i + 1} ${dot}`;
+      icons[i] = { at: width(head), w: width(sound) };
+      return `${head}${sound ? `${sound} ` : ""}${truncate(title, 22)}${extra} `;
     });
+    const iconHit = (i: number, start: number, shown: number) => {
+      const { at: off, w } = icons[i]!;
+      if (w && off + w <= shown) this.audioHits.push({ start: start + off, end: start + off + w, index: i });
+    };
     const plus = " + ";
     // Scroll so the active tab is visible.
     let first = 0;
@@ -2229,6 +2297,7 @@ export class App {
     let s = at(1, col) + bg(C.crust);
     let used = 0;
     this.tabHits = [];
+    this.audioHits = [];
     if (first > 0) {
       // Tabs scrolled off to the left.
       s += fg(C.peach) + "‹";
@@ -2244,6 +2313,7 @@ export class App {
       const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
       s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
+      iconHit(i, col + used, tw);
       used += tw + 1;
     }
     if (last < first && items.length > 0) {
@@ -2252,6 +2322,7 @@ export class App {
       const text = truncate(items[active]!, room);
       s += bg(C.base) + fg(C.text) + BOLD + text + RESET + bg(C.crust);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
+      iconHit(active, col + used, width(text));
       used += width(text);
       last = active;
     }
@@ -3149,6 +3220,7 @@ export class App {
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
+      case "m": if (tab) this.toggleMute(tab); return;
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
       case "shift+u": this.openUpdate(); return;
@@ -3674,6 +3746,12 @@ export class App {
         if (ev.button === 0) this.openUpdate();
         return true;
       }
+      const sound = this.audioHits.find((h) => col >= h.start && col < h.end);
+      const soundTab = sound && this.space?.tabs[sound.index];
+      if (soundTab && ev.button === 0) {
+        this.toggleMute(soundTab);
+        return true;
+      }
       const hit = this.tabHits.find((h) => col >= h.start && col < h.end);
       if (hit) {
         const tab = this.space?.tabs[hit.index];
@@ -3864,6 +3942,8 @@ export class App {
             pane: pi + 1,
             loading: page.loading,
             dialog: page.dialog ? { type: page.dialog.type, message: page.dialog.message } : null,
+            audible: !!page.audible,
+            muted: !!page.muted,
           });
         });
       });

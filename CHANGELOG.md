@@ -6,6 +6,13 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Tab audio: a tab playing sound shows `♪` on the tab bar and on its space
+  in the sidebar; clicking it, `Ctrl+B m` or `termium ctl mute/unmute`
+  mutes the tab (`🔇`) with the browser's own tab mute, which covers
+  iframes and Web Audio and survives tab switches. `termium ctl tabs`
+  shows `playing sound` or `muted`.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added

@@ -27,6 +27,7 @@ ID is an element id from \`snapshot\`, like 3:142@2):
                                 waits for it to load
   select TAB                    show that tab in the terminal and focus it
   close [TAB] [--force]         close a tab (--force: even if it asks "Leave this page?")
+  mute [TAB] / unmute [TAB]     mute a tab's sound (it stays muted until unmuted)
   snapshot [TAB]                the page's accessibility tree as text, with element ids
   text [TAB]                    the page's readable text
   click ID | --xy X,Y [--double] [--right|--middle]
@@ -203,6 +204,11 @@ export function parseCtl(argv: string[]): Parsed {
       maxArgs(0);
       req.force = flags.has("--force");
       break;
+    case "mute":
+    case "unmute":
+      tabArg();
+      maxArgs(0);
+      break;
     case "snapshot":
     case "text":
     case "shot":
@@ -378,7 +384,12 @@ export async function runCtl(argv: string[]): Promise<never> {
 
 function tabLine(t: any): string {
   const where = `space ${t.space}${t.spaceName && t.spaceName !== `space ${t.space}` ? ` (${t.spaceName})` : ""}, tab ${t.tab}${t.pane > 1 ? `, pane ${t.pane}` : ""}`;
-  const flags = [t.loading ? "loading" : "", t.dialog ? `${t.dialog.type} dialog` : "", t.visible ? "" : "hidden"].filter(Boolean);
+  const flags = [
+    t.loading ? "loading" : "",
+    t.dialog ? `${t.dialog.type} dialog` : "",
+    t.muted ? "muted" : t.audible ? "playing sound" : "",
+    t.visible ? "" : "hidden",
+  ].filter(Boolean);
   return `${t.active ? "*" : " "}${String(t.id).padStart(3)}  ${where}  ${t.title || "(untitled)"}  ${t.url}${flags.length ? `  [${flags.join(", ")}]` : ""}`;
 }
 
@@ -394,6 +405,9 @@ function human(req: CtlRequest, r: any): string {
         (r.background ? "\n(opened in the background: the person at the terminal was busy)" : "") +
         (r.dialog ? `\nthe page shows a ${r.dialog.type} dialog: ${r.dialog.message}` : "")
       );
+    case "mute":
+    case "unmute":
+      return `${req.cmd}d ${r.id}: ${r.title || "(untitled)"}  ${r.url}`;
     case "snapshot":
       return `tab ${r.tab}: ${r.title || "(untitled)"}  ${r.url}\n${r.snapshot}`;
     case "text":

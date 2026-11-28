@@ -235,6 +235,18 @@ class Agent {
       }
       case "close":
         return this.close(req);
+      case "mute":
+      case "unmute": {
+        // Not the person's view or keys: no waiting for them.
+        const page = this.page(req.tab, true);
+        try {
+          await this.app.setMuted(page, req.cmd === "mute");
+        } catch (e) {
+          throw new CtlError(e instanceof Error ? e.message : String(e));
+        }
+        this.note(`${req.cmd}d tab ${page.num}`);
+        return this.describe(page);
+      }
       case "snapshot":
         return this.snapshot(this.page(req.tab));
       case "text":
