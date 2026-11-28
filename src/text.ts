@@ -2,6 +2,7 @@
 // single-line editor used for the URL bar and other prompts.
 
 import type { KeyEvent } from "./input";
+import { mix } from "./theme";
 
 export const DEFAULT_SEARCH = "https://duckduckgo.com/?q=%s";
 
@@ -69,6 +70,44 @@ export function truncate(s: string, max: number): string {
   }
   return outStr + "…";
 }
+
+/** How many cells cut-off text fades over. */
+const FADE_CELLS = 3;
+
+/**
+ * Like truncate, but cut-off text ends in a fade instead of an ellipsis:
+ * its last few cells shade from `from` (the text color) into `to` (the
+ * background behind it), both 6-digit hex, in 24-bit color. Leaves the
+ * foreground set to `from`. Text that fits comes back as is.
+ */
+export function fade(s: string, max: number, from: string, to: string): string {
+  if (max <= 0) return "";
+  s = s.replace(CONTROLS, " ");
+  if (width(s) <= max) return s;
+  const cells: string[] = [];
+  let w = 0;
+  for (const { segment } of segmenter.segment(s)) {
+    const sw = width(segment);
+    if (w + sw > max) break;
+    cells.push(segment);
+    w += sw;
+  }
+  // Fade letters, not the blank a cut can end on.
+  while (cells.length > 1 && !cells.at(-1)!.trim()) cells.pop();
+  // The first cell stays readable.
+  const n = Math.min(FADE_CELLS, Math.max(1, cells.length - 1), cells.length);
+  const head = cells.slice(0, cells.length - n).join("");
+  const tail = cells.slice(cells.length - n).map((c, i) => fgHex(mix(from, to, (i + 1) / (n + 1))) + c);
+  return head + tail.join("") + fgHex(from);
+}
+
+/** fade(), padded to exactly `n` display columns. */
+export function fadeFit(s: string, n: number, from: string, to: string): string {
+  const t = fade(s, n, from, to);
+  return t + " ".repeat(Math.max(0, n - width(t)));
+}
+
+const fgHex = (c: string) => `\x1b[38;2;${[0, 2, 4].map((i) => parseInt(c.slice(i, i + 2), 16)).join(";")}m`;
 
 /** Truncates or pads `s` to exactly `n` display columns. */
 export function fit(s: string, n: number): string {

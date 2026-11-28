@@ -75,6 +75,11 @@ function tmuxPassthroughSetting(): string | null {
   }
 }
 
+/** Whether the terminal (outside tmux) says it shows 24-bit color. */
+export function trueColor(env: Record<string, string | undefined>): boolean {
+  return /^(truecolor|24bit)$/i.test(env.COLORTERM ?? "") || /-direct$|^xterm-(kitty|ghostty)$|^(alacritty|wezterm|foot)/.test(env.TERM ?? "");
+}
+
 /**
  * Inside tmux: is ours the pane tmux hands the outer terminal's answers to
  * (the active pane of a window being shown)? Queries sent from any other
@@ -934,6 +939,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     pixelMouse: caps.pixelMouse,
     placeholders,
     rgbIds: pane0.rgb,
+    truecolor: inTmux ? pane0.rgb : trueColor(process.env),
     cwd: process.cwd(),
     theme: o.theme,
     colors: caps.colors,

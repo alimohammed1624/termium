@@ -97,6 +97,8 @@ export interface Hello {
   cwd?: string;
   /** Placeholder ids may use RGB colours (the terminal under tmux shows RGB). */
   rgbIds?: boolean;
+  /** The terminal shows 24-bit color (cut-off text fades out instead of ending in "…"). */
+  truecolor?: boolean;
   /** How pictures reach the terminal (for the log): "direct", "tmux-files" or "tmux-paced". */
   via?: string;
   /** Open this in a new tab (attaching to a session that's already running). */
@@ -1032,6 +1034,7 @@ function terminalOf(h: Partial<Hello>) {
     pixelMouse: !!h.pixelMouse,
     placeholders: !!h.placeholders,
     rgbIds: !!h.rgbIds,
+    truecolor: !!h.truecolor,
     cwd: typeof h.cwd === "string" && h.cwd.startsWith("/") ? h.cwd : undefined,
     theme: isTheme(h.theme) ? h.theme : undefined,
     colors: termColors(h.colors),
