@@ -43,6 +43,7 @@ import {
   type Restore,
 } from "./session";
 import { setSink } from "./terminal";
+import { Tunnel, proxyArgs, sshHost } from "./tunnel";
 import {
   MAX_AGE_MS,
   cachePath,
@@ -60,7 +61,7 @@ import {
 } from "./update";
 
 /** Environment a session runs with that a restart keeps (see restartSession). */
-const RESTART_ENV = ["XDG_DATA_HOME", "XDG_STATE_HOME", "TERMIUM_BROWSER", "TERMIUM_SEARCH", "TERMIUM_DOWNLOAD_DIR", "TMPDIR", "HOME"];
+const RESTART_ENV = ["XDG_DATA_HOME", "XDG_STATE_HOME", "TERMIUM_BROWSER", "TERMIUM_SEARCH", "TERMIUM_DOWNLOAD_DIR", "TERMIUM_SSH", "TMPDIR", "HOME"];
 
 /** A queued agent command whose time ran out before its turn. */
 const SKIPPED = Symbol("skipped");
@@ -72,6 +73,8 @@ export interface LaunchOptions {
   incognito: boolean;
   scale: number | null;
   search: string;
+  /** --ssh: the browser's traffic goes through this ssh destination (src/tunnel.ts). */
+  ssh?: string;
 }
 
 /** What a client says when it attaches. */
@@ -381,10 +384,17 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   const pending: InputEvent[] = [];
   const server = createServer();
 
+  // --ssh: the tunnel the browser's traffic goes through, up before the browser starts.
+  // Dropped later, it's reopened on the same port; meanwhile pages fail at once (the proxy refuses) and the user is told.
+  const tunnel = args.ssh
+    ? new Tunnel(args.ssh, log, (state, why) => app?.setTunnel(state === "up" ? null : why))
+    : null;
+  if (tunnel) process.on("exit", () => tunnel.kill());
   const launching = (async () => {
     const reaped = await reapOrphans(profile);
     if (reaped) log(`stopped ${reaped} leftover browser process(es) on ${profile}`);
-    return launchBrowser(bin, profile, join(logDir, "browser.log"), browserTmp);
+    if (tunnel) await tunnel.start();
+    return launchBrowser(bin, profile, join(logDir, "browser.log"), browserTmp, undefined, tunnel ? proxyArgs(tunnel.port) : []);
   })();
   launching.catch(() => {}); // handled where it's awaited
 
@@ -439,6 +449,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
     unlockProfile(profile);
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
     rmSync(browserTmp, { recursive: true, force: true });
+    await tunnel?.stop();
     const bye = { t: "bye", reason: err ? "error" : (reason ?? "exited"), code, message: err ? (err instanceof Error ? err.message : String(err)) : undefined, ...extra };
     // Agents waiting on an answer get one: why the session ended.
     const why = err ? (err instanceof Error ? err.message : String(err)) : `session "${name}" ended`;
@@ -497,6 +508,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         detach: () => detachClient("detached"),
         log,
         version,
+        ssh: args.ssh ? sshHost(args.ssh) : undefined,
         update: {
           blocker: () => selfUpdateBlocker(),
           start: (tag) => void runSelfUpdate(tag),
@@ -767,6 +779,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           ctl: true,
           pages: app?.pages.size ?? 0,
           profile: args.incognito ? "(incognito)" : profile,
+          // --ssh: the host the browser's traffic goes through, and whether the tunnel is up now.
+          ssh: args.ssh ?? null,
+          sshUp: tunnel ? tunnel.state === "up" : null,
           // Its DevTools endpoint (on loopback), once the browser is up.
           devtools: browser?.devtools ?? null,
         });

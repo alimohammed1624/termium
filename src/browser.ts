@@ -400,6 +400,7 @@ export function readDevToolsPort(profileDir: string): DevToolsEndpoint | null {
  * output goes straight to `logPath`: piping it through our event loop could
  * fill the pipe and freeze the browser while we're busy writing frames.
  * `tmpDir`, if given, becomes the browser's TMPDIR (removed by the caller).
+ * `extraArgs` are more browser flags (a proxy, say).
  */
 export async function launchBrowser(
   bin: string,
@@ -407,6 +408,7 @@ export async function launchBrowser(
   logPath: string,
   tmpDir: string | null,
   timeoutMs = 30_000,
+  extraArgs: string[] = [],
 ): Promise<LaunchedBrowser> {
   const owner = profileOwner(profileDir);
   if (owner !== null) {
@@ -432,7 +434,7 @@ export async function launchBrowser(
   // chrome-devtools-mcp): any free port, on loopback only. termium itself
   // keeps using the pipe.
   args.push("--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1");
-  args.push("about:blank");
+  args.push(...extraArgs, "about:blank");
   // The port is read from this file once the browser is up: one left by an
   // earlier run must not be mistaken for it.
   rmSync(join(profileDir, "DevToolsActivePort"), { force: true });

@@ -57,6 +57,7 @@ not character art, so text is sharp and video, canvas and WebGL work.
 termium                         # opens with the address bar focused
 termium news.ycombinator.com    # or start on a page
 termium --incognito             # throwaway profile, deleted when the session ends
+termium --ssh me@devbox         # drawn here, browsing from devbox: localhost:3000 is its dev server
 termium --help
 ```
 
@@ -64,9 +65,28 @@ Options: `--browser <path>` (default: Helium on `PATH`, or
 `$TERMIUM_BROWSER`), `--profile <dir>` (default
 `~/.local/share/termium/profile`, or `.../profiles/NAME` for a session
 started with `-s NAME`), `--incognito`, `--scale <n>` (device
-pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
+pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`),
+`--ssh <[user@]host>` (see [SSH mode](#ssh-mode)).
 They apply when a session starts. `--no-update-check` turns off the
 [update check](#updates).
+
+### SSH mode
+
+`termium --ssh [user@]host` draws pages locally but sends every request
+the browser makes through `host`: the session runs `ssh -N -D` (a SOCKS
+proxy on a free loopback port) and starts the browser with that proxy,
+loopback addresses included. So `localhost:3000` opens the remote's dev
+server, names resolve on the remote, and no frames go over SSH.
+
+- The login must work without a prompt (a key, or ssh-agent) and the host
+  key must be known: run a plain `ssh host` once first. Your
+  `~/.ssh/config` applies (`Host` aliases, ports, jump hosts).
+- The address bar shows `⇄ host`; `termium ls` shows `via ssh host`.
+  Restarting the session (after an update) keeps it.
+- If the tunnel drops, pages fail at once with a proxy error rather
+  than hang, the tag turns red, and termium says so and reconnects.
+- The session keeps its own profile: start it under its own name
+  (`termium -s devbox --ssh devbox`) to keep remote logins apart.
 
 ### Sessions
 
@@ -95,8 +115,8 @@ termium kill [name]      # end a session and its browser
 - Closing the terminal (or `kill`ing the `termium` in it) only detaches.
   If the session itself dies, an attached terminal gets its screen back
   with a message.
-- `--browser`, `--profile`, `--incognito`, `--scale` and `--search`
-  apply when a session starts; given to a running one they're an error
+- `--browser`, `--profile`, `--incognito`, `--scale`, `--search` and
+  `--ssh` apply when a session starts; given to a running one they're an error
   (start another with `-s NAME`).
 - Sessions listen on a Unix socket in `$XDG_RUNTIME_DIR/termium/` (else
   `termium-<uid>` in the temp dir), readable only by you. A socket left

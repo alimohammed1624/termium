@@ -14,6 +14,7 @@ import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
 import { DEFAULT_SEARCH } from "./text";
+import { validSshDest } from "./tunnel";
 import {
   UPGRADE_CMD,
   cachePath,
@@ -58,13 +59,16 @@ Options:
   --incognito           use a throwaway profile that is deleted when the session ends
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)
+  --ssh <[user@]host>   send all of the browser's traffic through that host over SSH (pages are
+                        still drawn here): localhost there is localhost here. Needs a login
+                        without a prompt (a key or ssh-agent) and a known host key
   --no-update-check     don't check GitHub for a newer termium, nor offer to update
                         (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help
   -V, --version         show the version
   --skill               print a SKILL.md that teaches an agent to use termium
 
---browser, --profile, --incognito, --scale and --search apply when a session starts.
+--browser, --profile, --incognito, --scale, --search and --ssh apply when a session starts.
 Ctrl+B d detaches (the browser keeps running); Ctrl+Q ends the session.
 Needs a terminal with the kitty graphics protocol, such as Ghostty, kitty or WezTerm
 (inside tmux: set -g allow-passthrough on). Press Ctrl+B then ? inside termium for keys.`;
@@ -145,6 +149,13 @@ function parseArgs(argv: string[]): Args {
         break;
       }
       case "--profile": args.profile = resolve(value()); flag("--profile"); break;
+      case "--ssh": {
+        const d = value();
+        if (!validSshDest(d)) fail(`bad --ssh destination "${d}" (expected [user@]host)`);
+        args.ssh = d;
+        flag("--ssh");
+        break;
+      }
       case "--incognito": args.incognito = true; flag("--incognito"); break;
       case "--search": {
         args.search = value();
@@ -210,6 +221,7 @@ function serverArgv(a: Args): string[] {
   if (a.incognito) argv.push("--incognito");
   if (a.scale !== null) argv.push("--scale", String(a.scale));
   if (a.search !== (process.env.TERMIUM_SEARCH || DEFAULT_SEARCH)) argv.push("--search", a.search);
+  if (a.ssh) argv.push("--ssh", a.ssh);
   if (a.url) argv.push(a.url);
   return argv;
 }

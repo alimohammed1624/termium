@@ -213,6 +213,8 @@ export interface AppOptions {
   /** The version this session runs. */
   version: string;
   update?: UpdateHooks;
+  /** --ssh: the host the browser's traffic goes through (shown in the address bar). */
+  ssh?: string;
 }
 
 // ---------------------------------------------------------------- style
@@ -2358,7 +2360,8 @@ export class App {
       const secure = url.startsWith("https://");
       const shown = url.replace(/^https:\/\//, "");
       const icon = page?.crashed ? fg(C.red) + "✖ " : secure ? fg(C.green) + "🔒" : fg(C.overlay) + "  ";
-      s += bg(C.surface0) + " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2) + RESET;
+      const tag = this.sshTag(fieldW - 3);
+      s += bg(C.surface0) + " " + tag.style + tag.text + RESET + bg(C.surface0) + icon + fg(C.text) + fit(shown, fieldW - 1 - 2 - width(tag.text)) + RESET;
     }
     s += barBg + " ";
     const rightCol = urlStart + fieldW + 1;
@@ -2935,6 +2938,24 @@ export class App {
     s += at(top + boxH - 2, left) + panel + fit("", boxW);
     s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(`  ${footer}`, boxW) + RESET;
     return s + RESET;
+  }
+
+  /** --ssh: why the tunnel is down (null: it's up). */
+  private tunnelDown: string | null = null;
+
+  /** The SSH tunnel went down (why) or came back (null). */
+  setTunnel(down: string | null): void {
+    this.tunnelDown = down;
+    const host = this.opts.ssh ?? "";
+    if (down) this.showToast(`SSH tunnel to ${host} dropped (${down}); reconnecting, pages won't load until it's back`, 10_000);
+    else this.showToast(`SSH tunnel to ${host} is back`, 4000);
+  }
+
+  /** The address bar's tag for --ssh: the host, in red while the tunnel is down. */
+  private sshTag(max: number): { text: string; style: string } {
+    if (!this.opts.ssh || max < 12) return { text: "", style: "" };
+    const text = truncate(`⇄ ${this.opts.ssh}${this.tunnelDown ? " ✖" : ""}`, Math.min(28, max - 8)) + " ";
+    return { text, style: this.tunnelDown ? fg(C.red) + BOLD : fg(C.blue) };
   }
 
   showToast(text: string, ms = 3000): void {

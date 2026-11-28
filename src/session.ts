@@ -308,7 +308,7 @@ export type SavedLaunch = Omit<LaunchOptions, "url">;
  * option added to LaunchOptions can't be left out of snapshots and their
  * comparison (it won't type-check until it's listed here).
  */
-const LAUNCH_KEYS: Record<keyof SavedLaunch, true> = { incognito: true, profile: true, browser: true, scale: true, search: true };
+const LAUNCH_KEYS: Record<keyof SavedLaunch, true> = { incognito: true, profile: true, browser: true, scale: true, search: true, ssh: true };
 
 /** The launch options of `args` as a restart saves them: all of them but the URL (and nothing else `args` holds). */
 export function savedLaunch(args: LaunchOptions | SavedLaunch): SavedLaunch {
