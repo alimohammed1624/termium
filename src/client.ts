@@ -314,6 +314,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
           if (info.profile === "(incognito)") argv.push("--incognito");
           else if (typeof info.profile === "string" && info.profile.startsWith("/")) argv.push("--profile", info.profile);
           if (!o.updateCheck) argv.push("--no-update-check");
+          argv.push("--theme", o.theme);
           if (o.url) argv.push(o.url);
           try {
             process.execve!(argv[0]!, argv, process.env);
@@ -533,8 +534,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
   const pane0 = inTmux ? tmuxPane() : { active: true, visible: true, rgb: false };
   let paneActive = pane0.active;
   let paneVisible = pane0.visible;
-  parser.expectOsc = o.theme === "auto";
-  queryCapabilities(paneActive, parser.expectOsc);
+  queryCapabilities(paneActive, o.theme === "auto");
 
   const graphicsReply = new Promise<void>((r) => (onGraphics = r));
   await Promise.race([new Promise<void>((r) => (onCapsDone = r)), Bun.sleep(1500)]);
@@ -568,9 +568,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
     fileProbe = unanswered || !paneActive ? "unknown" : await probeFiles();
     fileTransport = fileProbe === "yes";
   }
-  // From here on ESC _ is a legacy Alt+_ keypress (and ESC ] Alt+]), not a reply we're waiting for.
+  // From here on ESC _ is a legacy Alt+_ keypress, not a reply we're waiting for.
   parser.expectApc = false;
-  parser.expectOsc = false;
 
   /** Stops a server this client started but won't attach to. */
   const stopOwnServer = async () => {

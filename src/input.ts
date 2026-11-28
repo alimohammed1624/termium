@@ -45,6 +45,20 @@ export type InputEvent =
   | { type: "color"; which: "fg" | "bg" | number; spec: string }
   | { type: "focus"; focused: boolean };
 
+const COLOR_REPLY = /^(?:1[01]|4;\d{1,3});[^\x07\x1b]{1,80}(?:\x07|\x1b\\)/;
+const COLOR_REPLY_START = /^(?:1[01]?|1[01];[^\x07\x1b]{0,80}\x1b?|4(?:;\d{0,3}(?:;[^\x07\x1b]{0,80}\x1b?)?)?)?$/;
+
+/**
+ * What follows ESC ] (`rest`) as a color reply: its length and that of its
+ * body (without the terminator), "partial" if it may be the start of one,
+ * or null.
+ */
+function colorReply(rest: string): { length: number; body: number } | "partial" | null {
+  const m = COLOR_REPLY.exec(rest);
+  if (m) return { length: m[0].length, body: m[0].length - (m[0].endsWith("\x07") ? 1 : 2) };
+  return COLOR_REPLY_START.test(rest) ? "partial" : null;
+}
+
 /** String.fromCodePoint that tolerates garbage (out-of-range values give ""). */
 function cpString(n: number): string {
   return Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "";
@@ -235,15 +249,15 @@ export class InputParser {
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * Legacy terminals send Alt+[ as "ESC [" and Alt+O as "ESC O", which also
-   * start escape sequences. Terminals write a real sequence in one go, so
-   * an "ESC [" or "ESC O" left incomplete for a moment was a keypress: emit
-   * it rather than let it swallow the next key.
+   * Legacy terminals send Alt+[ as "ESC [", Alt+O as "ESC O" and Alt+] as
+   * "ESC ]", which also start escape sequences (or color replies).
+   * Terminals write a real sequence in one go, so one left incomplete for a
+   * moment was a keypress: emit it rather than let it swallow the next key.
    */
   private watchStall(): void {
     const stalled = this.buf;
     if (this.kittyActive || this.pasting || stalled.length < 2 || stalled[0] !== "\x1b") return;
-    if (stalled[1] !== "[" && stalled[1] !== "O") return;
+    if (stalled[1] !== "[" && stalled[1] !== "O" && stalled[1] !== "]") return;
     this.stallTimer = setTimeout(() => {
       this.stallTimer = null;
       if (this.buf !== stalled) return;
@@ -319,7 +333,7 @@ export class InputParser {
       // String sequences are only replies to our queries (kitty graphics
       // replies are APC "ESC _ G"); otherwise a legacy Alt+_ / Alt+] / Alt+P
       // must stay a key rather than swallow all input after it.
-      if ((n === "_" && (this.expectApc || buf[i + 2] === "G" && this.kittyActive)) || ((n === "]" || n === "P") && this.kittyActive) || (n === "]" && this.expectOsc)) {
+      if ((n === "_" && (this.expectApc || buf[i + 2] === "G" && this.kittyActive)) || ((n === "]" || n === "P") && this.kittyActive)) {
         // String sequence terminated by ST (ESC \) or BEL.
         let end = -1;
         let termLen = 0;
@@ -334,12 +348,16 @@ export class InputParser {
         i = end + termLen;
         continue;
       }
-      // A color reply that came after we stopped waiting (a slow terminal or
-      // tmux): it arrives whole, in one write, and is dropped rather than typed.
+      // Without the kitty keyboard protocol ESC ] is also Alt+]: only a
+      // color reply (OSC 10, 11 or 4) is read as one. The start of one waits
+      // for the rest (a keypress that only looks like it is let go after a
+      // moment, see watchStall); anything else is the key.
       if (n === "]") {
-        const late = /^\](?:1[01]|4;\d{1,3});(?:rgba?:[0-9a-f/]+|#[0-9a-f]+)(?:\x07|\x1b\\)/i.exec(buf.slice(i + 1));
-        if (late) {
-          i += 1 + late[0].length;
+        const reply = colorReply(buf.slice(i + 2));
+        if (reply === "partial") break;
+        if (reply) {
+          this.osc(buf.slice(i + 2, i + 2 + reply.body));
+          i += 2 + reply.length;
           continue;
         }
       }
@@ -472,8 +490,6 @@ export class InputParser {
   kittyActive = false;
   /** True while capability replies (APC) may still arrive. */
   expectApc = true;
-  /** True while the terminal's color replies (OSC) may still arrive. */
-  expectOsc = false;
 
   private mouse(body: string, final: string): void {
     const [bRaw, xRaw, yRaw] = body.split(";").map(Number);

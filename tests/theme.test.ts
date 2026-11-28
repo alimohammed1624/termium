@@ -125,30 +125,49 @@ test("selectPopupColors sets the popup's colors from the palette", () => {
   expect(w.__termiumColors).toMatchObject({ bg: "#eff1f5", text: "#4c4f69", on: "#8839ef", onText: "#eff1f5" });
 });
 
-describe("input parser", () => {
-  const parse = (data: string, expectApc: boolean) => {
-    const evs: InputEvent[] = [];
+describe("input parser (legacy keys: ESC ] is also Alt+])", () => {
+  const parser = (expectApc = false) => {
+    const evs: any[] = [];
     const p = new InputParser((e) => evs.push(e));
     p.expectApc = expectApc;
-    p.expectOsc = expectApc;
-    p.feed(data);
-    return evs;
+    return { p, evs };
   };
-  test("reads color replies while replies are expected", () => {
-    expect(parse("\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\\x1b]11;rgb:1e1e/1e1e/2e2e\x07\x1b]4;12;rgb:89/b4/fa\x1b\\", true)).toEqual([
-      { type: "color", which: "fg", spec: "rgb:cdcd/d6d6/f4f4" },
-      { type: "color", which: "bg", spec: "rgb:1e1e/1e1e/2e2e" },
-      { type: "color", which: 12, spec: "rgb:89/b4/fa" },
-    ]);
+  const stall = () => Bun.sleep(80);
+  const colors = [
+    { type: "color", which: "fg", spec: "rgb:cdcd/d6d6/f4f4" },
+    { type: "color", which: "bg", spec: "rgb:1e1e/1e1e/2e2e" },
+    { type: "color", which: 12, spec: "rgb:89/b4/fa" },
+  ];
+  const replies = "\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\\x1b]11;rgb:1e1e/1e1e/2e2e\x07\x1b]4;12;rgb:89/b4/fa\x1b\\";
+  test("reads color replies", () => {
+    const { p, evs } = parser(true);
+    p.feed(replies);
+    expect(evs).toEqual(colors);
   });
-  test("afterwards ESC ] is Alt+] again", () => {
-    const evs = parse("\x1b]", false);
-    expect(evs[0]).toMatchObject({ type: "key", key: "]" });
-    const typed = parse("\x1b]1", false) as any[];
-    expect(typed.map((e) => e.key)).toEqual(["]", "1"]);
+  test("reads a color reply split across reads", () => {
+    const { p, evs } = parser();
+    for (const part of ["\x1b]", "11;rgb:fd", "fd/f6f6/e3e3\x1b", "\\x"]) p.feed(part);
+    expect(evs.map((e) => e.type === "color" ? e.spec : e.key)).toEqual(["rgb:fdfd/f6f6/e3e3", "x"]);
   });
-  test("a color reply that comes late is dropped, not typed", () => {
-    const evs = parse("\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\\x1b]4;12;#839496\x07x", false) as any[];
-    expect(evs.map((e) => e.key)).toEqual(["x"]);
+  test("a lone Alt+] is a key, after a moment", async () => {
+    const { p, evs } = parser();
+    p.feed("\x1b]");
+    await stall();
+    expect(evs.map((e) => e.key)).toEqual(["]"]);
+    p.feed("\x1b]");
+    p.feed("1");
+    await stall();
+    p.feed("x");
+    expect(evs.map((e) => e.key)).toEqual(["]", "]", "1", "x"]);
+  });
+  test("Alt+] and text typed together are keys", () => {
+    const { p, evs } = parser();
+    p.feed("\x1b]ab");
+    expect(evs.map((e) => e.key)).toEqual(["]", "a", "b"]);
+  });
+  test("Alt+] while replies are awaited doesn't swallow them", () => {
+    const { p, evs } = parser(true);
+    p.feed("\x1b]\x1b_Gi=31;OK\x1b\\" + replies);
+    expect(evs).toEqual([expect.objectContaining({ type: "key", key: "]" }), { type: "kittyGraphics", id: 31, message: "OK" }, ...colors]);
   });
 });

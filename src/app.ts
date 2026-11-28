@@ -366,8 +366,12 @@ export class App {
   private pageKeysDown = new Map<string, { page: Page; ev: KeyEvent }>();
   /** iframe (out-of-process) and worker sessions, mapped to the page they belong to. */
   private frameOwner = new Map<string, Page>();
-  /** Document session -> its script giving <select> popups the chrome's colors. */
-  private themeScripts = new Map<string, string>();
+  /**
+   * Document session -> its script giving <select> popups the chrome's
+   * colors, the palette in it, and the queue its updates run in (one at a
+   * time, so a replaced script is always removed).
+   */
+  private themeScripts = new Map<string, { id: string | null; palette: Palette | null; queue: Promise<void> }>();
   private downloads = new Map<string, string>(); // guid -> suggested file name
   private lastMiddlePress = 0;
   private mouseCapture: Page | null = null;
@@ -816,18 +820,27 @@ export class App {
    * Gives a document session's <select> popups the chrome's colors (in its
    * documents now and those it loads later), replacing what it had.
    */
-  private async themeDocument(sid: string): Promise<void> {
-    const palette = C;
-    const old = this.themeScripts.get(sid);
-    if (old) await this.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: old }, sid).catch(() => {});
-    const { identifier } = await this.cdp.send(
-      "Page.addScriptToEvaluateOnNewDocument",
-      { source: selectPopupColors(palette), worldName: "termium", runImmediately: true },
-      sid,
-    );
-    this.themeScripts.set(sid, identifier);
-    // The colors changed meanwhile: the newer ones win.
-    if (C !== palette) await this.themeDocument(sid);
+  private themeDocument(sid: string): Promise<void> {
+    let doc = this.themeScripts.get(sid);
+    if (!doc) this.themeScripts.set(sid, (doc = { id: null, palette: null, queue: Promise.resolve() }));
+    const d = doc;
+    d.queue = d.queue
+      .then(async () => {
+        // Already in these colors, or the session is gone.
+        if (d.palette === C || this.themeScripts.get(sid) !== d) return;
+        const palette = C;
+        if (d.id) await this.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: d.id }, sid).catch(() => {});
+        d.id = null;
+        const { identifier } = await this.cdp.send(
+          "Page.addScriptToEvaluateOnNewDocument",
+          { source: selectPopupColors(palette), worldName: "termium", runImmediately: true },
+          sid,
+        );
+        d.id = identifier;
+        d.palette = palette;
+      })
+      .catch((e) => this.opts.log(`theme ${sid}: ${e}`));
+    return d.queue;
   }
 
   private async onAttached(p: any, parent?: string): Promise<void> {
@@ -1533,7 +1546,7 @@ export class App {
   private setPalette(p: Palette): void {
     if (JSON.stringify(p) === JSON.stringify(C)) return;
     C = p;
-    for (const sid of this.themeScripts.keys()) void this.themeDocument(sid).catch((e) => this.opts.log(`theme ${sid}: ${e}`));
+    for (const sid of this.themeScripts.keys()) void this.themeDocument(sid);
   }
 
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
