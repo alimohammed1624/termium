@@ -438,6 +438,8 @@ export class App {
   private sepHover: Split<Page> | null = null;
   /** The pane whose header shows the four split arrows (the pointer went to its ⊞), and the arrow pointed at. */
   private splitPad: { page: Page; side: Side | null } | null = null;
+  /** Where the panes and dividers were at the last relayout. */
+  private layoutKey = "";
   /** Each header's title area (left of its buttons), from the last draw: where a divider's grip can go. */
   private headerFree = new Map<Page, { row: number; col: number; cols: number }>();
   /** Where the ⊞ buttons and split arrows are, from the last draw. */
@@ -1685,9 +1687,21 @@ export class App {
       }
       this.seps = tab.zoomed ? [] : seps;
     }
+    // Panes or dividers moved: what the pointer was on (an arrow, a divider) may be elsewhere now; it shows again on the next move.
+    const key = [...[...this.geom.values()].map((g) => g.rect), ...this.seps.map((x) => x.rect)]
+      .map((r) => `${r.col},${r.row},${r.cols},${r.rows}`).join(";");
+    if (key !== this.layoutKey) {
+      this.layoutKey = key;
+      const shown = !!this.preview && !this.preview.menu;
+      if (this.splitPad || this.sepHover) this.queueChrome();
+      this.splitPad = null;
+      this.sepHover = null;
+      if (shown) {
+        this.preview = null;
+        setTimeout(() => this.fullRedraw(), 0);
+      }
+    }
     if (this.preview && !this.geom.has(this.preview.page)) this.preview = null;
-    if (this.splitPad && !this.geom.has(this.splitPad.page)) this.splitPad = null;
-    if (this.sepHover && !this.seps.some((x) => x.split === this.sepHover)) this.sepHover = null;
     for (const page of this.pages.values()) {
       if (visible.has(page)) this.showPage(page);
       else this.hidePage(page);
@@ -2191,8 +2205,7 @@ export class App {
     });
     this.phTiles.set(page, tiles.map((t, i) => ({ row: t.row, col: t.col, cols: t.cols, rows: t.rows, index: indexes[i]! })));
     // Cells written just now over an open menu or a preview: they go back on top.
-    if (moved) s += this.drawPreview();
-    if (moved && this.menu) s += this.drawMenu();
+    if (moved) s += this.drawOverlays();
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;
     page.placed = { ...r };
@@ -2261,8 +2274,7 @@ export class App {
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
-    s += this.drawPreview();
-    if (this.menu) s += this.drawMenu();
+    s += this.drawOverlays();
     out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
@@ -2550,7 +2562,7 @@ export class App {
       // A close button at the right end (right-click the header for more),
       // and ⊞ beside it: pointed at, it shows four arrows, one per side to split on.
       const splitBtn = cols >= 14;
-      const pad = splitBtn && this.splitPad?.page === page && cols >= 14 + PAD_W;
+      const pad = splitBtn && this.splitPad?.page === page && cols >= 7 + PAD_W;
       const textW = cols - 3 - (splitBtn ? 3 : 0) - (pad ? PAD_W : 0);
       this.headerFree.set(page, { row, col, cols: textW });
       s += at(row, col) + style + fit(text, textW);
@@ -2561,7 +2573,7 @@ export class App {
           const on = this.splitPad?.side === side;
           s += (on ? bg(C.mauve) + fg(C.crust) : style + fg(C.mauve)) + arrow + style + " ";
           this.padHits.push({ page, side, row, col: start + i * 2, cols: 2 });
-          this.clicks.add(row, start + i * 2, 2, (b) => b === 0 && this.splitSide(page, side));
+          this.clicks.add(row, start + i * 2, 2, (b) => (b === 0 ? this.splitSide(page, side) : this.headerButton(start + i * 2, row, b)));
         });
       }
       if (splitBtn) {
@@ -2623,7 +2635,7 @@ export class App {
     } else {
       s += at(r.row, r.col) + style + "┄".repeat(r.cols);
     }
-    return s + RESET + this.placeholdersRightOf(r);
+    return s + RESET;
   }
 
   /** Cells the pages' pictures leave uncovered: an open menu, a split preview. */
@@ -3888,9 +3900,11 @@ export class App {
       }
       if (ev.action === "release") {
         this.drag = null;
-        if (!d.travelled && d.double) d.sep.split.ratio = 0.5;
-        // Only a click that stayed put can be the first half of a double-click.
-        else if (!d.travelled) this.sepPress = { split: d.sep.split, ...d.at };
+        // A left click that stayed in its cell (released there too).
+        const click = !d.travelled && ev.button === 0 && col === d.at.col && row === d.at.row;
+        if (click && d.double) d.sep.split.ratio = 0.5;
+        // Only such a click can be the first half of a double-click.
+        else if (click) this.sepPress = { split: d.sep.split, ...d.at };
         this.relayoutAndRedraw();
       }
       return;
@@ -4152,7 +4166,7 @@ export class App {
   // Right-click menus (tabs, spaces, pane headers, pages) and the ≡ menu:
   // every action has a click, and each shows its keys.
 
-  /** Where each page's placeholder images are (tmux): see drawMenu. */
+  /** Where each page's placeholder images are (tmux): see drawOverlays. */
   private phTiles = new Map<Page, (Rect & { index: number })[]>();
 
   /**
@@ -4160,26 +4174,32 @@ export class App {
    * one to its left: the cells right of the menu (on its rows) are written
    * again, each row starting from an explicit column.
    */
-  private drawMenu(): string {
-    const m = this.menu!;
-    return m.draw(MENU_STYLE) + this.placeholdersRightOf(m.rect);
-  }
-
   /**
-   * With placeholders, the cells right of text drawn over a picture (on its
-   * rows), written again from an explicit column: a placeholder cell carries
-   * on from the one to its left, which the text replaced.
+   * Text over the pages' pictures: a split preview, then the open menu.
+   * With placeholders, a placeholder cell carries on from the one to its
+   * left, which the text replaced: the picture cells right of each piece of
+   * text (up to the next piece) are written again, each from an explicit column.
    */
-  private placeholdersRightOf(r: Rect): string {
-    if (!this.placeholders) return "";
-    let s = "";
-    const right = r.col + r.cols;
+  private drawOverlays(): string {
+    let s = this.drawPreview();
+    if (this.menu) s += this.menu.draw(MENU_STYLE);
+    const holes = this.placeholders ? this.holes() : [];
+    if (!holes.length) return s;
     for (const page of this.geom.keys()) {
       for (const t of this.phTiles.get(page) ?? []) {
-        if (right <= t.col || right >= t.col + t.cols) continue;
         const colour = this.phColour(t.index);
-        for (let row = Math.max(t.row, r.row); row < Math.min(t.row + t.rows, r.row + r.rows); row++) {
-          s += placeholderSpan(this.phHigh, colour, this.phRgb, row, right, row - t.row, right - t.col, t.col + t.cols - right);
+        const tileEnd = t.col + t.cols;
+        for (let row = t.row; row < t.row + t.rows; row++) {
+          const cuts = holes
+            .filter((h) => row >= h.row && row < h.row + h.rows && h.col < tileEnd && h.col + h.cols > t.col)
+            .map((h) => [Math.max(h.col, t.col), Math.min(h.col + h.cols, tileEnd)] as const)
+            .sort((a, b) => a[0] - b[0]);
+          let end = 0;
+          cuts.forEach(([, cutEnd], k) => {
+            end = Math.max(end, cutEnd);
+            const next = k + 1 < cuts.length ? cuts[k + 1]![0] : tileEnd;
+            if (next > end) s += placeholderSpan(this.phHigh, colour, this.phRgb, row, end, row - t.row, end - t.col, next - end);
+          });
         }
       }
     }

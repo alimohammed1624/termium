@@ -188,6 +188,35 @@ try:
     t.click_cell(c, 34); time.sleep(1.2)
     check("a drag along the divider and then a click is not a double-click", viewports()["A"][0] == w1, (w1, viewports()["A"][0]))
 
+    c = root_col()
+    t.click_cell(c, 30); time.sleep(0.05)
+    t.mouse(*px(c, 30), 0, "press"); t.mouse(*px(c, 33), 0, "release"); time.sleep(1.2)
+    check("a second press released in another cell (no move reported) is not a double-click", viewports()["A"][0] == w1)
+    t.mouse(*px(c, 30), 0, "press"); t.mouse(*px(c, 33), 0, "release"); time.sleep(0.05)
+    t.click_cell(c, 30); time.sleep(1.2)
+    check("a first press released in another cell doesn't arm a double-click", viewports()["A"][0] == w1)
+    t.click_cell(c, 30); time.sleep(0.05)
+    t.mouse(*px(c, 30), 0, "press"); t.mouse(*px(c, 30), 2, "release"); time.sleep(1.2)
+    check("a right-button release isn't the end of a double-click", viewports()["A"][0] == w1)
+    t.mouse(*px(c, 30), 0, "release"); time.sleep(0.5)
+
+    # Right-click on a split arrow: the pane menu, no split.
+    c, r = split_button("A")
+    move(c, r); time.sleep(0.4)
+    a = t.line(r).find("↓") + 1
+    t.click_cell(a, r, 2); time.sleep(0.6)
+    check("right-click on an arrow opens the pane menu", t.wait_text("Equalize panes", 3) and len(viewports()) == 6)
+    t.key("escape"); time.sleep(0.6)
+
+    # The layout changing under a still pointer (a resize) takes its hover away.
+    c, r = split_button("A")
+    move(c, r); time.sleep(0.4)
+    move(t.line(r).find("→") + 1, r); time.sleep(0.8)
+    shown = find("┊") is not None
+    t.resize(150, 45); time.sleep(1.5)
+    check("a resize takes away the arrows and the preview", shown and find("┊") is None and "← ↑ ↓ →" not in t.line(r))
+    t.resize(160, 45); time.sleep(1.2)
+
     # Right-click on the = of a stacked divider (a header) still opens that pane's menu.
     c, r = header("D")
     move(c + 3, r); time.sleep(0.5)
@@ -251,6 +280,24 @@ try:
     t.shot(f"{OUT}/06-placeholder-preview.png")
     move(2, 30); time.sleep(1.5)
     check("placeholders: the picture is whole again after", ph_cells() == before, (before, ph_cells()))
+    # A menu left of the preview: both show, and the picture between and after them is whole.
+    c, r = header("A")
+    t.click_cell(c + 2, r, 2); time.sleep(0.8)
+    q = find("→ Split right"); move(q[0] + 2, q[1]); time.sleep(1.5)
+    def col_of(row, ch):
+        """1-based column of the first cell showing `ch` (line() strings carry placeholder marks: not columns)."""
+        with t.lock:
+            line = t.screen.buffer[row - 1]
+            return next((x + 1 for x in range(t.cols) if line[x].data == ch), 0)
+    prow = [y for y in range(4, 46) if "┊" in t.line(y)]
+    pcol = col_of(prow[0], "┊") if prow else 0
+    sep = col_of(30, "│")
+    with t.lock:
+        right = sum(1 for y, x, *_ in t._placeholder_cells() if pcol < x + 1 < sep)
+    check("placeholders: a menu left of the preview leaves the preview whole", len(prow) == 42, len(prow))
+    check("placeholders: the picture right of the preview is whole", right == (sep - pcol - 1) * 42, (right, sep, pcol))
+    t.shot(f"{OUT}/07-placeholder-menu-preview.png")
+    t.key("escape"); time.sleep(0.5)
 finally:
     t.close()
     srv.terminate()
