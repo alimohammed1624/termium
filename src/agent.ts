@@ -441,10 +441,11 @@ class Agent {
       entry = undefined;
     }
     // A pane showing this file that isn't tracked (the session restarted since): that one, not another.
-    if (!entry && !fromStdin) {
+    // (Never the person's own focused page, nor when told where to put it.)
+    if (!entry && !fromStdin && !req.newTab && !req.down) {
       const fileUrl = pathToFileURL(path).href;
       const tracked = new Set([...shown.values()].map((e) => e.page));
-      const page = [...this.app.pages.values()].find((p) => !tracked.has(p) && withoutHash(p.url) === fileUrl);
+      const page = [...this.app.pages.values()].find((p) => !tracked.has(p) && p !== this.app.activePage() && withoutHash(p.url) === fileUrl);
       if (page) shown.set(name, (entry = { page, url: fileUrl, path, stamp: "" }));
     }
     // Piped HTML goes to a file of its own (the same one for the same name), loaded like any other.
@@ -1370,17 +1371,20 @@ function watchShown(app: App, shown: Map<string, Shown>, name: string, e: Shown,
   e.timer = setInterval(() => {
     if (shown.get(name) !== e) return clearInterval(e.timer);
     if (!app.isOpen(e.page)) return stopShowing(shown, name);
-    if (e.temp) return; // (piped HTML only changes by another show; watched only to go with its pane)
-    // The person is typing in it (or editing its address): not now, it would wipe what they typed.
-    if (app.humanBusy() && app.activePage() === e.page) return;
     if (withoutHash(e.page.url) !== e.url) {
-      // Gone elsewhere (the person followed a link, say): not reloaded any more, until shown again.
+      // Gone elsewhere (the person followed a link, say): not reloaded any more, until shown
+      // again. Piped HTML has nothing to go back to: its file goes, and the name with it.
       if (e.page.url && !app.isPlaceholder(e.page.url)) {
+        if (e.temp) return stopShowing(shown, name);
         clearInterval(e.timer);
         e.timer = undefined;
       }
       return;
     }
+    if (e.temp) return; // (piped HTML only changes by another show)
+    // The person is typing in it (or editing its address), or it shows a dialog: not now,
+    // a reload would wipe what they typed, or answer the dialog for them.
+    if (e.page.dialog || (app.humanBusy() && app.activePage() === e.page)) return;
     const now = fileStamp(e.path);
     if (!now || now === e.stamp) return; // (gone for a moment while it's replaced: wait for it)
     e.stamp = now;

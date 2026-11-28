@@ -111,6 +111,16 @@ try:
     check("it reloads once they stop", wait_until(lambda: page_text(tab) == "Plan v6, while typing", 10))
     ctl("select", str(person))
 
+    # --- a dialog open on the pane: its answer is the person's (or an agent's), not a reload's
+    ctl("eval", "setTimeout(() => alert('wait'), 10); 1", str(tab))
+    dialog_of = lambda: next((t.get("dialog") for t in ctl_json("tabs") if t["id"] == tab), None)
+    check("the pane shows a dialog", wait_until(lambda: dialog_of() is not None, 5))
+    write(plan, "Plan v7, after dialog")
+    time.sleep(2)
+    check("no reload while it shows a dialog", dialog_of() is not None)
+    ctl("dialog", "accept", "--tab", str(tab))
+    check("it reloads once the dialog is answered", wait_until(lambda: page_text(tab) == "Plan v7, after dialog", 10))
+
     # --- --name: another file into the same pane
     other = os.path.join(work, "report.html")
     write(other, "Report")
@@ -132,10 +142,16 @@ try:
     check("piped again with the same name updates that pane", r.get("id") == piped and page_text(piped) == "from stdin 2", r)
     tmpfile = r.get("url", "")[len("file://"):]
     check("piped HTML's file is readable only by you, in the session's temp dir",
-          os.path.exists(tmpfile) and (os.stat(tmpfile).st_mode & 0o777) == 0o600 and tmpfile.startswith(TMPD), tmpfile)
+          os.path.exists(tmpfile) and (os.stat(tmpfile).st_mode & 0o777) == 0o600
+          and os.path.basename(os.path.dirname(os.path.dirname(tmpfile))).startswith("tmb-"), tmpfile)
 
     ctl("close", str(piped))
     check("closing a piped pane removes its file", wait_until(lambda: not os.path.exists(tmpfile), 5), tmpfile)
+    r = ctl_json("show", "-", "--name", "piped2", stdin="<p>piped, then left</p>")
+    away_file = r.get("url", "")[len("file://"):]
+    ctl("open", "file://" + other, "--tab", str(r.get("id")))
+    check("a piped pane navigated elsewhere drops its file", wait_until(lambda: not os.path.exists(away_file), 5), away_file)
+    ctl("close", str(r.get("id")))
 
     # --- --new-tab
     r = ctl_json("show", other, "--new-tab")
@@ -144,7 +160,7 @@ try:
     # --- closed pane: a new one next time
     ctl("close", str(tab))
     r = ctl_json("show", plan)
-    check("after its pane is closed, show opens a new one", r.get("id") not in (None, tab) and page_text(r.get("id")) == "Plan v6, while typing", r)
+    check("after its pane is closed, show opens a new one", r.get("id") not in (None, tab) and page_text(r.get("id")) == "Plan v7, after dialog", r)
 
     # --- a pane already showing the file, not from show (as after a restart): adopted, not duplicated
     lone = os.path.join(work, "lone.html")
@@ -154,6 +170,8 @@ try:
     check("show adopts a pane already showing that file", opened and r.get("id") == opened and r.get("reused") is True, (opened, r))
     write(lone, "Lone, rewritten")
     check("and follows the file from then on", wait_until(lambda: page_text(opened) == "Lone, rewritten", 10))
+    r = ctl_json("show", lone, "--new-tab", "--name", "elsewhere")
+    check("--new-tab never adopts: a tab of its own", r.get("id") not in (None, opened) and r.get("reused") is False, r)
 
     # --- errors
     r = ctl("show", "nope.html")
