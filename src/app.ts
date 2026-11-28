@@ -183,9 +183,9 @@ type Prompt =
   /**
    * Find in page: `result` answers the latest search sent (`query`, number
    * `seq`); `target` is the match asked for while that answer is on its way,
-   * `ahead` how many matches on from the nearest one, while a new search is.
+   * `steps` the Enters (+1) and Shift+Enters (-1) pressed before a new search answered.
    */
-  | { kind: "find"; edit: LineEdit; page: Page; query: string; seq: number; result?: FindResult; target?: number; ahead?: number }
+  | { kind: "find"; edit: LineEdit; page: Page; query: string; seq: number; result?: FindResult; target?: number; steps?: number }
   | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
@@ -3452,8 +3452,10 @@ export class App {
     const query = prompt.edit.text;
     const seq = ++prompt.seq;
     prompt.target = mode === "goto" ? index : undefined;
-    prompt.ahead = mode === "near" ? index : undefined;
-    if (query !== prompt.query) prompt.result = undefined;
+    if (query !== prompt.query) {
+      prompt.result = undefined;
+      prompt.steps = 0;
+    }
     prompt.query = query;
     if (query) this.lastFind = query;
     this.findShown = page;
@@ -3465,6 +3467,10 @@ export class App {
         if (!res || this.prompt !== prompt || seq !== prompt.seq) return;
         prompt.result = res;
         prompt.target = undefined;
+        // Steps taken while it was on its way go on from its match.
+        const steps = prompt.steps ?? 0;
+        prompt.steps = 0;
+        if (steps && res.total) this.runFind(prompt, "goto", (((res.index + steps) % res.total) + res.total) % res.total);
         page.scrollMarks = res.ys;
         page.scrollCurrent = res.index >= 0 ? res.ys[res.index] : undefined;
         this.redrawScrollbar(page);
@@ -3477,8 +3483,11 @@ export class App {
   private stepFind(prompt: Extract<Prompt, { kind: "find" }>, dir: 1 | -1): void {
     prompt.edit.selectAll = false;
     const r = prompt.result;
-    // A search still on its way (or none yet): from its nearest match.
-    if (prompt.edit.text !== prompt.query || !r) this.runFind(prompt, "near", (prompt.edit.text === prompt.query ? prompt.ahead ?? 0 : 0) + dir);
+    // A search still on its way (or not sent yet): the step waits for its answer.
+    if (prompt.edit.text !== prompt.query || !r) {
+      if (prompt.edit.text !== prompt.query) this.runFind(prompt, "near");
+      prompt.steps = (prompt.steps ?? 0) + dir;
+    }
     // From the match last asked for: quick presses each count.
     else if (r.total) this.runFind(prompt, "goto", (((prompt.target ?? r.index) + dir) % r.total + r.total) % r.total);
     this.queueChrome();

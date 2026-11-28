@@ -36,8 +36,7 @@ export interface FindResult {
  * An expression that finds `query` in the page's document (case-insensitive,
  * within single text nodes, rendered text only), highlights every match and
  * the current one, and returns a FindResult. The current match is:
- * - "near": the first one at or below the top of the viewport (as you type),
- *   or `index` matches on from it (Enter pressed before the search answered);
+ * - "near": the first one at or below the top of the viewport (as you type);
  * - "goto": match `index` (wrapping around), scrolled into view if it isn't;
  * - "keep": match `index` again, without scrolling (the layout changed).
  */
@@ -71,12 +70,9 @@ export function findScript(query: string, mode: "near" | "goto" | "keep", index 
     }
   }
   if (!ranges.length) { reg.delete(${JSON.stringify(ALL)}); reg.delete(${JSON.stringify(CURRENT)}); return out; }
-  // Document positions, before any scrolling below moves the viewport.
-  out.ys = tops.map((t) => Math.round(t + scrollY));
   const mode = ${JSON.stringify(mode)};
   const n = ranges.length;
-  const near = Math.max(0, tops.findIndex((t) => t >= 0));
-  const i = ((((mode === "near" ? near : 0) + ${Math.trunc(index)}) % n) + n) % n;
+  const i = mode === "near" ? Math.max(0, tops.findIndex((t) => t >= 0)) : ((${Math.trunc(index)} % n) + n) % n;
   reg.set(${JSON.stringify(ALL)}, new Highlight(...ranges));
   const cur = new Highlight(ranges[i]);
   cur.priority = 1;
@@ -102,6 +98,8 @@ export function findScript(query: string, mode: "near" | "goto" | "keep", index 
     }
     centre({ top: 0, left: 0, bottom: innerHeight, right: innerWidth }, (dx, dy) => scrollBy({ left: dx, top: dy, behavior: "instant" }));
   }
+  // Document positions, measured once any box above has scrolled (that moves what's in it).
+  out.ys = ranges.map((r) => Math.round(r.getBoundingClientRect().top + scrollY));
   out.total = n;
   out.index = i;
   return out;

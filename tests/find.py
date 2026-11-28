@@ -143,10 +143,18 @@ try:
     check("...the second one is scrolled into the box", count_shown("2/2") and t.wait_for(lambda: page_value(box_in_view), 5),
           page_value("document.getElementById('box').scrollTop"))
 
-    # Enter right after a new search, before it has answered, still steps on from its first match
+    # the marks are where the matches are once the box has scrolled
+    cur = page_value("(() => { const r = [...CSS.highlights.get('termium-find-current')][0].getBoundingClientRect();"
+                     " return { y: r.top + scrollY, total: document.documentElement.scrollHeight }; })()")
+    cur_row = TOP + int(cur["y"] / cur["total"] * (BOTTOM - TOP + 1))
+    check("...and its mark is where it is now", t.wait_for(lambda: marks().get(cur_row) == CURRENT, 5), (marks(), cur_row))
+
+    # Enters pressed before a new search has answered each step on from its first match
+    page_value("(scrollTo(0, 0), 1)"); time.sleep(0.5)
     t.key("ctrl+a"); t.key("ctrl+k")
-    t.write("\x1b[200~needle\x1b[201~\x1b[13u")
-    check("paste then Enter at once: 2/6", count_shown("2/6"), bar_line())
+    t.write("\x1b[200~needle\x1b[201~\x1b[13u\x1b[13u\x1b[13u")
+    check("paste then three Enters at once: 4/6", count_shown("4/6"), bar_line())
+    check("...and that match is in view", t.wait_for(lambda: in_view("row50"), 5))
 
     # text the page doesn't show (visibility: hidden) isn't found
     t.key("ctrl+a"); t.key("ctrl+k"); t.type("ghostword")
