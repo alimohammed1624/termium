@@ -2337,11 +2337,24 @@ export class App {
     this.linkRecheck = setTimeout(() => {
       this.linkRecheck = null;
       const p = this.pointerOnPage;
-      if (!p || p.page !== this.hoverPage || this.mouseButtons) return;
+      if (!p || p.page !== this.hoverPage || this.mouseButtons || this.covered()) return;
       const at = this.pagePoint(p.page, p.px, p.py);
       if (at) this.lookForLink(p.page, at.x, at.y);
-      else this.leaveHover(); // (its pane moved from under the pointer)
+      else {
+        // Its pane moved from under the pointer (another may be there now).
+        this.leaveHover();
+        this.pointerOnto(p.px, p.py);
+      }
     }, 200);
+  }
+
+  /** The pointer is over another page now without having moved (a release, a relayout): it enters it. */
+  private pointerOnto(px: number, py: number): void {
+    const col = Math.floor(px / this.cellW) + 1;
+    const row = Math.floor(py / this.cellH) + 1;
+    const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
+    const mods = { shift: false, alt: false, ctrl: false, meta: false };
+    if (g) this.pageMouse(g.item, { type: "mouse", action: "move", button: 3, x: px + 1, y: py + 1, mods }, px, py);
   }
 
   /** A terminal pixel as a point on `page` (CSS pixels, kept inside it); null when it isn't over the page's pane. */
@@ -2415,6 +2428,15 @@ export class App {
     } else {
       // Only the page the pointer is over (a late answer from one it left is stale).
       if (page !== this.hoverPage) return;
+      // Without a user name and password (one could pass for the host once cut short), then at most 4096 long.
+      try {
+        const u = new URL(url);
+        if (u.username || u.password) {
+          u.username = "";
+          u.password = "";
+          url = u.href;
+        }
+      } catch {}
       url = url.slice(0, 4096);
       if (this.linkHover?.page === page && this.linkHover.url === url) return;
       this.linkHover = { page, url };
@@ -3953,9 +3975,7 @@ export class App {
         const g = this.hoverPage ? this.geom.get(this.hoverPage) : undefined;
         if (this.hoverPage && !(g && inRect(g.content, col, row))) {
           this.leaveHover();
-          // Let go over another page: the pointer is over that one now.
-          const other = [...this.geom.values()].find((p) => inRect(p.content, col, row));
-          if (other) this.pageMouse(other.item, { ...ev, action: "move" }, px, py);
+          this.pointerOnto(px, py);
         }
       }
       return;
@@ -4091,6 +4111,8 @@ export class App {
       // ends hover on the first, as a mouse leaving a window does.
       if (this.hoverPage && this.hoverPage !== page) this.leaveHover();
       this.hoverPage = page;
+      // A drag (no lookups while a button is held) leaves the link it started on.
+      if (this.mouseButtons) this.setLink(page, "");
       this.pointerOnPage = { page, px, py };
       if (!this.mouseButtons) this.lookForLink(page, x, y);
       return;

@@ -113,6 +113,15 @@ try:
     t.mouse((col - 1) * t.cell_w, y1, action="release"); time.sleep(0.6)
     check("link under the pointer after the release", "page.html?from=links" in t.line(2), t.line(2))
 
+    # A drag starting on a link: the link goes while the button is held.
+    t.mouse((col - 1) * t.cell_w, y1, action="press")
+    for y in range(y1, y0, 40):
+        t.mouse((col - 1) * t.cell_w, y, action="drag"); time.sleep(0.01)
+    time.sleep(0.4)
+    check("link gone during a drag off it", "from=links" not in t.line(2), t.line(2))
+    t.mouse((col - 1) * t.cell_w, y0, action="release"); time.sleep(0.4)
+    move(t, col, band(0.1), 0.6)
+
     # Help opens over a hovered link; the pointer moves under it: no link once it closes.
     t.key("ctrl+b"); t.key("question"); time.sleep(0.5)
     check("no link under help", "from=links" not in t.line(2), t.line(2))
@@ -173,9 +182,11 @@ try:
     move(t, col, band(0.5), 0.6)
     check("hint gone off the chrome", "^T" not in t.line(2) and f"{HOST}/links.html" in t.line(2), t.line(2))
 
-    # A split: pane titles get theirs.
+    # A split: pane titles get theirs. The pointer rests over a link where the new pane comes.
+    move(t, 120, band(0.1), 0.6)
     t.key("ctrl+b"); t.key("v"); time.sleep(0.5); t.type(URL); t.key("enter")
     t.wait_idle(1.5)
+    check("new pane under a still pointer: its link", t.wait_for(lambda: "page.html?from=links" in t.line(2), 5), t.line(2))
     header = next((r for r in range(3, 6) if "termium links" in t.line(r)), -1)
     check("pane headers", header > 0, t.line(3))
     hint_after(60, header, "Focus pane · middle-click closes  ^B h", "pane title")
