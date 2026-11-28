@@ -182,9 +182,10 @@ type Prompt =
   | { kind: "dialog"; edit: LineEdit; page: Page }
   /**
    * Find in page: `result` answers the latest search sent (`query`, number
-   * `seq`); `target` is the match asked for while that answer is on its way.
+   * `seq`); `target` is the match asked for while that answer is on its way,
+   * `ahead` how many matches on from the nearest one, while a new search is.
    */
-  | { kind: "find"; edit: LineEdit; page: Page; query: string; seq: number; result?: FindResult; target?: number }
+  | { kind: "find"; edit: LineEdit; page: Page; query: string; seq: number; result?: FindResult; target?: number; ahead?: number }
   | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
@@ -3451,6 +3452,7 @@ export class App {
     const query = prompt.edit.text;
     const seq = ++prompt.seq;
     prompt.target = mode === "goto" ? index : undefined;
+    prompt.ahead = mode === "near" ? index : undefined;
     if (query !== prompt.query) prompt.result = undefined;
     prompt.query = query;
     if (query) this.lastFind = query;
@@ -3475,7 +3477,8 @@ export class App {
   private stepFind(prompt: Extract<Prompt, { kind: "find" }>, dir: 1 | -1): void {
     prompt.edit.selectAll = false;
     const r = prompt.result;
-    if (prompt.edit.text !== prompt.query || !r) this.runFind(prompt, "near");
+    // A search still on its way (or none yet): from its nearest match.
+    if (prompt.edit.text !== prompt.query || !r) this.runFind(prompt, "near", (prompt.edit.text === prompt.query ? prompt.ahead ?? 0 : 0) + dir);
     // From the match last asked for: quick presses each count.
     else if (r.total) this.runFind(prompt, "goto", (((prompt.target ?? r.index) + dir) % r.total + r.total) % r.total);
     this.queueChrome();

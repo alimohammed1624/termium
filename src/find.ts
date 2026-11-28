@@ -36,7 +36,8 @@ export interface FindResult {
  * An expression that finds `query` in the page's document (case-insensitive,
  * within single text nodes, rendered text only), highlights every match and
  * the current one, and returns a FindResult. The current match is:
- * - "near": the first one at or below the top of the viewport (as you type);
+ * - "near": the first one at or below the top of the viewport (as you type),
+ *   or `index` matches on from it (Enter pressed before the search answered);
  * - "goto": match `index` (wrapping around), scrolled into view if it isn't;
  * - "keep": match `index` again, without scrolling (the layout changed).
  */
@@ -74,21 +75,32 @@ export function findScript(query: string, mode: "near" | "goto" | "keep", index 
   out.ys = tops.map((t) => Math.round(t + scrollY));
   const mode = ${JSON.stringify(mode)};
   const n = ranges.length;
-  let i = mode === "near" ? tops.findIndex((t) => t >= 0) : ((${Math.trunc(index)} % n) + n) % n;
-  if (i < 0) i = 0;
+  const near = Math.max(0, tops.findIndex((t) => t >= 0));
+  const i = ((((mode === "near" ? near : 0) + ${Math.trunc(index)}) % n) + n) % n;
   reg.set(${JSON.stringify(ALL)}, new Highlight(...ranges));
   const cur = new Highlight(ranges[i]);
   cur.priority = 1;
   reg.set(${JSON.stringify(CURRENT)}, cur);
   if (mode !== "keep") {
-    const off = (c) => c.top < 0 || c.bottom > innerHeight || c.left < 0 || c.right > innerWidth;
-    if (off(ranges[i].getBoundingClientRect())) {
-      // Its element into view (that scrolls any boxes it's inside), then the
-      // match itself, which can be far down a tall element.
-      ranges[i].startContainer.parentElement?.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-      const c = ranges[i].getBoundingClientRect();
-      if (off(c)) scrollBy({ top: c.top + c.height / 2 - innerHeight / 2, behavior: "instant" });
+    // The match itself into view: each scroll box it's inside (innermost
+    // first) that clips it is centred on it, then the page.
+    const r = ranges[i];
+    const centre = (b, scroll) => {
+      const c = r.getBoundingClientRect();
+      const dy = c.top < b.top || c.bottom > b.bottom ? c.top + c.height / 2 - (b.top + b.bottom) / 2 : 0;
+      const dx = c.left < b.left || c.right > b.right ? c.left + c.width / 2 - (b.left + b.right) / 2 : 0;
+      if (dx || dy) scroll(dx, dy);
+    };
+    const root = document.scrollingElement || document.documentElement;
+    for (let e = r.startContainer.parentElement; e && e !== root && e !== document.body; e = e.parentElement) {
+      if (e.scrollHeight <= e.clientHeight && e.scrollWidth <= e.clientWidth) continue;
+      const s = getComputedStyle(e);
+      if (!/auto|scroll|hidden/.test(s.overflowX + s.overflowY)) continue;
+      const b = e.getBoundingClientRect();
+      const inner = { top: b.top + e.clientTop, left: b.left + e.clientLeft, bottom: b.top + e.clientTop + e.clientHeight, right: b.left + e.clientLeft + e.clientWidth };
+      centre(inner, (dx, dy) => e.scrollBy({ left: dx, top: dy, behavior: "instant" }));
     }
+    centre({ top: 0, left: 0, bottom: innerHeight, right: innerWidth }, (dx, dy) => scrollBy({ left: dx, top: dy, behavior: "instant" }));
   }
   out.total = n;
   out.index = i;

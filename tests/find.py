@@ -133,6 +133,21 @@ try:
     t.key("enter")
     check("...and back to the first, in view", count_shown("1/2") and t.wait_for(lambda: page_value(match_in_view), 5), page_value("scrollY"))
 
+    # ...or inside a scroll box that clips it
+    t.key("ctrl+a"); t.key("ctrl+k"); t.type("boxword")
+    check("scroll box: 1/2", count_shown("1/2"), bar_line())
+    t.key("enter")
+    box_in_view = ("(() => { const r = [...CSS.highlights.get('termium-find-current')][0].getBoundingClientRect();"
+                   " const b = document.getElementById('box').getBoundingClientRect();"
+                   " return r.top >= b.top && r.bottom <= b.bottom && r.top >= 0 && r.bottom <= innerHeight; })()")
+    check("...the second one is scrolled into the box", count_shown("2/2") and t.wait_for(lambda: page_value(box_in_view), 5),
+          page_value("document.getElementById('box').scrollTop"))
+
+    # Enter right after a new search, before it has answered, still steps on from its first match
+    t.key("ctrl+a"); t.key("ctrl+k")
+    t.write("\x1b[200~needle\x1b[201~\x1b[13u")
+    check("paste then Enter at once: 2/6", count_shown("2/6"), bar_line())
+
     # text the page doesn't show (visibility: hidden) isn't found
     t.key("ctrl+a"); t.key("ctrl+k"); t.type("ghostword")
     check("hidden text: No matches", count_shown("No matches"), bar_line())
