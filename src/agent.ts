@@ -89,6 +89,7 @@ export async function runCtl(app: App, cdp: CDP, req: CtlRequest, ctx: Ctx): Pro
       return await agent.run(req, timeoutMs);
     } finally {
       ctx.hold?.(agent.underWay());
+      agent.release();
     }
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -115,6 +116,8 @@ class Agent {
   private pending = new Set<Promise<unknown>>();
   /** What input has gone to the page so far (for an accurate account of a timeout). */
   private dispatched: string | null = null;
+  /** The pages this (acting) command acts on: marked as agent-driven in termium's UI meanwhile. */
+  private driven = new Set<Page>();
 
   constructor(
     private app: App,
@@ -303,7 +306,22 @@ class Agent {
           "answer it first: termium ctl dialog accept|dismiss",
       );
     }
+    return this.drive(page);
+  }
+
+  /** Marks a page an acting command acts on as agent-driven, until a moment after it ends (see release). */
+  private drive(page: Page): Page {
+    if (this.acting && !this.driven.has(page)) {
+      this.driven.add(page);
+      this.app.agentDriving(page, true);
+    }
     return page;
+  }
+
+  /** The command is over: its pages keep their mark for a moment more. */
+  release(): void {
+    for (const page of this.driven) this.app.agentDriving(page, false);
+    this.driven.clear();
   }
 
   private describe(page: Page): AgentTab {
@@ -343,7 +361,7 @@ class Agent {
       this.step("no tab opened");
       const created = await this.app.agentNewTab(url, !!req.background);
       if (!created) throw new CtlError("couldn't open a tab");
-      page = created;
+      page = this.drive(created);
       held = !req.background && this.app.activePage() !== page;
       // (The address is what's cut short, never what follows it.)
       this.note(`opened ${clip(url, held ? 25 : 50)} in tab ${page.num}${held ? " (behind: you're busy)" : ""}`);
