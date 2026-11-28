@@ -54,8 +54,11 @@ export function findScript(query: string, mode: "near" | "goto" | "keep", index 
   outer: for (let n; (n = walker.nextNode()); ) {
     if (n.parentElement && skip.test(n.parentElement.tagName)) continue;
     re.lastIndex = 0;
+    let shown = null; // visibility checked once per node, only when it matches
     for (let m; (m = re.exec(n.data)); ) {
       if (!m[0]) { re.lastIndex++; continue; }
+      shown ??= !n.parentElement || getComputedStyle(n.parentElement).visibility === "visible";
+      if (!shown) break;
       const r = new Range();
       r.setStart(n, m.index);
       r.setEnd(n, m.index + m[0].length);
@@ -78,9 +81,13 @@ export function findScript(query: string, mode: "near" | "goto" | "keep", index 
   cur.priority = 1;
   reg.set(${JSON.stringify(CURRENT)}, cur);
   if (mode !== "keep") {
-    const c = ranges[i].getBoundingClientRect();
-    if (c.top < 0 || c.bottom > innerHeight || c.left < 0 || c.right > innerWidth) {
+    const off = (c) => c.top < 0 || c.bottom > innerHeight || c.left < 0 || c.right > innerWidth;
+    if (off(ranges[i].getBoundingClientRect())) {
+      // Its element into view (that scrolls any boxes it's inside), then the
+      // match itself, which can be far down a tall element.
       ranges[i].startContainer.parentElement?.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      const c = ranges[i].getBoundingClientRect();
+      if (off(c)) scrollBy({ top: c.top + c.height / 2 - innerHeight / 2, behavior: "instant" });
     }
   }
   out.total = n;

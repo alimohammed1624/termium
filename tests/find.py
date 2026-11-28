@@ -100,7 +100,8 @@ try:
 
     # clicking a mark (off the thumb) jumps to that match
     x = (BAR_COL - 1) * CW + 5
-    row50 = expected_rows("needle")[0][2]
+    v = expected_rows("needle")[1]
+    row50 = TOP + int(v["ys"][3] / v["total"] * (BOTTOM - TOP + 1))  # the 4th match, in row 50
     t.click(x, (row50 - 1) * CH + CH // 2)
     check("clicking a mark goes to its match (4/6)", count_shown("4/6"), bar_line())
     check("...scrolled there", t.wait_for(lambda: in_view("row50"), 5))
@@ -116,6 +117,26 @@ try:
     empty = next(r for r in range(BOTTOM, TOP, -1) if r not in marks())
     t.click(x, (empty - 1) * CH + CH // 2)
     check("a click off the marks pages down", t.wait_for(lambda: (page_value("scrollY") or 0) > y0 + 300, 5))
+
+    # quick presses each count: three Enters in one write go three matches on
+    t.write("\x1b[13u\x1b[13u\x1b[13u")
+    check("three quick Enters: 4/6", count_shown("4/6"), bar_line())
+
+    # a match far down a tall element is scrolled into view itself
+    t.key("ctrl+a"); t.key("ctrl+k"); t.type("tallword")
+    check("tall element: 1/2", count_shown("1/2"), bar_line())
+    t.key("enter")
+    check("tall element: 2/2", count_shown("2/2"), bar_line())
+    match_in_view = ("(() => { const hl = CSS.highlights.get('termium-find-current'); const r = [...hl][0].getBoundingClientRect();"
+                     " return r.top >= 0 && r.bottom <= innerHeight; })()")
+    check("...the second one is in view", t.wait_for(lambda: page_value(match_in_view), 5), page_value("scrollY"))
+    t.key("enter")
+    check("...and back to the first, in view", count_shown("1/2") and t.wait_for(lambda: page_value(match_in_view), 5), page_value("scrollY"))
+
+    # text the page doesn't show (visibility: hidden) isn't found
+    t.key("ctrl+a"); t.key("ctrl+k"); t.type("ghostword")
+    check("hidden text: No matches", count_shown("No matches"), bar_line())
+    t.key("ctrl+a"); t.key("ctrl+k"); t.type("needle"); count_shown("/6")
 
     # Esc closes: the marks and highlights go
     t.key("escape")

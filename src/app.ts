@@ -180,8 +180,11 @@ type Prompt =
   | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page }
-  /** Find in page: `result` answers the latest search sent (`query`, number `seq`). */
-  | { kind: "find"; edit: LineEdit; page: Page; query: string; seq: number; result?: FindResult }
+  /**
+   * Find in page: `result` answers the latest search sent (`query`, number
+   * `seq`); `target` is the match asked for while that answer is on its way.
+   */
+  | { kind: "find"; edit: LineEdit; page: Page; query: string; seq: number; result?: FindResult; target?: number }
   | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
@@ -3447,6 +3450,7 @@ export class App {
     const { page } = prompt;
     const query = prompt.edit.text;
     const seq = ++prompt.seq;
+    prompt.target = mode === "goto" ? index : undefined;
     if (query !== prompt.query) prompt.result = undefined;
     prompt.query = query;
     if (query) this.lastFind = query;
@@ -3458,6 +3462,7 @@ export class App {
         // Only the latest answer, while its find bar is up.
         if (!res || this.prompt !== prompt || seq !== prompt.seq) return;
         prompt.result = res;
+        prompt.target = undefined;
         page.scrollMarks = res.ys;
         page.scrollCurrent = res.index >= 0 ? res.ys[res.index] : undefined;
         this.redrawScrollbar(page);
@@ -3471,20 +3476,21 @@ export class App {
     prompt.edit.selectAll = false;
     const r = prompt.result;
     if (prompt.edit.text !== prompt.query || !r) this.runFind(prompt, "near");
-    else if (r.total) this.runFind(prompt, "goto", r.index + dir);
+    // From the match last asked for: quick presses each count.
+    else if (r.total) this.runFind(prompt, "goto", (((prompt.target ?? r.index) + dir) % r.total + r.total) % r.total);
     this.queueChrome();
   }
 
   /** A click on a scrollbar mark off the thumb jumps to that match (the next one in the cell, if one there is current). */
   private clickMark(page: Page, rows: number, row: number): boolean {
-    const p = this.prompt;
-    const r = p?.kind === "find" && p.page === page ? p.result : undefined;
+    const p = this.prompt?.kind === "find" && this.prompt.page === page ? this.prompt : null;
+    const r = p?.result;
     const cell = barCells(page.scroll, rows, page.scrollMarks, page.scrollCurrent)?.[row];
-    if (!r?.total || !page.scroll || !cell || cell.bg !== "track" || (cell.fg !== "mark" && cell.fg !== "current")) return false;
+    if (!p || !r?.total || !page.scroll || !cell || cell.bg !== "track" || (cell.fg !== "mark" && cell.fg !== "current")) return false;
     const here = r.ys.flatMap((y, i) => (markRow(y, page.scroll!.total, rows) === row ? [i] : []));
     if (!here.length) return false;
-    const at = here.indexOf(r.index);
-    this.runFind(p as Extract<Prompt, { kind: "find" }>, "goto", here[at < 0 ? 0 : (at + 1) % here.length]!);
+    const at = here.indexOf(p.target ?? r.index);
+    this.runFind(p, "goto", here[at < 0 ? 0 : (at + 1) % here.length]!);
     return true;
   }
 

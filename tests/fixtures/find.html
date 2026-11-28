@@ -8,3 +8,6 @@
   for (let i = 0; i < 80; i++) document.write(`<div id="row${i}">row ${i} ${hits[i] ?? ""}</div>`);
 </script>
 <p>a.b(c) literal</p>
+<p style="visibility: hidden">ghostword</p>
+<p id="tall" style="white-space: pre; line-height: 20px"></p>
+<script>document.getElementById("tall").textContent = "tallword" + "\n".repeat(150) + "tallword";</script>
