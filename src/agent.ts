@@ -13,6 +13,7 @@ import type { AgentTab, App, Page } from "./app";
 import type { DevToolsEndpoint } from "./browser";
 import type { CDP } from "./cdp";
 import { decodePng, encodeRegion, type Raster } from "./png";
+import { PageHints, hintLabels } from "./hints";
 
 /** A failure to report to the agent as is; `code` becomes the exit status. */
 export class CtlError extends Error {
@@ -35,7 +36,7 @@ export interface CtlRequest {
   cmd: string;
   /** Page number to act on; the focused page if absent. */
   tab?: number;
-  /** Element id "TAB:NODE@DOC" (from snapshot). */
+  /** Element id "TAB:NODE@DOC" (from snapshot), or a label from `hints`. */
   ref?: string;
   url?: string;
   newTab?: boolean;
@@ -237,6 +238,8 @@ class Agent {
         return this.close(req);
       case "snapshot":
         return this.snapshot(this.page(req.tab));
+      case "hints":
+        return this.hints(this.page(req.tab));
       case "text":
         return this.text(this.page(req.tab));
       case "click":
@@ -317,8 +320,17 @@ class Agent {
     this.app.showToast(`agent: ${clip(what, 70)}`, 2500);
   }
 
-  /** The element an id names: its page and backend node id. */
-  private element(ref: string | undefined): { page: Page; node: number } {
+  /** The element an id (or a label from `hints`, on tab `tab`) names: its page and backend node id. */
+  private element(ref: string | undefined, tab?: number): { page: Page; node: number } {
+    if (/^[a-z]{1,4}$/i.test(ref ?? "")) {
+      const page = this.page(tab);
+      const label = ref!.toLowerCase();
+      const hints = page.agentHints;
+      const node = hints?.labels.get(label);
+      if (!hints || node === undefined) throw new CtlError(`no hint "${ref}" on tab ${page.num}: labels come from \`termium ctl hints\``);
+      if (hints.gen !== (page.docGen ?? 0)) throw new CtlError(`stale hint ${ref}: the page changed since those hints; take new ones`);
+      return { page, node };
+    }
     const m = /^(\d+):(\d+)@(\d+)$/.exec(ref ?? "");
     if (!m) throw new CtlError(`bad element id "${ref ?? ""}": ids look like 3:142@2 (take them from \`termium ctl snapshot\`)`, EXIT.usage);
     const page = this.page(Number(m[1]));
@@ -485,6 +497,43 @@ class Agent {
     return { tab: page.num, url: t.url, title: t.title, snapshot: lines.join("\n") };
   }
 
+  /**
+   * The clickable elements in view, with the labels the person's link
+   * hints would give them (the same view gets the same labels), and ids
+   * (`click LABEL` and `click ID` both work, for this document).
+   */
+  private async hints(page: Page): Promise<unknown> {
+    const gen = page.docGen ?? 0;
+    const hints = new PageHints((m, p, s) => this.cdp.send(m, p, s), page);
+    const found = await hints.collect("agent");
+    const nodes = await hints.agentNodes();
+    const labels = hintLabels(found.length);
+    const byLabel = new Map<string, number>();
+    const list = found.map((h, i) => {
+      const node = nodes[i] ?? 0;
+      if (node) byLabel.set(labels[i]!, node);
+      return {
+        label: labels[i]!,
+        ...(node ? { id: `${page.num}:${node}@${gen}` } : {}),
+        tag: h.tag,
+        ...(h.role ? { role: h.role } : {}),
+        text: h.text,
+        ...(h.href ? { href: h.href } : {}),
+        x: h.x,
+        y: h.y,
+        rect: { x: h.left, y: h.top, w: h.width, h: h.height },
+      };
+    });
+    // Unless the page moved on to another document meanwhile: then they'd name the wrong elements.
+    if ((page.docGen ?? 0) === gen) {
+      page.agentHints = { gen, labels: byLabel };
+      if (page.agentIds?.gen === gen) for (const n of byLabel.values()) page.agentIds.nodes.add(n);
+      else page.agentIds = { gen, nodes: new Set(byLabel.values()) };
+    }
+    const t = this.describe(page);
+    return { tab: page.num, url: t.url, title: t.title, hints: list };
+  }
+
   private async render(page: Page, nodes: any[], lines: string[], depth: number, frameDepth: number): Promise<void> {
     const byId = new Map<string, any>(nodes.map((n) => [n.nodeId, n]));
     const root = nodes.find((n) => !n.parentId) ?? nodes[0];
@@ -629,7 +678,7 @@ class Agent {
       this.note(`clicked at ${Math.round(x)},${Math.round(y)}`);
       return { tab: page.num, x, y, ...(dialog ? { dialog } : {}) };
     }
-    const { page, node } = this.element(req.ref);
+    const { page, node } = this.element(req.ref, req.tab);
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
     this.step("not clicked");
     const { x, y } = await this.centre(page, node);

@@ -55,8 +55,9 @@ it) loads a new document they're stale (exit 1): take a new snapshot.
 | `open URL [--new-tab] [--background] [--no-wait]` | navigate the focused tab (or `--tab N`), or open a new tab; waits for the load |
 | `select TAB` / `close [TAB] [--force]` | show and focus a tab / close it |
 | `snapshot [TAB]` | accessibility tree as text, with element ids |
+| `hints [TAB]` | the clickable elements in view, each with a short label (`SA`, `F`...) and an id |
 | `text [TAB]` | the page's readable text |
-| `click ID` / `click --xy X,Y` | click an element (or a point in CSS pixels); `--double`, `--right` |
+| `click ID` / `click LABEL` / `click --xy X,Y` | click an element (by id, or by a label from `hints`; or a point in CSS pixels); `--double`, `--right` |
 | `type ID TEXT [--append] [--submit]` | replace a field's text; on a `<select>`, choose that option |
 | `key KEY...` | press keys: `Enter`, `Tab`, `Escape`, `ctrl+a`, `shift+Tab`, `ArrowDown`, `a` |
 | `scroll [ID] up\|down\|left\|right [PX]` | scroll the page (or the area under an element) |
@@ -70,6 +71,14 @@ machine-readable output, `--timeout SEC` (default 30). Exit status: 0 done,
 1 failed (stale id, no such tab, page error, dialog in the way), 2 usage,
 3 no such session, 4 timed out, 5 partly done (a `shot --full` of a page
 over 40 megapixels: the top part saved). Errors go to stderr in one line.
+
+`hints` is a quick alternative to `snapshot` for what's on screen: one
+line per link, button or field in view, like `SA   link "Docs" ->
+https://example.com/docs [3:57@2] at 120,48`. They're the labels the
+person sees when they press `Ctrl+B o` on the same view, so "click SA"
+means the same to both of you. `click SA` (or the id) clicks it; labels,
+like ids, go stale when the tab loads a new document. They also change
+when the page scrolls or changes: take `hints` again before using one.
 
 ## The DevTools endpoint (Puppeteer, Playwright, chrome-devtools-mcp)
 

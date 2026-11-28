@@ -28,9 +28,12 @@ ID is an element id from \`snapshot\`, like 3:142@2):
   select TAB                    show that tab in the terminal and focus it
   close [TAB] [--force]         close a tab (--force: even if it asks "Leave this page?")
   snapshot [TAB]                the page's accessibility tree as text, with element ids
+  hints [TAB]                   the clickable elements in view, with link-hint labels
+                                (as the person's Ctrl+B o shows them) and element ids
   text [TAB]                    the page's readable text
-  click ID | --xy X,Y [--double] [--right|--middle]
-                                click an element (or a point, in CSS pixels)
+  click ID | LABEL | --xy X,Y [--double] [--right|--middle]
+                                click an element (by id, or by label from \`hints\`),
+                                or a point, in CSS pixels
   type ID TEXT [--append] [--submit]
                                 replace a field's text (--append adds to it; --submit
                                 presses Enter after); on a <select>, choose that option
@@ -204,6 +207,7 @@ export function parseCtl(argv: string[]): Parsed {
       req.force = flags.has("--force");
       break;
     case "snapshot":
+    case "hints":
     case "text":
     case "shot":
       tabArg();
@@ -213,7 +217,7 @@ export function parseCtl(argv: string[]): Parsed {
     case "click":
       if (xy) req.xy = xy;
       else if (pos.length) req.ref = pos.shift();
-      else fail("click needs an element ID (from snapshot) or --xy X,Y");
+      else fail("click needs an element ID (from snapshot), a LABEL (from hints) or --xy X,Y");
       maxArgs(0);
       req.double = flags.has("--double");
       req.button = flags.has("--right") ? "right" : flags.has("--middle") ? "middle" : "left";
@@ -396,6 +400,16 @@ function human(req: CtlRequest, r: any): string {
       );
     case "snapshot":
       return `tab ${r.tab}: ${r.title || "(untitled)"}  ${r.url}\n${r.snapshot}`;
+    case "hints":
+      return [
+        `tab ${r.tab}: ${r.title || "(untitled)"}  ${r.url}`,
+        ...(r.hints as any[]).map(
+          (h) =>
+            `${h.label.toUpperCase().padEnd(4)} ${h.role || h.tag}${h.text ? ` "${h.text}"` : ""}${h.href ? ` -> ${h.href}` : ""}` +
+            `${h.id ? ` [${h.id}]` : ""} at ${h.x},${h.y}`,
+        ),
+        ...(r.hints.length ? [] : ["(nothing clickable in view)"]),
+      ].join("\n");
     case "text":
       return r.text;
     case "eval":

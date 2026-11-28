@@ -99,7 +99,7 @@ try:
     check("help lists every exit status (ctl's 5, check-update's 2)", "5 partly done" in cli("ctl", "--help").stdout and "2: bad usage" in cli("--help").stdout)
     check("--skill prints a SKILL.md with YAML frontmatter (name, description)",
           r.returncode == 0 and fields.get("name") == "termium" and len(fields.get("description", "")) > 40, skill[:200])
-    known = {"tabs", "open", "select", "close", "snapshot", "text", "click", "type", "key", "scroll", "shot", "eval", "wait", "dialog"}
+    known = {"tabs", "open", "select", "close", "snapshot", "hints", "text", "click", "type", "key", "scroll", "shot", "eval", "wait", "dialog"}
     used = set(re.findall(r"termium ctl (?:-s \S+ )?([a-z]+)", skill))
     check("the skill only names ctl commands that exist", used and used <= known, used - known)
     check("the skill covers start, devtools and the CDP clients",

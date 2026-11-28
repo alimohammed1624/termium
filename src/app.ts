@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { HINT_CHARS, PageHints, hintFontPx, hintLabels } from "./hints";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -51,6 +52,10 @@ export interface Page {
   docGen?: number;
   /** Element ids `termium ctl snapshot` handed out for the document of generation `gen`. */
   agentIds?: { gen: number; nodes: Set<number> };
+  /** The labels `termium ctl hints` handed out for the document of generation `gen`, and their elements. */
+  agentHints?: { gen: number; labels: Map<string, number> };
+  /** The isolated world link hints run in (see PageHints). */
+  hintWorld?: number | null;
   /** A size check waiting for the once-a-second limit (see trailingSizeCheck). */
   sizeRecheck?: ReturnType<typeof setTimeout>;
   /** An agent is closing it (see agentClose): "refused" once the page said it has unsaved changes. */
@@ -170,7 +175,7 @@ type Prompt =
   | { kind: "dialog"; edit: LineEdit; page: Page }
   | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
 
-type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
+type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update" | "hints";
 
 /**
  * The update box: the offer (update now, later, skip), the update's
@@ -300,6 +305,7 @@ const HELP: [string, string][] = [
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
+  ["o", "link hints (capital: new tab)"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
@@ -355,6 +361,19 @@ export class App {
   private mode: Mode = "normal";
   private prompt: Prompt | null = null;
   private spaceCursor = 0;
+  /** Link hints on screen (mode "hints"): the page, its labels and what's been typed (see startHints). */
+  private hintState: {
+    page: Page;
+    hints: PageHints;
+    labels: string[];
+    typed: string;
+    newTab: boolean;
+    /** The labels are drawn; keys typed before then wait in `early`. */
+    ready: boolean;
+    early: KeyEvent[];
+    /** The pane and pixel ratio they were drawn for. */
+    shape: string;
+  } | null = null;
   private toast: { text: string; until: number } | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -430,9 +449,11 @@ export class App {
     cdp.on("Page.frameStartedNavigating", navigating(true));
     cdp.on("Page.frameNavigated", navigating(false));
     // A new document (in the page or one of its frames): element ids handed out before are void.
-    cdp.on("Page.frameNavigated", (_p, sid) => {
+    cdp.on("Page.frameNavigated", (p, sid) => {
       const page = this.ownerOf(sid);
       if (page) page.docGen = (page.docGen ?? 0) + 1;
+      // Link hints are for the document they labelled.
+      if (page && page === this.hintState?.page && p.frame?.id === page.targetId) this.endHints();
     });
     cdp.on("Page.frameStoppedLoading", navigating(false));
     cdp.on("Page.navigatedWithinDocument", (p, sid) => {
@@ -1531,6 +1552,7 @@ export class App {
    */
   private resetInput(): void {
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
+    this.endHints();
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
     }
@@ -1611,6 +1633,8 @@ export class App {
       if (visible.has(page)) this.showPage(page);
       else this.hidePage(page);
     }
+    // Hints drawn for another pane size or pixel ratio (or a page no longer shown) are gone.
+    if (this.hintState && this.hintShape(this.hintState.page) !== this.hintState.shape) this.endHints();
   }
 
   private showPage(page: Page): void {
@@ -2279,6 +2303,7 @@ export class App {
       case "spaces": return " SPACES ";
       case "help": return " HELP ";
       case "update": return " UPDATE ";
+      case "hints": return ` HINTS${this.hintState?.typed ? ` ${this.hintState.typed.toUpperCase()}` : ""} `;
       default: return "";
     }
   }
@@ -3013,6 +3038,7 @@ export class App {
       this.fullRedraw();
       return;
     }
+    if (this.mode === "hints") return this.hintKey(ev, combo);
     if (this.mode === "prefix") {
       this.mode = "normal";
       this.prefixAction(combo, ev);
@@ -3149,6 +3175,7 @@ export class App {
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
+      case "o": void this.startHints(); return;
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
       case "shift+u": this.openUpdate(); return;
@@ -3211,6 +3238,123 @@ export class App {
     const sidebarChanged = !this.sidebar && wasSpaces !== (mode === "spaces");
     if (sidebarChanged) this.relayoutAndRedraw();
     else this.queueChrome();
+  }
+
+  // ---------------------------------------------------------- link hints
+
+  /** A page's pane and pixel ratio, as hints drawn on it depend on them ("" if not shown). */
+  private hintShape(page: Page): string {
+    const g = this.geom.get(page)?.content;
+    return g && page.css ? `${g.col},${g.row},${g.cols}x${g.rows}@${page.css.dsf}` : "";
+  }
+
+  /**
+   * Labels the clickable elements in view on the focused page (Vimium's
+   * link hints); typing a label clicks its element (see hintKey).
+   */
+  private async startHints(): Promise<void> {
+    const page = this.focused;
+    if (!page || page.dialog || !this.hintShape(page)) return;
+    const h: NonNullable<App["hintState"]> = {
+      page,
+      hints: new PageHints((m, p, s) => this.cdp.send(m, p, s), page),
+      labels: [],
+      typed: "",
+      newTab: false,
+      ready: false,
+      early: [],
+      shape: this.hintShape(page),
+    };
+    this.endHints();
+    this.hintState = h;
+    this.mode = "hints";
+    this.queueChrome();
+    try {
+      const found = await h.hints.collect("person");
+      if (this.hintState !== h) return void h.hints.clear();
+      if (!found.length) {
+        this.endHints();
+        return this.showToast("No links or buttons in view");
+      }
+      h.labels = hintLabels(found.length);
+      await h.hints.draw(h.labels, hintFontPx(this.cellH, page.css?.dsf ?? this.dsf));
+      if (this.hintState !== h) return void h.hints.clear();
+      h.ready = true;
+      for (const ev of h.early.splice(0)) if (this.hintState === h) this.hintKey(ev, comboOf(ev));
+    } catch (e) {
+      this.opts.log(`hints: ${e}`);
+      if (this.hintState === h) {
+        this.endHints();
+        this.showToast("Couldn't label this page");
+      }
+    }
+  }
+
+  /** Takes link hints down (if up). */
+  private endHints(): void {
+    const h = this.hintState;
+    if (!h) return;
+    this.hintState = null;
+    if (this.mode === "hints") this.mode = "normal";
+    if (this.pages.has(h.page.sessionId)) void h.hints.clear();
+    this.queueChrome();
+  }
+
+  /**
+   * A key while hints are up: a label's letters narrow them down, and the
+   * last one clicks (in a new tab if a letter was a capital or came with a
+   * modifier); Backspace takes one back; Esc, or any other key, ends them.
+   * Letters no label goes on with are ignored.
+   */
+  private hintKey(ev: KeyEvent, combo: string): void {
+    const h = this.hintState;
+    if (!h) {
+      this.mode = "normal";
+      return void this.queueChrome();
+    }
+    if (combo === "ctrl+b") {
+      // The prefix still works: hints give way to it.
+      this.endHints();
+      this.mode = "prefix";
+      return void this.queueChrome();
+    }
+    if (combo === "escape") return this.endHints();
+    if (!h.ready) return void h.early.push(ev);
+    if (combo === "backspace") {
+      h.typed = h.typed.slice(0, -1);
+      if (!h.typed) h.newTab = false;
+      void h.hints.narrow(h.typed);
+      return void this.queueChrome();
+    }
+    const ch = ev.key.length === 1 ? ev.key.toLowerCase() : "";
+    if (!/^[a-z]$/.test(ch)) return this.endHints();
+    const typed = h.typed + ch;
+    const matches = h.labels.filter((l) => l.startsWith(typed));
+    if (!HINT_CHARS.includes(ch) || !matches.length) return;
+    h.typed = typed;
+    if (ev.key !== ch || ev.mods.shift || ev.mods.ctrl || ev.mods.alt || ev.mods.meta) h.newTab = true;
+    if (matches.length === 1 && matches[0] === typed) return void this.followHint(h, h.labels.indexOf(typed));
+    void h.hints.narrow(typed);
+    this.queueChrome();
+  }
+
+  /** Clicks the element of label `i` (a link with a modifier: opens it in a background tab, as Ctrl+click does). */
+  private async followHint(h: NonNullable<App["hintState"]>, i: number): Promise<void> {
+    this.hintState = null;
+    this.mode = "normal";
+    this.queueChrome();
+    const page = h.page;
+    if (!this.pages.has(page.sessionId)) return;
+    const t = await h.hints.target(i);
+    if (!t) return this.showToast("That element is gone or covered now");
+    const newTab = h.newTab && t.link;
+    const modifiers = newTab ? (process.platform === "darwin" ? 4 : 2) : 0;
+    if (newTab) this.lastMiddlePress = Date.now();
+    const send = (p: object) =>
+      this.cdp.send("Input.dispatchMouseEvent", { x: t.x, y: t.y, modifiers, ...p }, page.sessionId).catch(() => {});
+    await send({ type: "mouseMoved", button: "none", buttons: 0 });
+    await send({ type: "mousePressed", button: "left", buttons: 1, clickCount: 1 });
+    await send({ type: "mouseReleased", button: "left", buttons: 0, clickCount: 1 });
   }
 
   private promptKey(ev: KeyEvent): void {
@@ -3620,6 +3764,9 @@ export class App {
       if (ev.action === "press") this.closeUpdate(this.updateBox?.state === "failed");
       return;
     }
+
+    // A click or scroll puts link hints away (and then does what it does).
+    if (this.hintState && (ev.action === "press" || ev.action === "wheel")) this.endHints();
 
     if (this.drag) {
       if (ev.action === "move") return this.dragTo(col, row);
