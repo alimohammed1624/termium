@@ -55,6 +55,9 @@ export interface Page {
   sizeRecheck?: ReturnType<typeof setTimeout>;
   /** An agent is closing it (see agentClose): "refused" once the page said it has unsaved changes. */
   agentClosing?: "yes" | "force" | "refused";
+  /** Agents' commands acting on it now, and when its agent-driven mark ends after them: see agentDriving. */
+  agentActs?: number;
+  agentUntil?: number;
   /** Its browser context (another DevTools client's newContext() makes others). */
   contextId?: string;
   targetId: string;
@@ -238,6 +241,19 @@ const fg = (hex: string) => `\x1b[38;2;${rgb(hex)}m`;
 const bg = (hex: string) => `\x1b[48;2;${rgb(hex)}m`;
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
+/** How long a page stays marked as agent-driven after an agent's command on it ends. */
+const AGENT_LINGER_MS = 3000;
+/**
+ * A page's flags before its title: "!" a dialog waits, "●" an agent drives
+ * it, "◌" loading. `dot`: where the "●" is in them (-1: none).
+ */
+const pageFlags = (dialog: boolean, driven: boolean, loading: boolean): { flags: string; dot: number } => {
+  const f = (dialog ? "!" : "") + (driven ? "●" : !dialog && loading ? "◌" : "");
+  return { flags: f ? f + " " : "", dot: driven ? f.indexOf("●") : -1 };
+};
+/** `text` in `style`, with the agent's "●" at `i` (if truncation left it there) in `dot`'s style. */
+const withDot = (text: string, i: number, style: string, dot: string) =>
+  i >= 0 && text[i] === "●" ? style + text.slice(0, i) + dot + "●\x1b[22m" + style + text.slice(i + 1) : style + text;
 const at = (row: number, col: number) => `\x1b[${row};${col}H`;
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
@@ -2183,7 +2199,9 @@ export class App {
       const active = i === this.activeSpace;
       const cursor = this.mode === "spaces" && i === this.spaceCursor;
       const marker = cursor ? "▸" : active ? "●" : " ";
-      const count = `${space.tabs.length}`;
+      // An agent acting on one of its pages: a pulsing dot by its count.
+      const driven = space.tabs.some((t) => leaves(t.root).some((p) => this.agentDriven(p)));
+      const count = `${driven ? "● " : ""}${space.tabs.length}`;
       const name = truncate(`${marker} ${i + 1} ${space.name}`, w - count.length - 2);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
       const style = cursor
@@ -2191,7 +2209,8 @@ export class App {
         : active
           ? bg(C.surface0) + fg(C.text) + BOLD
           : base;
-      line(row, text, style);
+      const fitted = fit(text, w);
+      s += at(row, 1) + withDot(fitted, driven ? fitted.lastIndexOf("●") : -1, style, this.agentDot()) + RESET;
       this.spaceHits.push({ row, index: i });
       row++;
     });
@@ -2211,14 +2230,18 @@ export class App {
     this.badgeHit = badge && bw ? [col + w, col + full] : null;
     const space = this.space;
     const tabs = space?.tabs ?? [];
+    // Where each tab's agent dot is in its text (-1: none).
+    const dots: number[] = [];
     const items = tabs.map((tab, i) => {
       const pages = leaves(tab.root);
       const title = pageTitle(tab.focused);
       const extra = pages.length > 1 ? ` ⊞${pages.length}` : "";
-      const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
-      return ` ${i + 1} ${dot}${truncate(title, 22)}${extra} `;
+      const f = pageFlags(pages.some((p) => p.dialog), pages.some((p) => this.agentDriven(p)), pages.some((p) => p.loading));
+      dots[i] = f.dot < 0 ? -1 : ` ${i + 1} `.length + f.dot;
+      return ` ${i + 1} ${f.flags}${truncate(title, 22)}${extra} `;
     });
     const plus = " + ";
+    const agentDot = this.agentDot();
     // Scroll so the active tab is visible.
     let first = 0;
     const active = space?.active ?? 0;
@@ -2242,7 +2265,7 @@ export class App {
       if (used + tw + width(plus) + more > w) break;
       last = i;
       const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
-      s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
+      s += withDot(text, dots[i]!, style, agentDot) + RESET + bg(C.crust) + fg(C.surface1) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
       used += tw + 1;
     }
@@ -2250,7 +2273,7 @@ export class App {
       // Not even the active tab fits whole: show it cut to the space there is.
       const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
       const text = truncate(items[active]!, room);
-      s += bg(C.base) + fg(C.text) + BOLD + text + RESET + bg(C.crust);
+      s += withDot(text, dots[active]!, bg(C.base) + fg(C.text) + BOLD, agentDot) + RESET + bg(C.crust);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
       used += width(text);
       last = active;
@@ -2388,9 +2411,9 @@ export class App {
       const style = focused ? bg(C.surface1) + fg(C.text) + BOLD : bg(C.mantle) + fg(C.overlay);
       const host = page.url.includes(MARKER) ? "" : hostOf(page.url);
       const title = pageTitle(page) === page.url.replace(/^https?:\/\//, "") ? "" : pageTitle(page);
-      const flag = page.dialog ? "! " : page.loading ? "◌ " : "";
-      const text = ` ${flag}${title}${title && host ? " — " : ""}${host}`;
-      s += at(g.header.row, g.header.col) + style + fit(text, g.header.cols) + RESET;
+      const f = pageFlags(!!page.dialog, this.agentDriven(page), page.loading);
+      const text = ` ${f.flags}${title}${title && host ? " — " : ""}${host}`;
+      s += at(g.header.row, g.header.col) + withDot(fit(text, g.header.cols), f.dot < 0 ? -1 : 1 + f.dot, style, this.agentDot()) + RESET;
     }
     for (const sep of this.seps) {
       if (sep.split.dir !== "h") continue;
@@ -3842,6 +3865,38 @@ export class App {
   /** The UI is up (the first page exists). */
   get isReady(): boolean {
     return this.ready;
+  }
+
+  /**
+   * Marks a page an agent acts on (a pulsing "●" on its tab, its space and
+   * its pane's header): `on` while a command acts on it, then for
+   * AGENT_LINGER_MS after, so the person knows not to type into it.
+   */
+  agentDriving(page: Page, on: boolean): void {
+    page.agentActs = Math.max(0, (page.agentActs ?? 0) + (on ? 1 : -1));
+    if (!on) page.agentUntil = Date.now() + AGENT_LINGER_MS;
+    this.agentPulse ??= setInterval(() => {
+      if ([...this.pages.values()].some((p) => this.agentDriven(p))) this.agentBeat = !this.agentBeat;
+      else {
+        clearInterval(this.agentPulse!);
+        this.agentPulse = null;
+      }
+      this.queueChrome();
+    }, 600);
+    this.queueChrome();
+  }
+
+  /** Ticks while any page is marked as agent-driven (see agentDriving). */
+  private agentPulse: ReturnType<typeof setInterval> | null = null;
+  private agentBeat = false;
+
+  private agentDriven(page: Page): boolean {
+    return !!page.agentActs || (page.agentUntil ?? 0) > Date.now();
+  }
+
+  /** The agent dot's style this beat: the accent, bright then dim. */
+  private agentDot(): string {
+    return fg(C.mauve) + (this.agentBeat ? "\x1b[22;2m" : BOLD);
   }
 
   /** Every page, in the order of spaces, tabs and panes. */
