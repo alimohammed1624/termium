@@ -15,35 +15,111 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { hostname } from "node:os";
-import { join } from "node:path";
+import { homedir, hostname } from "node:os";
+import { basename, join } from "node:path";
 import type { Subprocess } from "bun";
 import { CDP } from "./cdp";
 
-const CANDIDATES = [
-  "helium-browser",
-  "helium",
-  "/opt/helium-browser-bin/helium",
-  "/opt/helium/helium",
-  "/usr/lib/helium/helium",
-  "/Applications/Helium.app/Contents/MacOS/Helium",
+/** A browser termium looks for, in order of preference, and where it's usually installed. */
+type Candidate = { name: string; paths: string[] };
+
+const mac = (app: string, exe = app) => [
+  `/Applications/${app}.app/Contents/MacOS/${exe}`,
+  join(homedir(), `Applications/${app}.app/Contents/MacOS/${exe}`),
 ];
 
-export function findBrowser(explicit?: string): string {
+/**
+ * Helium first: its patches include a built-in content blocker. Any other
+ * Chromium works too, just without that (the first one found is used).
+ */
+const CANDIDATES: Candidate[] = [
+  {
+    name: "Helium",
+    paths: [
+      "helium-browser",
+      "helium",
+      "/opt/helium-browser-bin/helium",
+      "/opt/helium/helium",
+      "/usr/lib/helium/helium",
+      ...mac("Helium"),
+    ],
+  },
+  { name: "Chromium", paths: ["chromium", "chromium-browser", "/snap/bin/chromium", ...mac("Chromium")] },
+  { name: "Brave", paths: ["brave-browser", "brave", ...mac("Brave Browser")] },
+  { name: "Google Chrome", paths: ["google-chrome-stable", "google-chrome", ...mac("Google Chrome")] },
+  { name: "Microsoft Edge", paths: ["microsoft-edge-stable", "microsoft-edge", ...mac("Microsoft Edge")] },
+];
+
+export type FoundBrowser = {
+  path: string;
+  /** "Helium", "Chromium"... or the file name of a browser termium doesn't know. */
+  name: string;
+  /** Given by --browser or TERMIUM_BROWSER rather than found. */
+  explicit: boolean;
+};
+
+export function findBrowser(explicit?: string): FoundBrowser {
   // An explicit choice must resolve; silently falling back would hide a typo.
   for (const [what, choice] of [["--browser", explicit], ["TERMIUM_BROWSER", process.env.TERMIUM_BROWSER]] as const) {
     if (!choice) continue;
     const found = resolve(choice);
     if (!found) throw new Error(`${what} ${choice}: no such executable`);
-    return found;
+    return { path: found, name: browserName(choice, found), explicit: true };
   }
   for (const c of CANDIDATES) {
-    const found = resolve(c);
-    if (found) return found;
+    for (const p of c.paths) {
+      const found = resolve(p);
+      if (found) return { path: found, name: c.name, explicit: false };
+    }
   }
   throw new Error(
-    "Could not find Helium. Install it, or pass --browser <path> (or set TERMIUM_BROWSER).",
+    "Could not find Helium or another Chromium-based browser (Chromium, Brave, Google Chrome, Microsoft Edge). " +
+      "Install one, or pass --browser <path> (or set TERMIUM_BROWSER).",
   );
+}
+
+/** Which known browser `given` (as typed, and as resolved to `path`) is, else its file name. */
+function browserName(given: string, path: string): string {
+  for (const c of CANDIDATES) {
+    if (c.paths.some((p) => p === given || p === path || (!p.includes("/") && basename(path) === p))) return c.name;
+  }
+  return basename(path);
+}
+
+/**
+ * Remembers which browser last ran on `profileDir` and says what changed:
+ * "new" for a profile no browser has used through termium, "changed" with
+ * the previous browser when it was another one, else "same". Profiles are
+ * shared between browsers, but each encrypts saved logins with its own key
+ * and an older one may refuse a profile a newer one wrote, so a change is
+ * worth telling the user about.
+ */
+export function noteProfileBrowser(
+  profileDir: string,
+  browser: FoundBrowser,
+): { kind: "new" } | { kind: "same" } | { kind: "changed"; before: string } {
+  const file = join(profileDir, "termium-browser");
+  let before: string | null = null;
+  try {
+    before = readFileSync(file, "utf8").trim() || null;
+  } catch {}
+  try {
+    writeFileSync(file, `${browser.path}\n`);
+  } catch {}
+  if (before === null) return { kind: "new" };
+  if (before === browser.path) return { kind: "same" };
+  return { kind: "changed", before: browserName(before, before) };
+}
+
+/** What to tell the user when a session starts on `browser` (null: nothing). */
+export function browserNotice(browser: FoundBrowser, profile: ReturnType<typeof noteProfileBrowser>): string | null {
+  if (profile.kind === "changed" && profile.before !== browser.name) {
+    return `Now on ${browser.name} (was ${profile.before}): you may need to sign in again`;
+  }
+  if (profile.kind === "new" && !browser.explicit && browser.name !== "Helium") {
+    return `Using ${browser.name}: Helium not found, so no content blocker`;
+  }
+  return null;
 }
 
 function resolve(c: string): string | null {

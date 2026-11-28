@@ -13,8 +13,10 @@ import { join, resolve as resolvePath } from "node:path";
 import { App } from "./app";
 import { ACTING, CtlError, EXIT, runCtl, type CtlRequest } from "./agent";
 import {
+  browserNotice,
   clearOwner,
   findBrowser,
+  noteProfileBrowser,
   launchBrowser,
   lockFile,
   lockProfile,
@@ -361,8 +363,11 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
   }
 
   let bin: string;
+  let browserMsg: string | null;
   try {
-    bin = findBrowser(args.browser);
+    const found = findBrowser(args.browser);
+    bin = found.path;
+    browserMsg = browserNotice(found, noteProfileBrowser(profile, found));
   } catch (e: any) {
     unlockProfile(profile);
     if (args.incognito) rmSync(profile, { recursive: true, force: true });
@@ -529,6 +534,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         else if (reopened === "some") {
           app.showToast("Not all pages reopened; the restart snapshot is kept", 10_000);
         }
+        if (browserMsg) app.showToast(browserMsg, 8000);
         if (conflict) {
           app.showToast(
             `Snapshot kept (${conflict}); start it that way within 10 minutes to reopen its spaces and tabs`,

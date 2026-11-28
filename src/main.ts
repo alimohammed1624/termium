@@ -52,7 +52,8 @@ Usage:
 
 Options:
   -s, --session <name>  session to use (default: "${DEFAULT_SESSION}")
-  --browser <path>      Helium/Chromium binary (default: helium-browser on PATH, or $TERMIUM_BROWSER)
+  --browser <path>      browser binary (default: $TERMIUM_BROWSER, else Helium, Chromium, Brave,
+                        Google Chrome or Microsoft Edge, the first one installed)
   --profile <dir>       browser profile directory (default: $XDG_DATA_HOME/termium/profile,
                         or $XDG_DATA_HOME/termium/profiles/NAME for -s NAME)
   --incognito           use a throwaway profile that is deleted when the session ends

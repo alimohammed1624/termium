@@ -10,7 +10,9 @@ draws the page with the kitty graphics protocol. Written in TypeScript for
 It is to [Carbonyl](https://github.com/fathyb/carbonyl) what
 [Browsh](https://www.brow.sh) is to Firefox, minus the fork: no Chromium
 build, just your installed Helium (so you get its patches, including the
-built-in content blocker) running headless. Pages are drawn as real images,
+built-in content blocker) running headless. No Helium? termium uses
+Chromium, Brave, Google Chrome or Microsoft Edge instead, whichever it
+finds first. Pages are drawn as real images,
 not character art, so text is sharp and video, canvas and WebGL work.
 
 ## Features
@@ -60,8 +62,9 @@ termium --incognito             # throwaway profile, deleted when the session en
 termium --help
 ```
 
-Options: `--browser <path>` (default: Helium on `PATH`, or
-`$TERMIUM_BROWSER`), `--profile <dir>` (default
+Options: `--browser <path>` (default: `$TERMIUM_BROWSER`, else the first
+of Helium, Chromium, Brave, Google Chrome and Microsoft Edge that is
+installed), `--profile <dir>` (default
 `~/.local/share/termium/profile`, or `.../profiles/NAME` for a session
 started with `-s NAME`), `--incognito`, `--scale <n>` (device
 pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
@@ -329,6 +332,10 @@ termium update           # update to it (a release binary only)
   built-in content blocker loads, so the very first page can take a moment,
   and Helium may reload a page that loaded before the blocker was ready
   (anything typed into it in those first seconds is lost).
+- Without Helium there is no built-in content blocker; termium says so once
+  when a new profile starts on another browser. A profile can move between
+  browsers, but saved logins may not carry over (each browser encrypts them
+  with its own key); termium tells you when a profile's browser changed.
 - Only one session can use a profile at a time. Each named session
   (`termium -s NAME`) has its own, `~/.local/share/termium/profiles/NAME`
   (the default session keeps `~/.local/share/termium/profile`); `--profile`
@@ -426,8 +433,8 @@ sh install.sh
 
 **What termium needs at run time:**
 
-- [Helium](https://helium.computer) (or another Chromium-based browser)
-  installed.
+- [Helium](https://helium.computer) (recommended), or Chromium, Brave,
+  Google Chrome or Microsoft Edge, installed.
 - A terminal that speaks the kitty graphics protocol.
   [Ghostty](https://ghostty.org) is recommended.
 

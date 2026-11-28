@@ -243,7 +243,7 @@ main() {
 
     say ""
     say "termium needs, at run time:"
-    say "  - Helium (or another Chromium-based browser) installed"
+    say "  - Helium (recommended) or Chromium, Brave, Google Chrome or Microsoft Edge"
     say "  - a terminal with the kitty graphics protocol (Ghostty recommended)"
     say "Then run 'termium'."
 }
