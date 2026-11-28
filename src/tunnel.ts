@@ -22,10 +22,31 @@ export function sshHost(dest: string): string {
 
 /** The browser flags that send all of its traffic, loopback too, through the SOCKS proxy on `port`. */
 export function proxyArgs(port: number): string[] {
-  // "<-loopback>" removes Chromium's implicit bypass of localhost/127.0.0.1/[::1].
-  // A SOCKS5 proxy also resolves names on the far side.
-  return [`--proxy-server=socks5://127.0.0.1:${port}`, "--proxy-bypass-list=<-loopback>"];
+  return [
+    // "<-loopback>" removes Chromium's implicit bypass of localhost/127.0.0.1/[::1].
+    `--proxy-server=socks5://127.0.0.1:${port}`,
+    "--proxy-bypass-list=<-loopback>",
+    // Names resolve on the far side (SOCKS5); nothing is looked up here, not even a DNS prefetch.
+    "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
+    // WebRTC would otherwise send UDP (STUN, media) straight from this machine.
+    // (Helium and ungoogled-chromium know the first spelling; older Chromiums the second.)
+    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  ];
 }
+
+/**
+ * Runs a command (ssh) so that it ends when termium does, however termium
+ * ends: it holds our pipe on fd 3 and is killed once that closes (termium
+ * killed outright can't stop it otherwise). Its own exit status is kept.
+ */
+const WATCHED = [
+  "sh",
+  "-c",
+  'exec 3<&0 </dev/null; "$@" & p=$!; (read _ <&3; kill $p 2>/dev/null) & w=$!; ' +
+    "trap 'kill $p $w 2>/dev/null; wait $p; exit 143' TERM; wait $p; s=$?; kill $w 2>/dev/null; exit $s",
+  "termium-ssh",
+];
 
 /** The ssh command for a tunnel to `dest` with its SOCKS proxy on 127.0.0.1:`port`. */
 export function sshArgv(dest: string, port: number): string[] {
@@ -119,7 +140,8 @@ export class Tunnel {
   private async open(): Promise<void> {
     const argv = sshArgv(this.dest, this.port);
     this.log(`ssh: ${argv.join(" ")}`);
-    const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "ignore", stderr: "pipe", env: { ...process.env } });
+    // stdin: our end of the pipe that keeps it alive (see WATCHED); never written to.
+    const proc = Bun.spawn([...WATCHED, ...argv], { stdin: "pipe", stdout: "ignore", stderr: "pipe", env: { ...process.env } });
     this.proc = proc;
     let err = "";
     const reading = (async () => {
@@ -128,7 +150,7 @@ export class Tunnel {
     })().catch(() => {});
     const exited = proc.exited.then(async () => {
       await Promise.race([reading, Bun.sleep(500)]);
-      return lastLines(err) || (proc.signalCode ? `ssh was stopped (${proc.signalCode})` : proc.exitCode === 0 ? "ssh ended" : `ssh exited with code ${proc.exitCode}`);
+      return lastLines(err) || (proc.signalCode || (proc.exitCode ?? 0) > 128 ? "ssh was stopped" : proc.exitCode === 0 ? "ssh ended" : `ssh exited with code ${proc.exitCode}`);
     });
     // Ready once something answers on the port while this ssh still runs.
     for (;;) {

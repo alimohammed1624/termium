@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +33,11 @@ test("the host shown for a destination", () => {
 });
 
 test("browser flags send loopback through the proxy too", () => {
-  expect(proxyArgs(1080)).toEqual(["--proxy-server=socks5://127.0.0.1:1080", "--proxy-bypass-list=<-loopback>"]);
+  const a = proxyArgs(1080);
+  expect(a.slice(0, 2)).toEqual(["--proxy-server=socks5://127.0.0.1:1080", "--proxy-bypass-list=<-loopback>"]);
+  // No local DNS lookups, and no WebRTC UDP around the proxy.
+  expect(a).toContain("--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1");
+  expect(a).toContain("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
 });
 
 test("ssh runs without prompts, a dynamic forward on loopback, and the destination last", () => {
@@ -77,4 +81,27 @@ test("the tunnel comes up on a free port, reconnects on the same port after a dr
     await t.stop();
   }
   expect(await open(t.port)).toBe(false);
+});
+
+test("ssh ends when the session is killed outright (SIGKILL)", async () => {
+  const pidFile = join(dir, "ssh.pid");
+  const script = join(dir, "holder.ts");
+  writeFileSync(script, `import { Tunnel } from ${JSON.stringify(join(import.meta.dir, "..", "src", "tunnel.ts"))};\nconst t = new Tunnel("me@devbox", () => {});\nawait t.start();\nconsole.log("up");\nsetInterval(() => {}, 1000);\n`);
+  const holder = Bun.spawn([process.execPath, script], { stdout: "pipe", env: { ...process.env, FAKE_SSH_PIDFILE: pidFile } });
+  const reader = holder.stdout.getReader();
+  await reader.read(); // "up"
+  const ssh = Number(readFileSync(pidFile, "utf8"));
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  expect(alive(ssh)).toBe(true);
+  holder.kill(9);
+  for (let i = 0; i < 60 && alive(ssh); i++) await Bun.sleep(50);
+  expect(alive(ssh)).toBe(false);
+  expect(existsSync(pidFile)).toBe(true);
 });

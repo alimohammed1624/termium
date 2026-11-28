@@ -521,6 +521,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
           restart: (confirmed) => void restartSession(app!.ticket(), confirmed),
         },
       });
+      // A tunnel that dropped while the browser was starting: shown from the start.
+      if (tunnel?.state === "down") app.setTunnel(tunnel.lastError);
       // Whoever is attached by now (a takeover may have happened meanwhile).
       app.setUpdatesShown((lastHello ?? h).updateCheck === true && !!client);
       app.attach(terminalOf(lastHello ?? h));
