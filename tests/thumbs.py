@@ -61,7 +61,8 @@ def preview(t):
     """The tab preview: a direct placement PREVIEW_COLS (40) wide, on row 3."""
     return placed(t, lambda p: p[0] == 3 and p[2] == 40)
 
-LISTEN = "window.__ev = []; for (const k of ['mousedown','mouseup','click','wheel']) addEventListener(k, () => __ev.push(k), true); 0"
+LISTEN = ("window.__ev = []; if (!window.__evOn) { window.__evOn = 1; "
+          "for (const k of ['mousedown','mouseup','click','auxclick','wheel']) addEventListener(k, () => __ev.push(k), true); } 0")
 
 def events(t, page):
     """Mouse events the page saw since listen() (None if it can't be asked)."""
@@ -200,6 +201,34 @@ def run_direct():
         t.key("escape")
         check("picker sheet goes with the picker", t.wait_for(lambda: "· 1 tab" not in t.text(), 4))
         check("pane picture back after the picker", t.wait_for(lambda: placed(t, lambda p: p[2] > 100), 4), t.placements)
+
+        # Leaving the picker by number: the sheet isn't drawn again on the way out.
+        t.key("ctrl+b"); t.key("w")
+        check("picker again", t.wait_text("· 3 tabs", 4))
+        time.sleep(1.0)
+        with t.lock:
+            mark = len(t.raw)
+        t.key("1"); time.sleep(1.5)
+        with t.lock:
+            after = bytes(t.raw[mark:])
+        check("picker closes by number", "· 3 tabs" not in t.text())
+        check("...without sending its thumbnails again", after.count(b",z=1,") == 0, after.count(b",z=1,"))
+
+        # A button the preview took, released while another is held on the page: the page sees only its own click.
+        listen(t, 1)
+        move(t, tab_col(t, " 2 ") + 3, 1)
+        check("preview for the mixed-button press", t.wait_for(lambda: preview(t), 3))
+        p2 = preview(t)
+        if p2:
+            (_, (row, pcol, c, r)), = p2.items()
+            x, y = (pcol + 4) * 10 - 5, (row + 2) * 20 - 10
+            t.mouse(x, y - 20, action="move"); t.mouse(x, y, action="move")
+            t.mouse(x, y, button=2, action="press"); time.sleep(0.2)
+            t.mouse(1400, 700, button=0, action="press"); time.sleep(0.2)  # the page, outside the preview
+            t.mouse(1400, 700, button=2, action="release"); time.sleep(0.1)
+            t.mouse(1400, 700, button=0, action="release"); time.sleep(0.6)
+            ev = events(t, (active(t) or {}).get("id"))
+            check("...the page sees only its own click", ev == ["mousedown", "mouseup", "click"], ev)
 
         # A page's dialog opening under a hover sheet puts the sheet away, so the whole message shows.
         ctl(t, "eval", "setTimeout(() => alert('first line\\nsecond line'), 1500); 0", "1")

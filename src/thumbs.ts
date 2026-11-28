@@ -180,11 +180,10 @@ export function sheetLayout(area: Rect, n: number, cellW: number, cellH: number,
   const fitRows = Math.floor((area.rows - 2) / rowH); // under the header and a blank row
   if (fitRows < 1 || area.cols < tw + gap + 2) return null;
   // At most SHEET_MAX pictures, well under the cache's size: a sheet never evicts its own.
-  let shown = Math.min(n, perRow * fitRows, SHEET_MAX);
-  // Room for the "+N more" line.
-  if (shown < n && 2 + Math.ceil(shown / perRow) * rowH + 1 > area.rows) shown = Math.max(1, shown - perRow);
+  const shown = Math.min(n, perRow * fitRows, SHEET_MAX);
+  // ("+N more" goes on the last row: the gap under the last titles.)
   const lines = Math.ceil(shown / perRow);
-  const rows = Math.min(area.rows, 2 + lines * rowH + (shown < n ? 1 : 0));
+  const rows = 2 + lines * rowH;
   const panel = {
     col: area.col,
     row: Math.max(area.row, Math.min(anchor - 1, area.row + area.rows - rows)),

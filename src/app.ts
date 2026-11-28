@@ -3217,14 +3217,15 @@ export class App {
     else if (combo === "k" || combo === "arrowup") this.spaceCursor = (this.spaceCursor - 1 + n) % n;
     else if (/^[1-9]$/.test(combo)) {
       const i = Number(combo) - 1;
-      if (i < n) this.switchSpace(i);
       this.mode = "normal";
+      // (Out of the picker first: its sheet isn't drawn again on the way out.)
+      if (i < n) return this.switchSpace(i);
     } else if (combo === "enter") {
       this.mode = "normal";
-      this.switchSpace(this.spaceCursor);
+      return this.switchSpace(this.spaceCursor);
     } else if (combo === "shift+n") {
       this.mode = "normal";
-      this.newSpace();
+      return this.newSpace();
     } else {
       this.mode = "normal";
     }
@@ -4128,13 +4129,14 @@ export class App {
    * switch tabs. True if the event goes no further.
    */
   private thumbMouse(ev: MouseEvent, col: number, row: number): boolean {
-    if (this.mouseCapture) return false;
-    // The rest of a click the thumbnails took (the page under it never saw the press).
+    // The rest of a click the thumbnails took (the page under it never saw the
+    // press), even once another button went down on a page.
     const bit = ev.button < 3 ? 1 << ev.button : 0;
     if (ev.action === "release" && this.thumbPress & bit) {
       this.thumbPress &= ~bit;
       return true;
     }
+    if (this.mouseCapture) return false;
     if (ev.action === "move" && ev.button !== 3 && this.thumbPress && !this.mouseButtons) return true;
     const sheet = this.sheetSpace() !== null;
     const inside = (this.preview !== null || sheet) && this.thumbAreas.some((a) => inRect(a, col, row));

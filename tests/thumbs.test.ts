@@ -110,6 +110,13 @@ describe("sheetLayout", () => {
     expect(l.more).toBeGreaterThan(0);
     expect(l.panel.rows).toBeLessThanOrEqual(22);
     expect(sheetLayout({ col: 1, row: 3, cols: 80, rows: 5 }, 3, 10, 20)).toBeNull();
+    // Only just tall enough for one row of pictures: a full row, the count under it.
+    const short = sheetLayout({ col: 23, row: 3, cols: 138, rows: 13 }, 5, 10, 20)!;
+    expect(short.cells.length).toBe(4);
+    expect(short.more).toBe(1);
+    expect(short.panel.rows).toBeLessThanOrEqual(13);
+    const last = short.cells[3]!;
+    expect(last.row + last.rows).toBeLessThan(short.panel.row + short.panel.rows - 1); // title above the count's row
     expect(sheetLayout(area, 0, 10, 20)).toBeNull();
   });
 });
