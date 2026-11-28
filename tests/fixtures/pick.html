@@ -3,3 +3,11 @@
 <button id=big class=box style="top: 40px" onclick="window.clicks = (window.clicks || 0) + 1">Big button</button>
 <input class=box style="top: 180px" data-testid=email aria-label="Email" value="typed-secret">
 <p class=box style="top: 300px" onclick="window.pclicks = 1">Some <b>bold</b> words</p>
+<div class=box style="top: 420px" id=under-wrap><button id=under style="width: 100%; height: 100%" onclick="window.underClicks = (window.underClicks || 0) + 1">Under a mask</button><div id=mask style="position: absolute; inset: 0; pointer-events: none; background: rgba(0,0,0,0.05)"></div></div>
+<div class=box style="top: 540px" id=form-card>Card <input value="nested-secret" aria-label="Nested"> <textarea aria-label="Notes">area-secret</textarea> <span id=ed contenteditable>ed-secret</span> label</div>
+<iframe id=cross class=box style="top: 660px; border: 0" title="Cross frame"></iframe>
+<div id=held class=box style="top: 780px" onmousedown="window.downs = (window.downs || 0) + 1" onmouseup="window.ups = (window.ups || 0) + 1">Hold here</div>
+<script>
+// Another site (localhost, not 127.0.0.1): its own process.
+document.getElementById("cross").src = "http://localhost:" + location.port + "/page.html";
+</script>

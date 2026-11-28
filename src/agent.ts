@@ -256,7 +256,7 @@ class Agent {
       case "dialog":
         return this.dialog(req);
       case "picked":
-        return req.wait ? this.waitPick(this.app.pickSeq, null) : this.lastPick();
+        return req.wait ? this.waitPick(this.app.pickSeq, false) : this.lastPick();
       case "pick":
         return this.pick(timeoutMs);
       default:
@@ -435,21 +435,29 @@ class Agent {
   }
 
   /**
-   * Waits for the next pick (after `seq`). With `cancels` (pick mode this
-   * command asked for), the person cancelling it ends the wait.
+   * Waits for the next pick (after `seq`). For `pick` (`inMode`), pick mode
+   * ending unanswered ends the wait; and the last such command to time out
+   * turns off pick mode an agent turned on (never the person's own).
    */
-  private async waitPick(seq: number, cancels: number | null, started = false): Promise<unknown> {
-    while (this.app.pickSeq === seq) {
-      if (cancels !== null && (this.app.pickCancels !== cancels || !this.app.picking())) {
-        throw new CtlError("the person cancelled the pick (Esc, or a click outside the page)");
+  private async waitPick(seq: number, inMode: boolean): Promise<unknown> {
+    const cancels = this.app.pickCancels;
+    if (inMode) this.app.pickWaiters++;
+    try {
+      while (this.app.pickSeq === seq) {
+        if (inMode && (this.app.pickCancels !== cancels || !this.app.picking())) {
+          throw new CtlError("the person cancelled the pick (Esc, or a click outside the page)");
+        }
+        if (Date.now() >= this.deadline - 100) {
+          const off = inMode && this.app.pickWaiters === 1 && this.app.pickByAgent;
+          if (off) this.app.cancelPick(false);
+          throw new CtlError(`timed out waiting for a pick${off ? "; pick mode turned off" : ""}`, EXIT.timeout);
+        }
+        await Bun.sleep(50);
       }
-      if (Date.now() >= this.deadline - 100) {
-        if (started) this.app.cancelPick(false);
-        throw new CtlError(`timed out waiting for a pick${started ? "; pick mode turned off" : ""}`, EXIT.timeout);
-      }
-      await Bun.sleep(50);
+      return this.lastPick();
+    } finally {
+      if (inMode) this.app.pickWaiters--;
     }
-    return this.lastPick();
   }
 
   /** Turns pick mode on in the attached terminal and waits for the person's pick. */
@@ -458,11 +466,11 @@ class Agent {
     const already = this.app.picking();
     if (!already) await this.personFree(null, timeoutMs, "pick mode not turned on");
     const seq = this.app.pickSeq;
-    const cancels = this.app.pickCancels;
-    const started = !already && !this.app.picking();
-    if (!this.app.picking() && !this.app.startPick()) throw new CtlError("couldn't turn pick mode on (is a page open?)");
-    if (started) this.note("pick an element (Esc cancels)");
-    return this.waitPick(seq, cancels, started);
+    if (!this.app.picking()) {
+      if (!this.app.startPick(true)) throw new CtlError("couldn't turn pick mode on (is a page open?)");
+      this.note("pick an element (Esc cancels)");
+    }
+    return this.waitPick(seq, true);
   }
 
   // ------------------------------------------------------------ reading

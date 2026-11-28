@@ -149,7 +149,63 @@ try:
     check("ctl pick --timeout: exit 4, pick mode off", r.returncode == 4 and t.wait_for(lambda: "PICK" not in t.text(), 3),
           (r.returncode, r.stderr, t.text()[:200]))
 
-    # 7. A new document: picked says stale, and the id is refused.
+    # 7. What a pick returns is what a click there would hit, and acting on it works.
+    pick_on(t)
+    t.click(*at(260, 465)); time.sleep(0.8)
+    q = json.loads(ctl("picked", "--json").stdout or "{}")
+    check("pointer-events:none overlay: the element under it is picked", q.get("selector") == "#under", q)
+    r = ctl("click", q.get("ref", "x"))
+    check("...and ctl click on it works", r.returncode == 0 and js("window.underClicks || 0") == 1, (r.returncode, r.stderr))
+
+    # 8. Nothing typed into a field leaves the page, also from inside a picked container.
+    js("document.getElementById('ed').textContent = 'typed-token'; document.querySelector('textarea').value = 'area-typed'")
+    since = len(t.raw)
+    pick_on(t)
+    c = js("(() => { const r = document.createRange(); r.selectNodeContents(document.getElementById('form-card').firstChild); const b = r.getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; })()")
+    t.click(*at(int(c[0]), int(c[1]))); time.sleep(0.8)
+    r = ctl("picked", "--json")
+    q = json.loads(r.stdout or "{}")
+    secrets = ["nested-secret", "area-secret", "area-typed", "ed-secret", "typed-token", "typed-secret"]
+    clip = "\n".join(clipboards(t, since))
+    check("container picked", q.get("selector") == "#form-card" and "Card" in q.get("text", "") and "label" in q.get("text", ""), q)
+    check("no field content in a container's pick or clipboard", clip and not [x for x in secrets if x in r.stdout or x in clip], (r.stdout, clip))
+    pick_on(t)
+    c = js("(() => { const b = document.getElementById('ed').getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; })()")
+    t.click(*at(int(c[0]), int(c[1]))); time.sleep(0.8)
+    r = ctl("picked", "--json")
+    q = json.loads(r.stdout or "{}")
+    check("an editable picked: no content", q.get("selector") == "#ed" and q.get("text") == "" and "typed-token" not in r.stdout, r.stdout)
+
+    # 9. A cross-site frame can't be picked into: said so, pick mode stays on.
+    w = ctl_bg("pick", "--timeout", "15")
+    t.wait_text("PICK", 10)
+    t.click(*at(260, 705)); time.sleep(1.0)
+    check("cross-site frame: refused, pick mode stays on", "cross-site frame" in t.text() and "PICK" in t.text() and w.poll() is None, t.text()[:300])
+    t.key("escape")
+    out, err = w.communicate(timeout=30)
+    check("...then Esc ends ctl pick", w.returncode == 1, (w.returncode, err))
+
+    # 10. A button held on the page before pick mode: its release still reaches the page.
+    hx, hy = at(260, 800)
+    t.mouse(hx, hy, action="press"); time.sleep(0.3)
+    pick_on(t)
+    t.mouse(hx, hy, action="release"); time.sleep(0.3)
+    t.key("escape"); time.sleep(0.5)
+    check("held button released on the page", (js("window.downs || 0"), js("window.ups || 0")) == (1, 1), (js("window.downs"), js("window.ups")))
+
+    # 11. Two ctl pick at once: the first timing out leaves pick mode on for the other.
+    a = ctl_bg("pick", "--timeout", "3")
+    t.wait_text("PICK", 10)
+    b = ctl_bg("pick", "--timeout", "20")
+    a.communicate(timeout=30)
+    time.sleep(0.5)
+    check("first ctl pick times out (exit 4), pick mode stays on for the second", a.returncode == 4 and "PICK" in t.text() and b.poll() is None,
+          (a.returncode, b.poll(), t.text()[:200]))
+    t.click(*at(260, 85)); time.sleep(0.3)
+    out, err = b.communicate(timeout=30)
+    check("...and the second gets the pick", b.returncode == 0 and '"Big button"' in out, (b.returncode, out, err))
+
+    # 12. A new document: picked says stale, and the id is refused.
     ref = json.loads(ctl("picked", "--json").stdout)["ref"]
     ctl("open", URL)
     q = json.loads(ctl("picked", "--json").stdout or "{}")

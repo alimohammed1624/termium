@@ -71,16 +71,24 @@ const DESCRIBE = `function () {
     if (p.done || unique(parts.join(" > "))) break;
   }
   const doc = el.ownerDocument;
-  const password = el.localName === "input" && el.type === "password";
-  let html = el.outerHTML;
-  if (password || el.localName === "input" || el.localName === "textarea") {
-    // Only the tag: a field's value (even as typed into the HTML) stays out.
-    const c = el.cloneNode(false);
-    c.removeAttribute("value");
-    html = c.outerHTML;
+  // Nothing typed into a field (its value, an editable's content) ever leaves
+  // the page: not in the HTML (inputs lose their value, textareas and
+  // editables their content, also inside the element), nor in the text.
+  const FIELDS = "input, textarea, [contenteditable]:not([contenteditable=false])";
+  const clean = el.cloneNode(true);
+  for (const f of [clean, ...clean.querySelectorAll(FIELDS)]) {
+    if (!f.matches || !f.matches(FIELDS)) continue;
+    if (f.localName === "input") f.removeAttribute("value");
+    else f.replaceChildren();
   }
-  const editable = el.isContentEditable || ["input", "textarea", "select"].includes(el.localName);
-  const text = editable ? "" : String(el.innerText ?? el.textContent ?? "").replace(/\\s+/g, " ").trim();
+  const html = clean.outerHTML;
+  let text = "";
+  if (el.isContentEditable || ["input", "textarea", "select"].includes(el.localName)) text = "";
+  else if (el.querySelector(FIELDS)) {
+    for (const s of clean.querySelectorAll("script, style, template, noscript")) s.remove();
+    text = clean.textContent ?? "";
+  } else text = el.innerText ?? el.textContent ?? "";
+  text = String(text).replace(/\\s+/g, " ").trim();
   return {
     tag: el.localName,
     selector: parts.join(" > "),
@@ -98,7 +106,8 @@ const DESCRIBE = `function () {
 export class Picker {
   private enabled = new Map<string, Promise<boolean>>();
   private busy = false;
-  private next: { sid: string; x: number; y: number } | null = null;
+  /** The latest pointer position to outline at (sid null: outline nothing). */
+  private next: { sid: string | null; x: number; y: number } | null = null;
 
   constructor(private cdp: CDP) {}
 
@@ -117,13 +126,13 @@ export class Picker {
   /** The node at (x, y), CSS px of the page's viewport (looking into same-process frames). */
   private async nodeAt(sid: string, x: number, y: number): Promise<number | null> {
     const r = await this.cdp
-      .send("DOM.getNodeForLocation", { x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: true }, sid)
+      .send("DOM.getNodeForLocation", { x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: false }, sid)
       .catch(() => null);
     return r?.backendNodeId ?? null;
   }
 
-  /** Outlines the element at (x, y); pointer motion is coalesced (latest wins). */
-  hover(sid: string, x: number, y: number): void {
+  /** Outlines the element at (x, y) (sid null: nothing, the pointer left the pages); motion is coalesced (latest wins). */
+  hover(sid: string | null, x = 0, y = 0): void {
     this.next = { sid, x, y };
     if (this.busy) return;
     this.busy = true;
@@ -132,10 +141,10 @@ export class Picker {
         while (this.next) {
           const { sid, x, y } = this.next;
           this.next = null;
-          if (!(await this.enable(sid))) continue;
           for (const other of this.enabled.keys()) {
             if (other !== sid) this.cdp.send("Overlay.hideHighlight", {}, other).catch(() => {});
           }
+          if (!sid || !(await this.enable(sid))) continue;
           const node = await this.nodeAt(sid, x, y);
           if (node) await this.cdp.send("Overlay.highlightNode", { highlightConfig: HIGHLIGHT, backendNodeId: node }, sid).catch(() => {});
           else await this.cdp.send("Overlay.hideHighlight", {}, sid).catch(() => {});
@@ -146,11 +155,17 @@ export class Picker {
     })();
   }
 
-  /** Reads the element at (x, y): its backend node id and what describes it. */
-  async pick(sid: string, x: number, y: number): Promise<{ node: number; role: string; name: string; info: any } | null> {
+  /**
+   * Reads the element at (x, y): its backend node id and what describes it.
+   * "cross-site" for a point in a cross-site frame (another process): what's
+   * in it can't be named from here, and the frame itself isn't what was meant.
+   */
+  async pick(sid: string, x: number, y: number): Promise<{ node: number; role: string; name: string; info: any } | "cross-site" | null> {
     await this.enable(sid);
     const hit = await this.nodeAt(sid, x, y);
     if (!hit) return null;
+    const { node: hitNode } = await this.cdp.send("DOM.describeNode", { backendNodeId: hit, depth: 1 }, sid);
+    if ((hitNode?.nodeName === "IFRAME" || hitNode?.nodeName === "FRAME") && !hitNode.contentDocument) return "cross-site";
     const group = "termium-pick";
     try {
       const { object } = await this.cdp.send("DOM.resolveNode", { backendNodeId: hit, objectGroup: group }, sid);

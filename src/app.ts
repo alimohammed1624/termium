@@ -3639,7 +3639,8 @@ export class App {
       this.pickRelease = false;
       return;
     }
-    if (this.mode === "pick") return this.pickMouse(ev, col, row, px, py);
+    // (A button held down on a page since before pick mode: its release still goes to that page.)
+    if (this.mode === "pick" && !(this.mouseCapture && ev.action === "release")) return this.pickMouse(ev, col, row, px, py);
 
     if (this.drag) {
       if (ev.action === "move") return this.dragTo(col, row);
@@ -3877,6 +3878,12 @@ export class App {
   private pickRelease = false;
   /** A pick being read from the page (further clicks wait for it). */
   private pickBusy = false;
+  /** Bumped whenever pick mode starts or ends: a pick still being read from an earlier one is dropped. */
+  private pickRun = 0;
+  /** Pick mode was turned on by an agent (`termium ctl pick`): its timeout may turn it off. */
+  pickByAgent = false;
+  /** `termium ctl pick` commands waiting on pick mode now. */
+  pickWaiters = 0;
   /** The element last picked, and how many picks there have been (an agent waits for this to change). */
   picked: Picked | null = null;
   pickSeq = 0;
@@ -3889,7 +3896,7 @@ export class App {
   }
 
   /** Turns pick mode on (a terminal must be attached): false if it can't be now. */
-  startPick(): boolean {
+  startPick(byAgent = false): boolean {
     if (!this.attached || this.pages.size === 0) return false;
     if (this.mode === "pick") return true;
     const p = this.prompt;
@@ -3899,6 +3906,9 @@ export class App {
       return false;
     }
     if (this.mode !== "normal") this.setMode("normal");
+    this.pickRun++;
+    this.pickBusy = false;
+    this.pickByAgent = byAgent;
     this.setMode("pick");
     this.showToast("Click an element to hand it to your agent", 4000);
     return true;
@@ -3908,6 +3918,8 @@ export class App {
   cancelPick(say: boolean): void {
     if (this.mode !== "pick") return;
     this.pickCancels++;
+    this.pickRun++;
+    this.pickBusy = false;
     this.picker.stop();
     this.setMode("normal");
     if (say) this.showToast("Pick cancelled", 1500);
@@ -3923,6 +3935,7 @@ export class App {
     const pos = g && this.pageXY(g.item, px, py);
     if (ev.action === "move") {
       if (g && pos) this.picker.hover(g.item.sessionId, pos.x, pos.y);
+      else this.picker.hover(null);
       return;
     }
     if (ev.action !== "press" || this.pickBusy) return;
@@ -3933,10 +3946,17 @@ export class App {
 
   private async pickAt(page: Page, x: number, y: number): Promise<void> {
     this.pickBusy = true;
+    const run = this.pickRun;
     const gen = page.docGen ?? 0;
     const found = await this.picker.pick(page.sessionId, x, y).catch(() => null);
+    // Pick mode ended meanwhile (Esc, the terminal went), even if it's on again since.
+    if (run !== this.pickRun || this.mode !== "pick") return;
     this.pickBusy = false;
-    if (this.mode !== "pick") return; // cancelled meanwhile (Esc, the terminal went)
+    if (found === "cross-site") {
+      this.showToast("That's in a cross-site frame: termium can't pick inside it. Pick something else, or Esc", 4000);
+      return;
+    }
+    this.pickRun++;
     this.picker.stop();
     this.setMode("normal");
     if (!found || !this.pages.has(page.sessionId) || (page.docGen ?? 0) !== gen) {

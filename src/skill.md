@@ -104,6 +104,8 @@ included) and `at`, plus `frame` (the frame's address) for an element in
 an iframe and `shadow` when the selector is inside a shadow root. `pick`
 needs an attached terminal; the person pressing Esc is exit 1, and its
 `--timeout` turns pick mode off again (exit 4). Nothing picked yet is exit 1.
+Elements in a cross-site frame can't be picked (as in a snapshot). While
+the person is picking they count as busy (see Limits).
 
 ## The DevTools endpoint (Puppeteer, Playwright, chrome-devtools-mcp)
 
@@ -160,7 +162,8 @@ The port changes each time the session starts: ask `termium devtools`.
   devicePixelRatio]"` rather than assuming. When a person attaches, pages
   take their pane sizes.
 - The person at the terminal comes first. While they're busy (editing
-  the address, answering a prompt or dialog, reading help, or typing: for
+  the address, answering a prompt or dialog, reading help, picking an
+  element, or typing: for
   a moment after each key), `select` waits, and `open` (navigating),
   `click`, `type`, `key`, `scroll`, `close` and `dialog` wait if they'd
   act on the tab they're on; past `--timeout` that's exit 4 and nothing
