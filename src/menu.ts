@@ -231,7 +231,7 @@ export const CONTEXT_PROBE = String.raw`(() => {
     // Once every listener has run: whether the page took the right-click for itself.
     setTimeout(() => {
       const a = el && el.closest ? el.closest("a[href], area[href]") : null;
-      last = { prevented: e.defaultPrevented, link: a ? a.href : "", selection: String(getSelection()).length > 0 };
+      last = { at: Date.now(), prevented: e.defaultPrevented, link: a ? a.href : "", selection: String(getSelection()).length > 0 };
     });
   }, true);
   // Each right-click is answered once: reading it forgets it.

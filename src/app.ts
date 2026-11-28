@@ -275,6 +275,11 @@ const CTRL_B: KeyEvent = {
   event: "press", location: 0, legacy: false,
 };
 
+/** A plain letter key, for a click that does what that key does. */
+const letterKey = (k: string): KeyEvent => ({
+  ...CTRL_B, key: k, code: `Key${k.toUpperCase()}`, vk: k.toUpperCase().charCodeAt(0), text: k, mods: { ...CTRL_B.mods, ctrl: false },
+});
+
 /** While a page is blocked on a JavaScript dialog, only these make sense. */
 const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 
@@ -386,6 +391,8 @@ export class App {
   private clicks = new ClickAreas();
   /** An open context menu or dropdown: it has the mouse and keyboard until it closes. */
   private menu: Menu | null = null;
+  /** The tab shown when the menu opened. */
+  private menuTab: Tab | undefined;
   /** The tab under the pointer (it shows its ×), or -1. */
   private tabHover = -1;
   /** First tab shown when the tab bar was scrolled by hand (wheel, ‹ ›); null: keep the active tab in view. */
@@ -1626,6 +1633,8 @@ export class App {
 
   /** Recomputes pane geometry and fixes every page's viewport and screencast. */
   relayout(): void {
+    // A menu is about what was shown when it opened (a tab, its panes): another tab now, it goes.
+    if (this.menu && this.menuTab !== this.tab) this.menu = null;
     this.syncPrompt();
     this.noteShown();
     this.geom.clear();
@@ -2959,7 +2968,12 @@ export class App {
     const wrapped = (style: string, text: string) => {
       for (const l of wrapWords(text, inner - 1)) add([style, ` ${l}`]);
     };
-    const choice = (k: string, what: string) => add([key, ` ${k.padEnd(5)}`], [txt, what]);
+    // Each choice's line is clickable: a click does what its key does.
+    const choiceAt = new Map<number, string>();
+    const choice = (k: string, what: string) => {
+      choiceAt.set(lines.length, k);
+      add([key, ` ${k.padEnd(5)}`], [txt, what]);
+    };
     const headline = () => add([ok, ` termium ${nv}`], [txt, ` is available (you have ${cur})`]);
     const byHand = () => {
       add([dim, " update by hand:"]);
@@ -3029,6 +3043,8 @@ export class App {
     s += at(top + 1, left) + panel + fit("", boxW);
     const shown = Math.max(0, boxH - 4);
     for (let i = 0; i < shown; i++) {
+      const k = choiceAt.get(i);
+      if (k) this.clicks.add(top + 2 + i, left, boxW, (b) => b === 0 && this.updateKey(letterKey(k), k));
       let line = "";
       let used = 0;
       for (const [style, text] of lines[i] ?? []) {
@@ -3725,8 +3741,8 @@ export class App {
       return;
     }
     if (this.mode === "update") {
-      // A click anywhere puts the box away (unanswered; the notice stays).
-      if (ev.action === "press") this.closeUpdate(this.updateBox?.state === "failed");
+      // A click on a choice answers it; anywhere else puts the box away (unanswered; the notice stays).
+      if (ev.action === "press" && !this.clicks.click(col, row, ev.button)) this.closeUpdate(this.updateBox?.state === "failed");
       return;
     }
 
@@ -3885,16 +3901,19 @@ export class App {
       // the swap: a wider neighbour isn't swapped straight back.
       const w = own.end - own.start;
       if (hit.index > from ? col < hit.end - w : col >= hit.start + w) return;
+      const active = space.tabs[space.active];
       space.tabs.splice(from, 1);
       space.tabs.splice(hit.index, 0, r.tab);
-      space.active = hit.index; // the dragged tab (selected when pressed)
+      // The active tab stays active wherever it is now (another may have been selected mid-drag).
+      space.active = Math.max(0, space.tabs.indexOf(active!));
     } else {
       const from = this.spaces.indexOf(r.space);
       const hit = col < this.mainCol() ? this.spaceHits.find((h) => h.row === row) : undefined;
       if (from < 0 || !hit || hit.index === from) return;
+      const active = this.spaces[this.activeSpace];
       this.spaces.splice(from, 1);
       this.spaces.splice(hit.index, 0, r.space);
-      this.activeSpace = hit.index;
+      this.activeSpace = Math.max(0, this.spaces.indexOf(active!));
     }
     this.queueChrome();
   }
@@ -3908,6 +3927,7 @@ export class App {
     if (!this.attached || this.covered()) return;
     if (this.mode !== "normal") this.setMode("normal");
     this.menu = new Menu(entries, point, { col: 1, row: 1, cols: this.cols, rows: this.rows }, opts);
+    this.menuTab = this.tab;
     // Pages under it are drawn around it from now on.
     this.fullRedraw();
   }
@@ -4083,16 +4103,17 @@ export class App {
    */
   private async pageMenu(page: Page, released: Promise<unknown>, col: number, row: number): Promise<void> {
     const seq = ++this.menuSeq;
+    // (Linux fires contextmenu as the button goes down: from the press on.)
+    const pressed = this.lastClick.time - 250;
     const t = this.ticket();
     await released;
     // The probe notes the click once every listener has run (a timer after it).
     await Bun.sleep(40);
-    type Info = { prevented: boolean; link: string; selection: boolean };
+    type Info = { at: number; prevented: boolean; link: string; selection: boolean };
     const sessions = [page.sessionId, ...[...this.frameOwner].filter(([, p]) => p === page).map(([sid]) => sid)];
     const ask = async (sid: string): Promise<Info[]> => {
       const frames: string[] = [];
       const walk = (n: any) => {
-        if (frames.length >= 32) return;
         frames.push(n.frame.id);
         for (const c of n.childFrames ?? []) walk(c);
       };
@@ -4109,7 +4130,8 @@ export class App {
       }).map((p) => p.catch(() => null))).then((all) => all.filter((i): i is Info => !!i));
     };
     const found = (await Promise.all(sessions.map((sid) => ask(sid).catch(() => [])))).flat();
-    const info = found[0];
+    // Older answers (a right-click termium didn't send, an agent's) aren't about this one.
+    const info = found.filter((i) => i.at >= pressed).sort((a, b) => b.at - a.at)[0];
     if (!info || info.prevented || seq !== this.menuSeq || !t.valid() || this.menu || this.focused !== page || this.mouseButtons) return;
     const live = (run: () => void) => () => {
       if (this.pages.has(page.sessionId)) run();

@@ -182,6 +182,30 @@ try:
     check("placeholders: the ≡ menu shows over the page", t.wait_text("Split right", 5) and find("Hard reload") is not None)
 finally:
     t.close()
+
+# The update box answers clicks: a newer release (a fake one), its offer opened from ≡, "skip" clicked.
+rel = tempfile.mkdtemp(prefix="termium-mouse-rel-")
+with open(os.path.join(rel, "latest"), "w") as f:
+    f.write('{"tag_name": "v99.0.0"}')
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0)); RPORT = sock.getsockname()[1]
+rsrv = subprocess.Popen([PY, "-m", "http.server", str(RPORT), "--bind", "127.0.0.1", "--directory", rel],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(0.5)
+shutil.rmtree(profile, ignore_errors=True); os.makedirs(profile)
+t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "-s", "pr14-mouse-up", "--profile", profile, f"{BASE}/menu.html"],
+         cols=160, rows=45, cwd=ROOT, env={"TERMIUM_NO_UPDATE_CHECK": "", "CI": "", "TERMIUM_UPDATE_URL": f"http://127.0.0.1:{RPORT}/latest"})
+try:
+    t.wait_text("menu test", 25); t.wait_idle(0.8, 10)
+    check("a newer release is announced", t.wait_text("99.0.0", 20))
+    t.click_cell(159, 2); time.sleep(0.6); click_text("Update termium"); time.sleep(1)
+    check("≡ → Update termium opens the update box", t.wait_text("skip this version", 5))
+    click_text("skip this version"); time.sleep(1.5)
+    check("clicking a choice in the update box answers it", find("skip this version") is None and t.wait_text("skipped", 5))
+finally:
+    t.close()
+    rsrv.terminate()
+    shutil.rmtree(rel, ignore_errors=True)
     srv.terminate()
     shutil.rmtree(profile, ignore_errors=True)
 
