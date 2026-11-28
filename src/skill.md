@@ -32,11 +32,13 @@ termium kill agent                  # end a session you started
   pane of their own. Or show it to them yourself: inside tmux, herdr or
   kitty, `termium ctl -s agent split right [URL]` (or `down`) opens a
   split next to your pane that attaches to the session, and leaves the
-  focus where it was (URL opens in a new tab first). Prints the host and
-  the new pane (`--json`: `{host, pane, tab}`). Exit 1 where the terminal
-  can't split (Ghostty, WezTerm, kitty without remote control, no
-  multiplexer); then ask the person to attach. A terminal already attached
-  to that session is detached by it (one terminal at a time).
+  focus where it was; a URL opens in a new tab shown there (`ctl tabs`
+  then lists it with `*`). Prints the host and the new pane (`--json`:
+  `{host, pane}`). Exit 1 where the terminal can't split (Ghostty,
+  WezTerm, kitty without remote control or outside its splits layout, tmux
+  with allow-passthrough off, no multiplexer); nothing is opened then: ask
+  the person to attach. A terminal already attached to that session is
+  detached by it (one terminal at a time).
 
 ## Driving a page: snapshot, act by id, wait, verify
 

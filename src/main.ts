@@ -7,10 +7,10 @@
 
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { killSession, listSessions, runClient, runningSessions } from "./client";
+import { killSession, listSessions, runClient, runningSessions, sessionInfo } from "./client";
 import { runCtl, runDevtools, startSession } from "./ctl";
 import { SKILL } from "./skill";
-import { detectHost, splitHost, type SplitDir } from "./split";
+import { prepareSplit, splitArgv, type PreparedSplit, type SplitDir } from "./split";
 import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
@@ -296,18 +296,27 @@ async function openSplit(args: Args): Promise<never> {
     console.error(`termium: ${why}. Use termium's own splits instead (Ctrl+B v or -), or run termium attach${args.session === DEFAULT_SESSION ? "" : ` ${args.session}`} in a split of your own.`);
     process.exit(1);
   };
+  // A new session starts on the URL; a running one gets it from the new
+  // pane, as from a plain `termium URL` (a new tab, shown there).
+  const running = args.url ? await sessionInfo(args.session).catch(() => null) : null;
+  const pane = splitArgv(selfArgv(), args.session, running ? args.url : null);
+  if (args.noUpdateCheck) pane.push("--no-update-check");
   // Before a session is started for nothing.
-  const host = detectHost(process.env);
-  if ("error" in host) cannot(host.error);
-  const start = serverArgv(args);
+  let split: PreparedSplit;
+  try {
+    split = prepareSplit(args.split!, pane, true);
+  } catch (e: any) {
+    cannot(e?.message ?? String(e));
+  }
+  const start = serverArgv({ ...args, url: running ? null : args.url });
   start[start.indexOf("__server")] = "start";
+  // Given, if only to be refused by a running session (serverArgv leaves the default out).
+  if (args.launchFlags.includes("--search") && !start.includes("--search")) start.push("--search", args.search);
   const r = Bun.spawnSync(start, { stdin: "ignore", stdout: "pipe", stderr: "inherit" });
   if (r.exitCode !== 0) process.exit(r.exitCode ?? 1);
-  const attach = [...selfArgv(), "attach", args.session];
-  if (args.noUpdateCheck) attach.push("--no-update-check");
   try {
-    const s = splitHost(args.split!, attach, true);
-    console.log(`session "${args.session}" is in a new ${s.host} split (pane ${s.pane})`);
+    const id = split!.make();
+    console.log(`session "${args.session}" is in a new ${split!.host} split (pane ${id})`);
   } catch (e: any) {
     cannot(e?.message ?? String(e));
   }

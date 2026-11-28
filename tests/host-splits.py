@@ -41,6 +41,8 @@ HERDR = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
 HERDR_SESSION = f"pr4-splits-{os.getpid()}"
 BG = (0x33, 0x33, 0xcc)
 PAGE = "data:text/html,<body style=\"background:%233333cc;color:white;font:40px sans-serif\"><h1>termium in a host split</h1>"
+GREEN = (0x22, 0x99, 0x44)
+PAGE2 = "data:text/html,<body style=\"background:%23229944\"><h1>second</h1>"
 
 def cli(*args, env=None):
     return subprocess.run(["bun", os.path.join(ROOT, "src", "main.ts"), *args], cwd=ROOT, env=env or CLI_ENV,
@@ -49,7 +51,7 @@ def cli(*args, env=None):
 def tmux(*args):
     return subprocess.run(["tmux", "-L", TMUX_SOCK, *args], capture_output=True, text=True)
 
-def shows_page(t, path, right_of=0):
+def shows_page(t, path, right_of=0, colour=BG):
     """Some picture (through placeholders, or placed: herdr) is a rect right of
     column right_of whose middle is the page's colour."""
     t.shot(path)
@@ -61,7 +63,7 @@ def shows_page(t, path, right_of=0):
         if col <= right_of:
             continue
         px = im.getpixel(((col - 1 + cols // 2) * t.cell_w, (row - 1 + rows // 2) * t.cell_h))
-        if all(abs(a - b) < 12 for a, b in zip(px, BG)):
+        if all(abs(a - b) < 12 for a, b in zip(px, colour)):
             return True, (row, col, cols, rows)
     return False, (list(t.placeholder_images().values()), placed)
 
@@ -107,6 +109,31 @@ try:
     below = lambda: [r for r in t.placeholder_images().values() if r[0] > 3]
     check("tmux: ...which shows the page (taking it over from the right one)", t.wait_for(lambda: bool(below()), 30), t.placeholder_images())
     t.shot(f"{OUT}/tmux-ctl-split.png")
+
+    # A URL for the running session is shown in the new pane, even while the
+    # person at the terminal attached now is busy (editing the address).
+    tmux("select-pane", "-t", "main.1")
+    tmux("send-keys", "-t", "main.1", "C-l"); time.sleep(0.5)
+    tmux("send-keys", "-t", "main.1", "-l", "a draft"); time.sleep(0.5)
+    tmux("select-pane", "-t", "main.0")
+    tmux("send-keys", "-t", "main.0", f"clear; bun src/main.ts ctl -s pr4-tmux split right '{PAGE2}'; echo URL_EXIT=$?", "Enter")
+    ok = t.wait_for(lambda: re.search(r"URL_EXIT=\d", tmux("capture-pane", "-p", "-t", "main.0").stdout), 60)
+    out0 = tmux("capture-pane", "-p", "-t", "main.0").stdout
+    check("tmux: ctl split right URL, with the person busy, exits 0", ok and "URL_EXIT=0" in out0 and "opening" in out0, out0[-500:])
+    check("tmux: ...and the new pane shows that URL's page", t.wait_for(lambda: shows_page(t, f"{OUT}/tmux-ctl-split-url.png", 40, GREEN)[0], 30),
+          shows_page(t, f"{OUT}/tmux-ctl-split-url.png", 40, GREEN)[1])
+    tabs = cli("ctl", "-s", "pr4-tmux", "tabs").stdout
+    check("tmux: ...in a new tab, the focused one", any(l.startswith("*") and "229944" in l for l in tabs.splitlines()), tabs)
+
+    # allow-passthrough off: termium couldn't show anything in the pane; said here, nothing started.
+    tmux("set", "-g", "allow-passthrough", "off")
+    tmux("send-keys", "-t", "main.0", f"clear; bun src/main.ts open -s pr4-tmux-off '{PAGE}' --split right; echo OFF_EXIT=$?", "Enter")
+    ok = t.wait_for(lambda: re.search(r"OFF_EXIT=\d", tmux("capture-pane", "-p", "-t", "main.0").stdout), 60)
+    out0 = tmux("capture-pane", "-p", "-t", "main.0").stdout
+    check("tmux: passthrough off: --split fails clearly (exit 1)", ok and "OFF_EXIT=1" in out0 and "allow-passthrough" in out0, out0[-500:])
+    check("tmux: ...and starts no session", "pr4-tmux-off" not in cli("ls").stdout)
+    tmux("set", "-g", "allow-passthrough", "on")
+
     r = cli("ctl", "-s", "pr4-nosuch", "split", "right", env=dict(CLI_ENV, TMUX="x", TMUX_PANE="%0"))
     check("ctl split without the session: exit 3", r.returncode == 3, r.stderr)
     t.close()
@@ -133,7 +160,10 @@ try:
             h.write("\r" if "continue" in h.text() else "\x1b"); time.sleep(1)
         first = panes()[0]["pane_id"]
         time.sleep(2)
-        hc("pane", "run", first, EXPORTS)
+        odd = os.path.join(tmp, "it's a dir"); os.makedirs(odd)
+        shutil.copytree(os.path.join(ROOT, "src"), os.path.join(odd, "src"))  # (a link would be resolved)
+        shutil.copy(os.path.join(ROOT, "package.json"), odd)
+        hc("pane", "run", first, EXPORTS + ' && cd "$XDG_RUNTIME_DIR/../it\'s a dir"')
         time.sleep(0.5)
         hc("pane", "run", first, f"bun src/main.ts open -s pr4-herdr '{PAGE}' --split right; echo EXIT=$?")
         sessions.append("pr4-herdr")
@@ -142,6 +172,8 @@ try:
         check("herdr: open --split right exits 0 and names the new pane", ok and "EXIT=0" in read() and "herdr split (pane" in read(), read()[-500:])
         ps = panes()
         check("herdr: a second pane", len(ps) == 2, ps)
+        check("herdr: ...running termium from a path with a quote and a space", any("it's a dir/src/main.ts" in l for l in subprocess.run(
+            ["ps", "-eo", "args"], capture_output=True, text=True).stdout.splitlines()))
         check("herdr: it shows the page, in the new pane", h.wait_for(lambda: shows_page(h, f"{OUT}/herdr-open-split.png", 93)[0], 30),
               shows_page(h, f"{OUT}/herdr-open-split.png", 93)[1])
         lay = hc("pane", "layout", "--pane", first).stdout

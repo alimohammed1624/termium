@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { detectHost, shellQuote, splitPlan, type Host } from "../src/split";
+import { detectHost, holdOnFailure, kittyLayout, shellQuote, splitPlan, type Host } from "../src/split";
 
 describe("detectHost", () => {
   test("tmux, herdr, kitty", () => {
@@ -24,34 +24,51 @@ describe("splitPlan", () => {
   const cmd = ["/usr/bin/termium", "attach", "agent"];
   const env = { XDG_RUNTIME_DIR: "/run/user/1", TERMIUM_BROWSER: "/opt/h b", HOME: "/home/x" };
   const o = { cwd: "/w", focus: true, env };
+  const sh = ["/bin/sh", "-c", holdOnFailure(cmd)];
   test("tmux: split-window next to this pane, with the session's environment", () => {
     const p = splitPlan({ kind: "tmux", pane: "%3" }, "right", cmd, o);
     expect(p).toEqual({
       argv: ["tmux", "split-window", "-h", "-t", "%3", "-c", "/w", "-P", "-F", "#{pane_id}",
-        "-e", "TERMIUM_BROWSER=/opt/h b", "-e", "XDG_RUNTIME_DIR=/run/user/1", "--", ...cmd],
+        "-e", "TERMIUM_BROWSER=/opt/h b", "-e", "XDG_RUNTIME_DIR=/run/user/1", "--", ...sh],
     });
-    expect((splitPlan({ kind: "tmux", pane: "%3" }, "down", cmd, { ...o, focus: false }) as any).argv.slice(0, 4)).toEqual(["tmux", "split-window", "-v", "-d"]);
+    expect(splitPlan({ kind: "tmux", pane: "%3" }, "down", cmd, { ...o, focus: false }).argv.slice(0, 4)).toEqual(["tmux", "split-window", "-v", "-d"]);
   });
-  test("herdr: pane split, then the command typed into its shell", () => {
-    const p = splitPlan({ kind: "herdr", pane: "w1:p1" }, "down", ["/a b/bun", "/src/main.ts", "attach", "x"], { ...o, focus: false, bin: "/bin/herdr" });
+  test("herdr: pane split, then one line for any shell runs the command from the environment", () => {
+    const odd = ["/it's a/bun", "/src\\x/main.ts", "attach", "x"];
+    const p = splitPlan({ kind: "herdr", pane: "w1:p1" }, "down", odd, { ...o, focus: false, bin: "/bin/herdr" });
     expect(p).toEqual({
       argv: ["/bin/herdr", "pane", "split", "--pane", "w1:p1", "--direction", "down", "--cwd", "/w", "--no-focus",
-        "--env", "TERMIUM_BROWSER=/opt/h b", "--env", "XDG_RUNTIME_DIR=/run/user/1"],
-      run: "exec '/a b/bun' /src/main.ts attach x",
+        "--env", "TERMIUM_BROWSER=/opt/h b", "--env", "XDG_RUNTIME_DIR=/run/user/1", "--env", `TERMIUM_SPLIT_RUN=${holdOnFailure(odd)}`],
+      run: 'exec /bin/sh -c "$TERMIUM_SPLIT_RUN"',
     });
-    expect(splitPlan({ kind: "herdr", pane: "w1:p1" }, "down", ["/it's/bun"], o)).toHaveProperty("error");
   });
   test("kitty: launch a window in a split next to this one", () => {
-    const p = splitPlan({ kind: "kitty", pane: "7" } as Host, "right", cmd, { ...o, focus: false }) as any;
+    const p = splitPlan({ kind: "kitty", pane: "7" } as Host, "right", cmd, { ...o, focus: false });
     expect(p.argv.slice(0, 7)).toEqual(["kitten", "@", "launch", "--type=window", "--location=vsplit", "--next-to=id:7", "--cwd=/w"]);
     expect(p.argv).toContain("--keep-focus");
-    expect(p.argv.slice(-4)).toEqual(["--", ...cmd]);
+    expect(p.argv.slice(-4)).toEqual(["--", ...sh]);
   });
+});
+
+test("the command survives /bin/sh whatever its arguments hold, and a failure stays on screen", () => {
+  const args = ["it's", "a\\b", "$HOME", "two words", "`x`", ""];
+  const r = Bun.spawnSync(["/bin/sh", "-c", holdOnFailure(["printf", "%s|", ...args])], { stdin: "ignore" });
+  expect(r.stdout.toString()).toBe(args.map((a) => `${a}|`).join(""));
+  const f = Bun.spawnSync(["/bin/sh", "-c", holdOnFailure(["sh", "-c", "exit 3"])], { stdin: "ignore" });
+  expect(f.exitCode).toBe(3);
+  expect(f.stdout.toString()).toContain("exited with status 3: press Enter");
+});
+
+test("kittyLayout finds the tab holding the window", () => {
+  const ls = JSON.stringify([{ tabs: [{ layout: "tall", windows: [{ id: 1 }] }, { layout: "splits", windows: [{ id: 7 }, { id: 8 }] }] }]);
+  expect(kittyLayout(ls, "7")).toBe("splits");
+  expect(kittyLayout(ls, "1")).toBe("tall");
+  expect(kittyLayout(ls, "9")).toHaveProperty("error");
+  expect(kittyLayout("nope", "1")).toHaveProperty("error");
 });
 
 test("shellQuote", () => {
   expect(shellQuote("/usr/bin/bun")).toBe("/usr/bin/bun");
   expect(shellQuote("a b$c")).toBe("'a b$c'");
-  expect(shellQuote("it's")).toBeNull();
-  expect(shellQuote("a\\b")).toBeNull();
+  expect(shellQuote("it's")).toBe("'it'\\''s'");
 });

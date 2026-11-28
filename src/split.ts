@@ -5,6 +5,8 @@
 // kitty (through its remote control). Hosts with no command to ask for a
 // split (Ghostty, WezTerm for now) fail with a message saying what to do.
 
+import { tmuxPassthroughSetting } from "./client";
+
 export type SplitDir = "right" | "down";
 export type HostKind = "tmux" | "herdr" | "kitty";
 
@@ -39,18 +41,36 @@ export function detectHost(env: Record<string, string | undefined>): Host | { er
   return { error: "no terminal to ask for a split: --split works inside tmux, herdr or kitty" };
 }
 
-/** Quotes an argument for the pane's shell (POSIX shells and fish alike), or null if it can't be. */
-export function shellQuote(s: string): string | null {
-  if (/^[A-Za-z0-9_\-./:=@%+,]+$/.test(s)) return s;
-  // fish reads \ and ' inside single quotes differently from POSIX shells.
-  if (/['\\\n\r]/.test(s)) return null;
-  return `'${s}'`;
+/**
+ * What the new pane runs: `termium attach NAME`; or, with a URL for the
+ * running session, `termium -s NAME URL`, which attaches and opens it in a
+ * new tab shown there (as a person running it would).
+ */
+export function splitArgv(self: string[], session: string, url: string | null): string[] {
+  return url ? [...self, "--session", session, url] : [...self, "attach", session];
+}
+
+/** One argument for a POSIX shell. */
+export function shellQuote(s: string): string {
+  return /^[A-Za-z0-9_\-./:=@%+,]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * What the new pane runs, for /bin/sh -c: `cmd`, and if it fails (the
+ * terminal can't show pictures, say) its message stays on screen until
+ * Enter, rather than the pane closing at once. Detaching closes it.
+ */
+export function holdOnFailure(cmd: string[]): string {
+  return (
+    `${cmd.map(shellQuote).join(" ")} || { s=$?; printf '\\n[termium exited with status %s: press Enter to close this pane]' "$s"; ` +
+    `read -r _; exit "$s"; }`
+  );
 }
 
 export interface SplitPlan {
   /** The command that makes the split; it prints the new pane's id. */
   argv: string[];
-  /** herdr: the shell command to run in the new pane (`herdr pane run`). */
+  /** herdr: the line typed into the new pane's shell (`herdr pane run`). */
   run?: string;
 }
 
@@ -60,10 +80,11 @@ export function splitPlan(
   dir: SplitDir,
   cmd: string[],
   o: { cwd: string; focus: boolean; env: Record<string, string | undefined>; bin?: string },
-): SplitPlan | { error: string } {
+): SplitPlan {
   const passed = Object.entries(o.env)
     .filter(([k, v]) => v !== undefined && PASSED_ENV.test(k))
     .sort(([a], [b]) => a.localeCompare(b)) as [string, string][];
+  const sh = ["/bin/sh", "-c", holdOnFailure(cmd)];
   switch (host.kind) {
     case "tmux":
       return {
@@ -81,15 +102,14 @@ export function splitPlan(
           "#{pane_id}",
           ...passed.flatMap(([k, v]) => ["-e", `${k}=${v}`]),
           "--",
-          ...cmd,
+          ...sh,
         ],
       };
-    case "herdr": {
-      // A herdr pane starts a shell; the command is typed into it. exec: the
-      // pane closes when termium does, as in tmux and kitty.
-      const quoted = cmd.map(shellQuote);
-      const bad = quoted.findIndex((q) => q === null);
-      if (bad >= 0) return { error: `can't pass ${JSON.stringify(cmd[bad])} to a herdr pane's shell (it has a quote or backslash)` };
+    case "herdr":
+      // A herdr pane starts the user's shell (bash, zsh, fish...) and the
+      // command is typed into it. It goes in an environment variable, so
+      // the line typed is the same in every shell whatever the paths hold;
+      // exec: the pane closes when termium does, as in tmux and kitty.
       return {
         argv: [
           o.bin ?? "herdr",
@@ -103,12 +123,12 @@ export function splitPlan(
           o.cwd,
           o.focus ? "--focus" : "--no-focus",
           ...passed.flatMap(([k, v]) => ["--env", `${k}=${v}`]),
+          "--env",
+          `TERMIUM_SPLIT_RUN=${sh[2]}`,
         ],
-        run: `exec ${quoted.join(" ")}`,
+        run: `exec /bin/sh -c "$TERMIUM_SPLIT_RUN"`,
       };
-    }
     case "kitty":
-      // A split in kitty's splits layout; other layouts place the window as they do.
       return {
         argv: [
           ...(o.bin ? [o.bin] : ["kitten"]),
@@ -121,7 +141,7 @@ export function splitPlan(
           ...(o.focus ? [] : ["--keep-focus"]),
           ...passed.flatMap(([k, v]) => ["--env", `${k}=${v}`]),
           "--",
-          ...cmd,
+          ...sh,
         ],
       };
   }
@@ -136,37 +156,65 @@ function run(argv: string[]): { ok: boolean; out: string; err: string } {
   }
 }
 
-const HINT: Record<HostKind, string> = {
-  tmux: "",
-  herdr: "",
-  kitty: " (kitty needs remote control: allow_remote_control yes, or socket-only with listen_on, in kitty.conf)",
-};
+const KITTY_RC = "kitty needs remote control for this: allow_remote_control yes (or socket-only, with listen_on) in kitty.conf";
+
+/** The layout of the kitty tab holding window `id` (from `kitten @ ls`), or why it can't be had. */
+export function kittyLayout(ls: string, id: string): string | { error: string } {
+  try {
+    for (const os of JSON.parse(ls)) for (const tab of os.tabs ?? []) if ((tab.windows ?? []).some((w: any) => String(w.id) === id)) return String(tab.layout);
+  } catch {}
+  return { error: `kitty didn't list window ${id}` };
+}
+
+export interface PreparedSplit {
+  host: HostKind;
+  /** Makes the split; returns the new pane's id. Throws with a one-line reason. */
+  make(): string;
+}
 
 /**
- * Splits the pane termium runs in and runs `cmd` in the new one. Returns
- * the host and the new pane's id; throws with a one-line reason.
+ * Checks that the host can make the split (before anything is started or
+ * opened for it) and returns how to make it. Throws with a one-line reason.
  */
-export function splitHost(dir: SplitDir, cmd: string[], focus: boolean, env = process.env): { host: HostKind; pane: string } {
+export function prepareSplit(dir: SplitDir, cmd: string[], focus: boolean, env = process.env): PreparedSplit {
   const host = detectHost(env);
   if ("error" in host) throw new Error(host.error);
   const bin = host.kind === "herdr" ? env.HERDR_BIN_PATH || undefined : host.kind === "kitty" && !Bun.which("kitten") ? "kitty" : undefined;
   const plan = splitPlan(host, dir, cmd, { cwd: process.cwd(), focus, env, bin });
-  if ("error" in plan) throw new Error(plan.error);
-  const r = run(plan.argv);
-  const failed = (why: string) => new Error(`${host.kind} couldn't make the split: ${why || "it failed"}${HINT[host.kind]}`);
-  if (!r.ok) throw failed(r.err || r.out);
-  let pane = r.out.split("\n").pop()!.trim();
-  if (host.kind === "herdr") {
-    try {
-      pane = String(JSON.parse(r.out).result.pane.pane_id);
-    } catch {
-      throw failed(`unexpected answer ${JSON.stringify(r.out.slice(0, 200))}`);
-    }
-    const ran = run([plan.argv[0]!, "pane", "run", pane, plan.run!]);
-    if (!ran.ok) {
-      run([plan.argv[0]!, "pane", "close", pane]);
-      throw failed(ran.err || ran.out);
+  const exe = plan.argv[0]!;
+  if (host.kind === "tmux" && tmuxPassthroughSetting() === "off") {
+    // termium in the new pane would stop at once: say so here.
+    throw new Error("tmux has allow-passthrough off, so termium can't show pages in a tmux pane (tmux set -g allow-passthrough on)");
+  }
+  if (host.kind === "kitty") {
+    // Remote control on, and a layout that splits (the others place windows their own way).
+    const ls = run([...plan.argv.slice(0, plan.argv.indexOf("@") + 1), "ls"]);
+    if (!ls.ok) throw new Error(`kitty refused: ${ls.err || ls.out || "remote control failed"} (${KITTY_RC})`);
+    const layout = kittyLayout(ls.out, host.pane);
+    if (typeof layout !== "string") throw new Error(layout.error);
+    if (layout !== "splits") {
+      throw new Error(`this kitty tab uses the ${layout} layout, which doesn't split ${dir} (switch it to the splits layout: enabled_layouts splits)`);
     }
   }
-  return { host: host.kind, pane };
+  const failed = (why: string) => new Error(`${host.kind} couldn't make the split: ${why || "it failed"}`);
+  return {
+    host: host.kind,
+    make() {
+      const r = run(plan.argv);
+      if (!r.ok) throw failed(r.err || r.out);
+      if (host.kind !== "herdr") return r.out.split("\n").pop()!.trim();
+      let pane: string;
+      try {
+        pane = String(JSON.parse(r.out).result.pane.pane_id);
+      } catch {
+        throw failed(`unexpected answer ${JSON.stringify(r.out.slice(0, 200))}`);
+      }
+      const ran = run([exe, "pane", "run", pane, plan.run!]);
+      if (!ran.ok) {
+        run([exe, "pane", "close", pane]);
+        throw failed(ran.err || ran.out);
+      }
+      return pane;
+    },
+  };
 }

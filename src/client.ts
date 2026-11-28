@@ -59,7 +59,7 @@ function fail(msg: string, code = 2): never {
 }
 
 /** Inside tmux: is passthrough allowed for this pane? null if tmux can't say. */
-function tmuxPassthroughSetting(): string | null {
+export function tmuxPassthroughSetting(): string | null {
   try {
     const args = ["show-options", "-Apqv"];
     if (process.env.TMUX_PANE) args.push("-t", process.env.TMUX_PANE);
