@@ -60,11 +60,11 @@ export function bar(l: Load | undefined, now: number): Bar | null {
  * so recently its bar is still filling (a redirect, or a stop and start of
  * the same navigation) picks up from where the bar is (no further than the
  * cap: it is still loading), rather than jumping back to empty; otherwise
- * the bar starts again from nothing. Either way the stop button's minimum
- * time counts from now.
+ * the bar starts again from nothing. In every case the stop button's
+ * minimum time counts from now.
  */
 export function started(l: Load | undefined, now: number): Load {
-  if (l && !l.end) return l;
+  if (l && !l.end) return l.start === now ? l : { ...l, start: now };
   if (l && now - l.end < FILL_MS) {
     const fill = Math.min(LOADING_CAP, bar(l, now)!.fill);
     return { start: now, since: now, base: fill, tau: TRICKLE_MS, end: 0, from: 0 };

@@ -50,9 +50,11 @@ describe("loading bar", () => {
     // Later than that, a new load starts from empty.
     const fresh = started(done, 1000 + FILL_MS + 10);
     expect(bar(fresh, 1000 + FILL_MS + 10)!.fill).toBe(0);
-    // One still running is left alone.
+    // One still running carries on where it is, but holds the stop button from the new start.
     const running = started(undefined, 0);
-    expect(started(running, 500)).toBe(running);
+    const replaced = started(running, 500);
+    expect(bar(replaced, 600)!.fill).toBeCloseTo(bar(running, 600)!.fill, 9);
+    expect(holdsStop(finished(replaced, 520), 500 + MIN_STOP_MS - 1)).toBe(true);
   });
 
   test("the stop button is held for a fast load", () => {

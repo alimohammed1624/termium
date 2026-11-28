@@ -65,6 +65,8 @@ export interface Page {
   loading: boolean;
   /** Its loading bar (see progress.ts): kept after the load ends while the bar fills and fades. */
   load?: Load;
+  /** Loads of its main frame that have started (see navigate). */
+  loadStarts?: number;
   crashed: boolean;
   /** A pending JavaScript dialog, and the session (page or iframe) to answer it on. */
   dialog: { type: string; message: string; defaultPrompt: string; sessionId: string; edit?: LineEdit } | null;
@@ -1106,6 +1108,7 @@ export class App {
     if (!page || frameId !== page.targetId) return;
     page.loading = loading;
     page.load = loading ? started(page.load, Date.now()) : finished(page.load, Date.now());
+    if (loading) page.loadStarts = (page.loadStarts ?? 0) + 1;
     if (loading) page.crashed = false;
     else void this.refreshInfo(page);
     this.queueChrome();
@@ -1115,6 +1118,8 @@ export class App {
   private progressTimer: ReturnType<typeof setInterval> | null = null;
   /** What the focused page's bar and stop button looked like when last drawn. */
   private progressDrawn = "";
+  /** The address row shows ✕ (a click there stops) rather than ⟳. */
+  private stopShown = false;
 
   /** The focused page's bar, in whole cells of the address row, and its colour as it fades. */
   private progressLook(page: Page | undefined, w: number): { cells: number; hex: string; stop: boolean } {
@@ -1225,6 +1230,15 @@ export class App {
     this.tickProgress();
     const seq = ++page.navSeq;
     page.navStarted = Date.now();
+    const starts = page.loadStarts ?? 0;
+    // A navigation refused, or failed without the page starting a load,
+    // sends no load events: nothing else would end its loading.
+    const refused = () => {
+      if (page.navSeq !== seq || page.loadStarts !== starts || !page.loading) return;
+      page.loading = false;
+      page.load = finished(page.load, Date.now());
+      this.queueChrome();
+    };
     this.cdp
       .send("Page.navigate", { url }, page.sessionId)
       .then((r) => {
@@ -1238,15 +1252,10 @@ export class App {
           setTimeout(() => {
             if (page.navSeq === seq) this.navigate(page, url, attempt + 1);
           }, 250);
-        }
+        } else if (r?.errorText) refused();
       })
       .catch((e) => {
-        // Refused outright (an invalid address): no load events will end it.
-        if (page.navSeq === seq) {
-          page.loading = false;
-          page.load = finished(page.load, Date.now());
-          this.queueChrome();
-        }
+        refused();
         this.showToast(String(e));
       });
     this.queueChrome();
@@ -2354,6 +2363,7 @@ export class App {
   private drawUrlBar(col: number, w: number): string {
     const look = this.progressLook(this.focused, w);
     this.progressDrawn = `${look.cells} ${look.hex} ${look.stop}`;
+    this.stopShown = look.stop;
     return underline(this.drawAddressRow(col, w, look.stop), look.cells, look.hex);
   }
 
@@ -3765,8 +3775,8 @@ export class App {
       if (col >= n.back[0] && col < n.back[1]) void this.history(page, -1);
       else if (col >= n.fwd[0] && col < n.fwd[1]) void this.history(page, 1);
       else if (col >= n.reload[0] && col < n.reload[1]) {
-        // The ✕ held up after a fast load (see MIN_STOP_MS) doesn't turn into a reload.
-        if (page.loading || holdsStop(page.load, Date.now())) this.cdp.send("Page.stopLoading", {}, page.sessionId).catch(() => {});
+        // What the button shows decides (✕ is held a moment after a fast load: see MIN_STOP_MS).
+        if (this.stopShown) this.cdp.send("Page.stopLoading", {}, page.sessionId).catch(() => {});
         else this.reload(page);
       } else if (col >= n.url[0] && col < n.url[1] && !this.prompt) this.openUrlPrompt(page);
       else if (this.noticeHit && col >= this.noticeHit[0] && col < this.noticeHit[1]) this.openUpdate();
