@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { barCells, offsetFor, pageStep, thumb, type ScrollMetrics } from "./scrollbar";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -122,6 +123,14 @@ export interface Page {
   foreignTries?: number;
   loadingTries?: number;
   foreignPolls?: number;
+  /** How far it's scrolled, for its scrollbar (see trackScroll). */
+  scroll?: ScrollMetrics;
+  /** Document positions (CSS px from the top) marked in its scrollbar. */
+  scrollMarks?: number[];
+  /** A scroll query is running ("again": run another after it). */
+  scrollQuery?: "busy" | "again";
+  /** What its scrollbar shows now, to skip redrawing the same. */
+  barDrawn?: string;
 }
 
 /** A page as `termium ctl tabs` lists it. */
@@ -382,6 +391,8 @@ export class App {
   private mouseButtons = 0;
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
   private drag: { sep: SepGeom<Page>; moved: boolean } | null = null;
+  /** A scrollbar thumb being dragged, held `grab` eighths of a cell below its top. */
+  private barDrag: { page: Page; grab: number } | null = null;
   private hoverPage: Page | null = null;
   private chromeQueued = false;
   private started = false;
@@ -1600,7 +1611,7 @@ export class App {
     if (tab && this.attached) {
       const multi = leaves(tab.root).length > 1;
       const root = tab.zoomed ? leaf(tab.focused) : tab.root;
-      const { panes, seps } = computeLayout(root, this.paneArea(), multi);
+      const { panes, seps } = computeLayout(root, this.paneArea(), multi, true);
       for (const p of panes) {
         this.geom.set(p.item, p);
         if (p.content.cols > 0 && p.content.rows > 0) visible.add(p.item);
@@ -2034,6 +2045,7 @@ export class App {
     if (!g || !page.lastFrame || this.covered() || this.closingAll || page === this.panelPage) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
+    if (g.bar) this.trackScroll(page);
     if (this.placeholders) return this.paintPlaceholders(page, r, done);
     const id = this.nextImage++;
     if (this.nextImage > 0xfffffff0) this.nextImage = 1;
@@ -2392,11 +2404,65 @@ export class App {
       const text = ` ${flag}${title}${title && host ? " — " : ""}${host}`;
       s += at(g.header.row, g.header.col) + style + fit(text, g.header.cols) + RESET;
     }
+    for (const [page, g] of this.geom) if (g.bar) s += this.scrollbarSeq(page, g.bar);
     for (const sep of this.seps) {
       if (sep.split.dir !== "h") continue;
       for (let r = 0; r < sep.rect.rows; r++) {
         s += at(sep.rect.row + r, sep.rect.col) + bg(C.crust) + fg(C.surface1) + "│";
       }
+    }
+    return s + RESET;
+  }
+
+  /**
+   * Reads how far the page is scrolled and redraws its scrollbar if that
+   * changed. Runs as frames are painted (scrolling repaints the page), at
+   * most one query at a time per page.
+   */
+  private trackScroll(page: Page): void {
+    if (page.scrollQuery) {
+      page.scrollQuery = "again";
+      return;
+    }
+    page.scrollQuery = "busy";
+    const sid = page.sessionId;
+    void Promise.race([this.cdp.send("Page.getLayoutMetrics", {}, sid), Bun.sleep(1000)])
+      .then((m: any) => {
+        const v = m?.cssLayoutViewport;
+        const total = m?.cssContentSize?.height;
+        // While its thumb is dragged, the bar follows the pointer instead.
+        if (!v || typeof total !== "number" || this.barDrag?.page === page) return;
+        page.scroll = { y: v.pageY, view: v.clientHeight, total };
+        this.redrawScrollbar(page);
+      })
+      .catch(() => {})
+      .finally(() => {
+        const again = page.scrollQuery === "again";
+        page.scrollQuery = undefined;
+        if (again && this.pages.has(sid) && this.geom.get(page)?.bar) this.trackScroll(page);
+      });
+  }
+
+  /** Draws the page's scrollbar now, unless it already shows the same. */
+  private redrawScrollbar(page: Page): void {
+    const bar = this.geom.get(page)?.bar;
+    if (!bar || !this.started || !this.attached || this.closingAll || this.covered()) return;
+    const s = this.scrollbarSeq(page, bar, false);
+    if (s) out(this.sync(s + this.cursorSeq()));
+  }
+
+  /** The page's scrollbar (an empty column when it doesn't scroll); "" if unchanged and not `always`. */
+  private scrollbarSeq(page: Page, bar: Rect, always = true): string {
+    const cells = barCells(page.scroll, bar.rows, page.scrollMarks);
+    const dragged = this.barDrag?.page === page;
+    const key = `${bar.row},${bar.col},${bar.rows}:${dragged}:${cells?.map((c) => c.ch + c.fg + c.bg).join() ?? ""}`;
+    if (!always && key === page.barDrawn) return "";
+    page.barDrawn = key;
+    const colour = { thumb: dragged ? C.subtext : C.overlay, track: C.crust, mark: C.yellow };
+    let s = "";
+    for (let r = 0; r < bar.rows; r++) {
+      const c = cells?.[r];
+      s += at(bar.row + r, bar.col) + (c ? bg(colour[c.bg]) + fg(colour[c.fg]) + c.ch : bg(C.crust) + " ");
     }
     return s + RESET;
   }
@@ -3630,6 +3696,17 @@ export class App {
       return;
     }
 
+    if (this.barDrag) {
+      if (ev.action === "move") this.dragBar(py);
+      else if (ev.action === "release") {
+        const page = this.barDrag.page;
+        this.barDrag = null;
+        this.redrawScrollbar(page);
+        this.trackScroll(page);
+      }
+      return;
+    }
+
     if (ev.action === "move" && this.hoverPage && !this.mouseCapture &&
         ![...this.geom.values()].some((p) => p.item === this.hoverPage && inRect(p.content, col, row))) {
       this.leaveHover();
@@ -3644,7 +3721,8 @@ export class App {
 
     if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
 
-    const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
+    const barPane = [...this.geom.values()].find((p) => p.bar && inRect(p.bar, col, row));
+    const g = barPane ?? [...this.geom.values()].find((p) => inRect(p.content, col, row));
     if (!g) return;
     if (ev.action === "press") {
       if (this.prompt?.kind === "url" || this.prompt?.kind === "rename") {
@@ -3653,6 +3731,12 @@ export class App {
       }
       if (this.mode !== "normal") this.setMode("normal");
       this.focusPage(g.item);
+    }
+    if (barPane) {
+      // The wheel scrolls the page (pageMouse puts the pointer at its right edge).
+      if (ev.action === "wheel") this.pageMouse(g.item, ev, px, py);
+      else if (ev.action === "press" && ev.button === 0) this.pressBar(g.item, barPane.bar!, py);
+      return;
     }
     this.pageMouse(g.item, ev, px, py);
   }
@@ -3734,6 +3818,38 @@ export class App {
     // Keep dragging the same split after the relayout rebuilt the handles.
     const same = this.seps.find((s) => s.split === split);
     if (same) d.sep = same;
+  }
+
+  /** A click on a scrollbar: above or below the thumb scrolls a page, on it starts a drag. */
+  private pressBar(page: Page, bar: Rect, py: number): void {
+    const m = page.scroll;
+    const t = thumb(m, bar.rows);
+    if (!m || !t) return;
+    const e = ((py - (bar.row - 1) * this.cellH) / this.cellH) * 8;
+    if (e < t.top) this.scrollPageTo(page, pageStep(m, -1));
+    else if (e >= t.top + t.len) this.scrollPageTo(page, pageStep(m, 1));
+    else {
+      this.barDrag = { page, grab: e - t.top };
+      this.redrawScrollbar(page);
+    }
+  }
+
+  private dragBar(py: number): void {
+    const { page, grab } = this.barDrag!;
+    const bar = this.geom.get(page)?.bar;
+    const m = page.scroll;
+    if (!bar || !m) return;
+    const y = offsetFor(m, bar.rows, ((py - (bar.row - 1) * this.cellH) / this.cellH) * 8 - grab);
+    if (y === m.y) return;
+    page.scroll = { ...m, y };
+    this.redrawScrollbar(page);
+    this.scrollPageTo(page, y);
+  }
+
+  /** Scrolls the page's document to `y` (CSS px) at once; while dragging, only the latest position is sent. */
+  private scrollPageTo(page: Page, y: number): void {
+    const expression = `(document.scrollingElement || document.documentElement).scrollTo({ top: ${y}, behavior: "instant" })`;
+    this.queueMove(page, () => this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {}));
   }
 
   private pageMouse(page: Page, ev: MouseEvent, px: number, py: number): void {

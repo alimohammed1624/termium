@@ -95,7 +95,7 @@ try:
     check("tab title shows page title", "termium test page" in t.line(1), t.line(1))
     t.shot(f"{OUT}/01-page.png")
     s = state()
-    check("viewport matches pane", s and s["w"] == 1380 and s["h"] == 860, s and (s["w"], s["h"]))
+    check("viewport matches pane", s and s["w"] == 1370 and s["h"] == 860, s and (s["w"], s["h"]))
 
     # 2. click the input and type (pixel mouse). Pane content starts at col 23,row 3 => px (220, 40)
     inp = pages("(() => { const r = document.getElementById('inp').getBoundingClientRect(); return [r.x + 10, r.y + r.height/2]; })()")[0]["value"]
@@ -411,7 +411,7 @@ try:
     check("keyup goes to the pane that got the keydown", right_log.rstrip().endswith("up q"), right_log[-60:])
     t.key("ctrl+b"); t.key("z"); time.sleep(0.8)
     zw = [p["value"]["w"] for p in pages() if p["value"] and "right" not in p["url"] and "popup" not in p["url"]]
-    check("zoom gives full width", zw == [1380], zw)
+    check("zoom gives full width", zw == [1370], zw)
     t.key("ctrl+b"); t.key("z"); time.sleep(0.5)
 
     # 9a. both panes of a split are live
@@ -527,7 +527,7 @@ try:
     time.sleep(1.2)
     with t.lock:
         placed = list(t.placements.values())
-    full_w = t.cols - 22
+    full_w = t.cols - 22 - 1  # less the scrollbar column
     check("survivor fills the pane area after closes", len(placed) == 1 and placed[0][2] == full_w, placed)
     t.shot(f"{OUT}/09-after-close.png")
 

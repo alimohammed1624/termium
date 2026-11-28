@@ -27,6 +27,8 @@ export interface PaneGeom<T> {
   rect: Rect; // whole pane, header included
   header: Rect | null;
   content: Rect;
+  /** The scrollbar column at the right edge (asked for, and the pane is wide enough). */
+  bar?: Rect;
 }
 
 export interface SepGeom<T> {
@@ -81,10 +83,14 @@ function clamp(n: number, lo: number, hi: number): number {
  * title bar (it doubles as the divider between stacked panes); side-by-side
  * panes are divided by a one-column separator.
  */
+/** Narrower panes get no scrollbar. */
+const BAR_MIN_COLS = 8;
+
 export function computeLayout<T>(
   root: Node<T>,
   area: Rect,
   headers: boolean,
+  scrollbars = false,
 ): { panes: PaneGeom<T>[]; seps: SepGeom<T>[] } {
   const panes: PaneGeom<T>[] = [];
   const seps: SepGeom<T>[] = [];
@@ -93,6 +99,12 @@ export function computeLayout<T>(
     if (node.kind === "leaf") {
       const header = headers && r.rows > 1 ? { col: r.col, row: r.row, cols: r.cols, rows: 1 } : null;
       const content = header ? { col: r.col, row: r.row + 1, cols: r.cols, rows: r.rows - 1 } : { ...r };
+      if (scrollbars && content.cols >= BAR_MIN_COLS && content.rows > 0) {
+        content.cols -= 1;
+        const bar = { col: content.col + content.cols, row: content.row, cols: 1, rows: content.rows };
+        panes.push({ item: node.item, rect: r, header, content, bar });
+        return;
+      }
       panes.push({ item: node.item, rect: r, header, content });
       return;
     }

@@ -129,7 +129,7 @@ try:
     import re as _re
     check("tmux: once its pane is active, pictures switch to temporary files",
           t.wait_for(lambda: _re.search(rb"\x1b_Ga=T[^;\x1b]*,t=t;", bytes(t.raw[mark:])) is not None, 15))
-    want = (3, l0 + 1 + 22, w0 - 22, h0 - 2)
+    want = (3, l0 + 1 + 22, w0 - 22 - 1, h0 - 2)  # less the scrollbar column
     check("tmux: the page is drawn through placeholders in its pane", t.wait_for(lambda: want in t.placeholder_images().values(), 15),
           (t.placeholder_images(), want))
     time.sleep(1)
@@ -173,7 +173,7 @@ try:
     # re-attach from the other pane, which is a different size
     tmux("select-pane", "-t", "main.1")
     tmux("send-keys", "-t", "main.1", f"cd {ROOT} && bun src/main.ts attach", "Enter")
-    want = (3, l1 + 1 + 22, w1 - 22, h1 - 2)
+    want = (3, l1 + 1 + 22, w1 - 22 - 1, h1 - 2)
     check("tmux: re-attach in another pane draws there at its size", t.wait_for(lambda: want in t.placeholder_images().values(), 20),
           (t.placeholder_images(), want, tmux("capture-pane", "-p", "-t", "main.1").stdout[-600:]))
     check("tmux: re-attach redraws the chrome", t.wait_text("termium test page", 10))
@@ -181,10 +181,10 @@ try:
     t.shot(f"{OUT}/tmux-reattached.png")
 
     tmux("resize-pane", "-Z", "-t", "main.1")
-    want = (3, 23, 160 - 22, 45 - 2)
+    want = (3, 23, 160 - 22 - 1, 45 - 2)
     check("tmux: zooming the pane resizes the page", t.wait_for(lambda: want in t.placeholder_images().values(), 15),
           (t.placeholder_images(), want))
-    zoomed = lambda: (state(prof) or {}).get("w") == 160 * 10 - 220 and (state(prof) or {}).get("h") == 43 * 20
+    zoomed = lambda: (state(prof) or {}).get("w") == 160 * 10 - 220 - 10 and (state(prof) or {}).get("h") == 43 * 20
     check("tmux: the viewport follows the zoomed pane", t.wait_for(zoomed, 10, 0.5), state(prof) and (state(prof)["w"], state(prof)["h"]))
     t.shot(f"{OUT}/tmux-zoomed.png")
 
