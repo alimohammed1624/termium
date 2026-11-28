@@ -389,8 +389,8 @@ export class App {
   private mouseButtons = 0;
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
   private drag: { sep: SepGeom<Page>; moved: boolean } | null = null;
-  /** A mouse button went down on termium's bars and hasn't come up yet. */
-  private chromeHeld = false;
+  /** Mouse buttons that went down on termium's bars and haven't come up yet. */
+  private chromeHeld = new Set<number>();
   private hoverPage: Page | null = null;
   private chromeQueued = false;
   private started = false;
@@ -1628,7 +1628,15 @@ export class App {
     let s = at(row, col) + rowBg + " ".repeat(Math.max(0, w)) + at(row, col);
     if (!ctx) return s + RESET;
     let used = 0;
-    const state = { panes: this.tab ? leaves(this.tab.root).length : 0, tabs: this.space?.tabs.length ?? 0 };
+    const tab = this.tab;
+    const split = (dir: Dir) => !!(tab && this.focused && enclosingSplit(tab.root, this.focused, dir));
+    const state = {
+      panes: !!tab && leaves(tab.root).length > 1,
+      tabs: (this.space?.tabs.length ?? 0) > 1,
+      spaces: this.spaces.length > 1,
+      sideBySide: split("h"),
+      stacked: split("v"),
+    };
     for (const { action, start, end } of layoutFooter(FOOTER_ACTIONS[ctx], w, state)) {
       if (start > used) s += rowBg + fg(C.surface1) + SEPARATOR;
       const label = chipText(action).slice(0, -(action.key.length + 1));
@@ -2224,18 +2232,20 @@ export class App {
     s += this.drawTabBar(mainCol, mainW);
     s += this.drawUrlBar(mainCol, mainW);
     this.footerHits = this.footerHits.filter((h) => h.row === 2 && this.hintsInUrlBar());
-    if (this.footerRows()) s += this.drawFooter(this.rows, mainCol, mainW);
+    // Drawn last, over anything that runs into its row (a long dialog message
+    // in a short pane), so what shows there is what a click there does.
+    const footer = () => (this.footerRows() ? this.drawFooter(this.rows, mainCol, mainW) : "");
     if (this.mode === "help") {
-      out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
+      out(this.sync(s + RESET + this.helpOverlay() + footer() + this.cursorSeq()));
       return;
     }
     if (this.mode === "update") {
-      out(this.sync(s + RESET + this.updateOverlay() + this.cursorSeq()));
+      out(this.sync(s + RESET + this.updateOverlay() + footer() + this.cursorSeq()));
       return;
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
-    out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
+    out(this.sync(s + RESET + this.takeStale() + footer() + this.cursorSeq()));
   }
 
   private drawSidebar(): string {
@@ -3726,13 +3736,14 @@ export class App {
 
     // A press termium's own bars took: its moves and release are theirs too
     // (even if the click moved a page under the pointer, as hiding the footer does).
-    if (this.chromeHeld && (ev.action === "release" || (ev.action === "move" && ev.button !== 3))) {
-      if (ev.action === "release") this.chromeHeld = false;
+    if ((ev.action === "release" || ev.action === "move") && this.chromeHeld.has(ev.button)) {
+      if (ev.action === "release") this.chromeHeld.delete(ev.button);
       return;
     }
-    this.chromeHeld = false;
+    // (A press means that button's earlier release was lost, e.g. in help.)
+    if (ev.action === "press") this.chromeHeld.delete(ev.button);
     if (ev.action === "press" && this.chromeClick(ev, col, row)) {
-      this.chromeHeld = !this.drag;
+      if (!this.drag) this.chromeHeld.add(ev.button);
       return;
     }
 

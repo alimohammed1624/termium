@@ -30,15 +30,24 @@ export interface FooterAction {
   combo: string;
   /** Kept when space runs out (the way to everything else, or out of the mode). */
   pin?: boolean;
-  /** Only offered where it does something: with more than one pane, or tab. */
-  needs?: "panes" | "tabs";
+  /** Only offered where it does something (see FooterState). */
+  needs?: keyof FooterState;
 }
 
-/** What decides which actions do something right now. */
+/** Which actions do something right now. */
 export interface FooterState {
-  panes: number;
-  tabs: number;
+  /** More than one pane in the tab. */
+  panes: boolean;
+  /** More than one tab in the space. */
+  tabs: boolean;
+  /** More than one space. */
+  spaces: boolean;
+  /** The focused pane is in a side-by-side split (left/right resize it). */
+  sideBySide: boolean;
+  /** The focused pane is in a stacked split (up/down resize it). */
+  stacked: boolean;
 }
+const EVERYTHING: FooterState = { panes: true, tabs: true, spaces: true, sideBySide: true, stacked: true };
 
 /** The layout key prefix. */
 export const PREFIX = { combo: "ctrl+b", label: "^B" };
@@ -80,15 +89,15 @@ export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
     key("Sidebar", "b"),
   ],
   resize: [
-    key("Left", "h"),
-    key("Down", "j"),
-    key("Up", "k"),
-    key("Right", "l"),
+    needs("sideBySide", key("Left", "h")),
+    needs("stacked", key("Down", "j")),
+    needs("stacked", key("Up", "k")),
+    needs("sideBySide", key("Right", "l")),
     pin(key("Done", "Esc", "escape")),
   ],
   spaces: [
-    key("Down", "j"),
-    key("Up", "k"),
+    needs("spaces", key("Down", "j")),
+    needs("spaces", key("Up", "k")),
     key("Open", "Enter"),
     key("New", "N", "shift+n"),
     pin(key("Cancel", "Esc", "escape")),
@@ -125,9 +134,9 @@ export function chipText(a: FooterAction): string {
 export function layoutFooter(
   actions: FooterAction[],
   w: number,
-  state: FooterState = { panes: 2, tabs: 2 },
+  state: FooterState = EVERYTHING,
 ): { action: FooterAction; start: number; end: number }[] {
-  const shown = actions.filter((a) => !a.needs || state[a.needs] > 1);
+  const shown = actions.filter((a) => !a.needs || state[a.needs]);
   const total = (list: FooterAction[]) => list.reduce((n, a, i) => n + width(chipText(a)) + (i ? width(SEPARATOR) : 0), 0);
   while (total(shown) > w) {
     const drop = shown.findLastIndex((a) => !a.pin);

@@ -41,12 +41,18 @@ describe("hint footer", () => {
     expect(layoutFooter(prefix, w + 50).map((l) => l.action.label)).toContain("Keys");
   });
 
-  test("actions that need panes or tabs only show with more than one", () => {
-    const labels = (panes: number, tabs: number) => layoutFooter(FOOTER_ACTIONS.prefix, 1000, { panes, tabs }).map((l) => l.action.label);
-    expect(labels(1, 1)).not.toContain("Zoom");
-    expect(labels(1, 1)).not.toContain("Next");
-    expect(labels(2, 1)).toContain("Resize");
-    expect(labels(1, 2)).toContain("Prev");
+  test("actions only show where they do something", () => {
+    const none = { panes: false, tabs: false, spaces: false, sideBySide: false, stacked: false };
+    const labels = (ctx: keyof typeof FOOTER_ACTIONS, state: Partial<typeof none>) =>
+      layoutFooter(FOOTER_ACTIONS[ctx], 1000, { ...none, ...state }).map((l) => l.action.label);
+    expect(labels("prefix", {})).not.toContain("Zoom");
+    expect(labels("prefix", {})).not.toContain("Next");
+    expect(labels("prefix", { panes: true })).toContain("Resize");
+    expect(labels("prefix", { tabs: true })).toContain("Prev");
+    expect(labels("resize", { sideBySide: true })).toEqual(["Left", "Right", "Done"]);
+    expect(labels("resize", { stacked: true })).toEqual(["Down", "Up", "Done"]);
+    expect(labels("spaces", {})).toEqual(["Open", "New", "Cancel"]);
+    expect(labels("spaces", { spaces: true })).toEqual(["Down", "Up", "Open", "New", "Cancel"]);
   });
 
   test("on for someone who never chose; the choice is kept; the environment wins", () => {

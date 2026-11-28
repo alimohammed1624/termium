@@ -208,12 +208,13 @@ try:
 
     # ---- spaces picker
     t.key("ctrl+b"); time.sleep(0.3); click_hint("Spaces w")
-    check("spaces: footer lists Down/Up/Open/New/Cancel",
-          wait(lambda: all(s in foot() for s in ("Down j", "Up k", "Open Enter", "New N", "Cancel Esc"))), foot())
+    check("spaces (just one): footer lists Open/New/Cancel, no cursor moves",
+          wait(lambda: all(s in foot() for s in ("Open Enter", "New N", "Cancel Esc"))) and "Down j" not in foot() and "Up k" not in foot(), foot())
     click_hint("New N")
     check("New makes a space", wait(lambda: " 2 " in t.text() and "Address ^L" in foot() or "Go Enter" in foot()), foot())
     t.key("escape"); time.sleep(0.5)
     click_hint("Spaces ^Bw")
+    check("spaces (two): Down and Up too", wait(lambda: "Down j" in foot() and "Up k" in foot()), foot())
     cursor = lambda: next((r for r in range(3, ROWS) if "▸" in t.line(r)), -1)
     r0 = cursor(); click_hint("Up k")
     check("Up moves the space cursor", wait(lambda: cursor() not in (-1, r0)), (r0, cursor()))
@@ -246,6 +247,16 @@ try:
     ctl("eval", "history.pushState({}, '', '?pushed'); 1")
     i = foot().find("Address"); t.click_cell(i + 2, ROWS, button=128)
     check("mouse Back over the footer goes back", wait(lambda: value("location.search") == ""), value("location.search"))
+
+    # ---- a press on the tab bar keeps its gesture, a wheel turn in the middle notwithstanding
+    ctl("eval", "window.ups = []; addEventListener('mouseup', (e) => ups.push(e.clientY)); addEventListener('mousedown', (e) => ups.push('down')); 1")
+    tx = COLS - 30  # the tab bar's empty stretch (termium's, does nothing)
+    px = lambda c, r: ((c - 1) * 10 + 5, (r - 1) * 20 + 10)
+    t.mouse(*px(tx, 1), action="press"); time.sleep(0.1)
+    t.scroll(*px(60, 10)); time.sleep(0.1)
+    t.mouse(*px(60, 10), action="drag"); time.sleep(0.1)
+    t.mouse(*px(60, 10), action="release"); time.sleep(0.5)
+    check("a tab-bar press's drag and release never reach the page (a wheel turn between)", value("window.ups") == [], value("window.ups"))
 
     # ---- ^B f: the row goes back to the page
     ctl("eval", "window.ups = []; addEventListener('mouseup', (e) => ups.push(e.clientY)); addEventListener('mousedown', (e) => ups.push('down')); 1")
@@ -307,6 +318,12 @@ try:
     check("6 rows, 3 stacked panes: the footer gives its row up rather than hide a pane", "Address" not in t.line(6), t.line(6))
     t.resize(COLS, 8); time.sleep(1.5)
     check("8 rows: room for both, the footer is back", "Address ^L" in t.line(8), t.line(8))
+    # A long dialog in a short pane: the footer stays on top, so what shows there is what a click does.
+    t.resize(COLS, 7); time.sleep(1.5)
+    ctl("eval", "setTimeout(() => { window.r = confirm('LONG-QUESTION\\n' + 'line\\n'.repeat(8)) }, 50); 1")
+    check("7 rows, a long dialog: the footer still shows OK and Cancel", wait(lambda: "OK Enter" in t.line(7) and "Cancel Esc" in t.line(7)), t.line(7))
+    i = t.line(7).find("Cancel Esc"); t.click_cell(i + 2, 7); time.sleep(0.5)
+    check("...and Cancel there answers no", wait(lambda: value("window.r") is False), value("window.r"))
     t.resize(COLS, ROWS); time.sleep(1)
 finally:
     if t:
