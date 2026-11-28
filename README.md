@@ -214,6 +214,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `Ctrl+B` | send Ctrl+B to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |
+| `f` | hint footer: on, only while `Ctrl+B` waits for a key, or off |
 | `q` / `?` | quit / show keys |
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
@@ -224,6 +225,16 @@ Ctrl+Backspace (delete word) and Alt/Ctrl+←/→.
 The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
 divider between panes.
+
+The hint footer, the bottom row, lists what you can do right now with its
+key: browsing, after `Ctrl+B`, in resize mode, in the space picker, in
+help, in the address bar, and when a page asks something (OK / Cancel).
+Click an action to do it. It is on until you change it: `Ctrl+B f` shows
+the hints only while `Ctrl+B` (or resize or the space picker) waits for a
+key, in the address line, giving the bottom row back to the page; press it
+again to turn the hints off, and once more to bring the footer back. The
+choice is kept for later sessions (`TERMIUM_FOOTER=on|auto|off` overrides
+it).
 
 ### Updates
 
