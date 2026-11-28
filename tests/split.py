@@ -200,6 +200,24 @@ try:
     check("a right-button release isn't the end of a double-click", viewports()["A"][0] == w1)
     t.mouse(*px(c, 30), 0, "release"); time.sleep(0.5)
 
+    t.click_cell(c, 30); time.sleep(0.05)
+    t.mouse(*px(c, 30), 0, "press"); time.sleep(1.0); t.mouse(*px(c, 30), 0, "release"); time.sleep(1.2)
+    check("a second press held down is not a double-click", viewports()["A"][0] == w1)
+    t.click_cell(c, 30); time.sleep(0.05)
+    t.mouse(*px(c, 30), 0, "press"); t.mouse(*px(c, 30), 2, "press"); t.mouse(*px(c, 30), 0, "release"); time.sleep(0.1)
+    t.mouse(*px(c, 30), 2, "release"); time.sleep(1.2)
+    check("a right-button chord during the second press is not a double-click", viewports()["A"][0] == w1)
+    t.key("escape"); time.sleep(0.4)
+
+    # A drag that leaves the divider (to where nothing moves it) takes its grip away on release.
+    move(c, 30); time.sleep(0.5)
+    shown = any(t.line(r)[c - 1] == "=" for r in range(4, 46))
+    t.mouse(*px(c, 30), 0, "press")
+    for y in range(30, 1, -4):
+        t.mouse(*px(c, y), 0, "drag"); time.sleep(0.03)
+    t.mouse(*px(c, 2), 0, "release"); time.sleep(1)
+    check("the divider's grip goes once a drag ends off it", shown and not any(t.line(r)[c - 1] == "=" for r in range(4, 46)))
+
     # Right-click on a split arrow: the pane menu, no split.
     c, r = split_button("A")
     move(c, r); time.sleep(0.4)
@@ -298,6 +316,19 @@ try:
     check("placeholders: the picture right of the preview is whole", right == (sep - pcol - 1) * 42, (right, sep, pcol))
     t.shot(f"{OUT}/07-placeholder-menu-preview.png")
     t.key("escape"); time.sleep(0.5)
+    # A long page alert shown while a preview is up: the message wins (no preview, no picture over it).
+    subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), profile,
+                    "setTimeout(() => alert('first line of the alert\\n' + 'second line '.repeat(30)), 1500), 1"],
+                   capture_output=True, text=True, timeout=20)
+    c, r = split_button("A")
+    move(c, r); time.sleep(0.3)
+    with t.lock:
+        line = "".join(t.screen.buffer[r - 1][x].data for x in range(t.cols))
+    move(line.find("→") + 1, r)
+    t.wait_text("first line of the alert", 8); time.sleep(1)
+    check("a long alert over a previewed pane: the message shows, the preview doesn't",
+          find("first line of the alert") is not None and find("┊") is None)
+    t.shot(f"{OUT}/08-placeholder-alert.png")
 finally:
     t.close()
     srv.terminate()

@@ -2620,7 +2620,7 @@ export class App {
     const p = this.preview;
     // (A zoomed pane isn't where the split will put it: the split unzooms the tab.
     // A menu's preview goes with the menu, however it went away.)
-    if (!p || this.tab?.zoomed || (p.menu && !this.menu)) return null;
+    if (!p || this.tab?.zoomed || (p.menu && !this.menu) || p.page === this.panelPage) return null;
     const g = this.geom.get(p.page);
     return g ? splitPreview(g.rect, g.content, sideDir(p.side).dir) : null;
   }
@@ -3898,14 +3898,18 @@ export class App {
         if (col !== d.at.col || row !== d.at.row) d.travelled = true;
         return this.dragTo(col, row);
       }
+      // Another button pressed meanwhile: not a click any more.
+      if (ev.action === "press") d.travelled = true;
       if (ev.action === "release") {
         this.drag = null;
-        // A left click that stayed in its cell (released there too).
-        const click = !d.travelled && ev.button === 0 && col === d.at.col && row === d.at.row;
+        // A quick left click that stayed in its cell (released there too).
+        const click = !d.travelled && ev.button === 0 && col === d.at.col && row === d.at.row && Date.now() - d.at.time < DOUBLE_CLICK_MS;
         if (click && d.double) d.sep.split.ratio = 0.5;
         // Only such a click can be the first half of a double-click.
         else if (click) this.sepPress = { split: d.sep.split, ...d.at };
         this.relayoutAndRedraw();
+        // The pointer may have left the divider while dragging.
+        this.chromeHover(col, row);
       }
       return;
     }
@@ -4186,6 +4190,7 @@ export class App {
     const holes = this.placeholders ? this.holes() : [];
     if (!holes.length) return s;
     for (const page of this.geom.keys()) {
+      if (page === this.panelPage) continue; // (its pane shows a dialog message, not its picture)
       for (const t of this.phTiles.get(page) ?? []) {
         const colour = this.phColour(t.index);
         const tileEnd = t.col + t.cols;
