@@ -171,13 +171,13 @@ try:
         return vals[0] if vals else None
     hd.wait_frames(1, 25); time.sleep(5)
     img = hd.latest_image()
-    want = ((100 - 22) * 20, (30 - 2) * 40)
+    want = ((100 - 22 - 1) * 20, (30 - 2) * 40)  # less the scrollbar column
     check("HiDPI frames at full device resolution", img is not None and img.size == want, (img and img.size, want))
     ok = True
     steps = []
     def expect(cols, rows, zoom, sidebar=True):
         dsf = round(2 * zoom * 100) / 100
-        pane_cols = cols - (22 if sidebar and cols >= 52 else 0)
+        pane_cols = cols - (22 if sidebar and cols >= 52 else 0) - 1  # less the scrollbar column
         return [round(pane_cols * 20 / dsf), round((rows - 2) * 40 / dsf), dsf]
     for action, exp in (
         (lambda: (hd.key("ctrl+b"), hd.key("b")), expect(100, 30, 1, sidebar=False)),
