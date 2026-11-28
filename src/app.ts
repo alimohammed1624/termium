@@ -3036,7 +3036,11 @@ export class App {
     this.hoverToast((p && boxes.find((b) => inRect(b, p.col, p.row))?.toast) ?? null);
     let s = "";
     const same = (a: ToastBox, b: ToastBox) => a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
-    const gone = this.toastBoxes.filter((old) => !boxes.some((b) => same(b, old)));
+    // Toasts under an overlay or a dialog's message aren't cleared: that
+    // was drawn over them, and clearing now would cut into it.
+    const pr = this.panelPage && this.geom.get(this.panelPage)?.content;
+    const drawnOver = this.covered() || !!(pr && area && pr.row === area.row && pr.col === area.col && pr.rows === area.rows && pr.cols === area.cols);
+    const gone = drawnOver ? [] : this.toastBoxes.filter((old) => !boxes.some((b) => same(b, old)));
     for (const r of gone) for (let y = 0; y < r.rows; y++) s += at(r.row + y, r.col) + RESET + " ".repeat(r.cols);
     if (gone.length && this.placeholders) {
       // Cleared cells were part of a picture: write its placeholders again.

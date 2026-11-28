@@ -111,9 +111,20 @@ try:
     # While a long dialog message covers the page, toasts aren't drawn over it, and wait.
     t.key("ctrl+b"); t.key("shift+u"); t.wait_text(OFF, 5)
     c = page_eval("(() => { const r = document.getElementById('longmsg').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")
+    tc, tr = toast_cell("Update news")
+    mark = len(t.raw)
     t.click(220 + int(c[0]), 40 + int(c[1]))
     check("a long dialog message shows over the page", t.wait_text("END-OF-MESSAGE", 5), t.text()[-600:])
     check("...with no toast over it", t.wait_for(lambda: OFF not in t.text(), 2), t.text()[-600:])
+    def cleared():
+        # Cells left with the terminal's default background: cut out of the dialog's panel.
+        with t.lock:
+            return [(y + 1, x + 1) for y in range(2, ROWS) for x in range(22, COLS) if t.screen.buffer[y][x].bg == "default"]
+    time.sleep(0.5)
+    # (Not even for a moment: the toast's cells aren't blanked after the panel is drawn over them.)
+    import re
+    blanked = re.search(rb"\x1b\[%d;%dH\x1b\[0m {10,}" % (tr, tc - 1), bytes(t.raw[mark:]))
+    check("...and nothing cut out of the panel where the toast was", not cleared() and not blanked, (cleared()[:5], blanked))
     time.sleep(6)  # longer than the toast's 5 s
     t.key("enter")
     check("once it's answered, the toast is back (it waited)", t.wait_text(OFF, 4), t.text()[-600:])

@@ -72,6 +72,15 @@ describe("layoutToasts", () => {
     expect(layoutToasts(many, { row: 3, col: 1, cols: 8, rows: 10 }, 0)).toEqual([]);
   });
 
+  test("blank text still lays out (one empty line)", () => {
+    for (const text of ["", "   "]) {
+      const [b] = layoutToasts([toast(1, text, 3000, "Undo")], area, 1);
+      expect(b!.lines).toEqual([""]);
+      expect(Number.isFinite(b!.cols)).toBe(true);
+      expect(b!.cols).toBe(1 + width(b!.action) + width(b!.close));
+    }
+  });
+
   test("an action's label is a hit target on the first row", () => {
     const [b] = layoutToasts([toast(1, "Closed tab", 5000, "Undo")], area, 1);
     expect(b!.actionHit).not.toBeNull();

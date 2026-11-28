@@ -106,7 +106,8 @@ export function layoutToasts(toasts: Toast[], area: Rect, margin: number): Toast
     const close = CLOSE;
     const tail = action + close;
     const textMax = maxCols - 1 - width(tail);
-    const lines = wrap(t.text, Math.max(4, textMax), TOAST_MAX_LINES);
+    const wrapped = wrap(t.text, Math.max(4, textMax), TOAST_MAX_LINES);
+    const lines = wrapped.length ? wrapped : [""]; // blank text: still a toast (its action, its close mark)
     const cols = Math.min(maxCols, 1 + Math.max(...lines.map(width)) + width(tail));
     const rows = lines.length + 1;
     const row = bottom - rows + 1;
