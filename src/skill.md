@@ -29,7 +29,16 @@ termium kill agent                  # end a session you started
   an older termium is "already running (… no agent control)": exit 0
   without a URL, 1 with one (it can't be opened there).
 - The person can watch your session with `termium attach agent` in a
-  pane of their own.
+  pane of their own. Or show it to them yourself: inside tmux, herdr or
+  kitty, `termium ctl -s agent split right [URL]` (or `down`) opens a
+  split next to your pane that attaches to the session, and leaves the
+  focus where it was; a URL opens in a new tab shown there (`ctl tabs`
+  then lists it with `*`). Prints the host and the new pane (`--json`:
+  `{host, pane}`). Exit 1 where the terminal can't split (Ghostty,
+  WezTerm, kitty without remote control or outside its splits layout, tmux
+  with allow-passthrough off, no multiplexer); nothing is opened then: ask
+  the person to attach. A terminal already attached to that session is
+  detached by it (one terminal at a time).
 
 ## Driving a page: snapshot, act by id, wait, verify
 
@@ -64,6 +73,7 @@ it) loads a new document they're stale (exit 1): take a new snapshot.
 | `eval JS [TAB]` | run JavaScript in the page (promises awaited); prints JSON |
 | `wait load\|selector CSS\|text TEXT\|url PART [--gone]` | wait until it's there (or gone) |
 | `dialog accept\|dismiss [TEXT]` | answer an alert/confirm/prompt/"Leave page?" |
+| `split right\|down [URL]` | show the session in a new split of your tmux, herdr or kitty pane |
 
 Options: `--tab N` (`-t N`) for commands that act on a tab, `--json` for
 machine-readable output, `--timeout SEC` (default 30). Exit status: 0 done,

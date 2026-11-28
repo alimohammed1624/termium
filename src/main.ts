@@ -7,9 +7,10 @@
 
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { killSession, listSessions, runClient, runningSessions } from "./client";
+import { killSession, listSessions, runClient, runningSessions, sessionInfo } from "./client";
 import { runCtl, runDevtools, startSession } from "./ctl";
 import { SKILL } from "./skill";
+import { prepareSplit, type PreparedSplit, type SplitDir } from "./split";
 import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
@@ -34,6 +35,9 @@ const HELP = `termium ${VERSION}: a Chromium (Helium) browser in your terminal
 Usage:
   termium [options] [url]      attach to the session, starting it if needed
                                (a url opens in a new tab of a running session)
+  termium open [options] [url] --split right|down
+                               open it in a new split of the terminal termium runs in
+                               (tmux, herdr or kitty), next to the current pane
   termium attach [name]        attach to a running session
   termium ls                   list sessions
   termium kill [name]          end a session (stops its browser)
@@ -58,6 +62,8 @@ Options:
   --incognito           use a throwaway profile that is deleted when the session ends
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)
+  --split right|down    (open) show the session in a new split of the host terminal,
+                        right of or below this pane, instead of in this one
   --no-update-check     don't check GitHub for a newer termium, nor offer to update
                         (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help
@@ -77,6 +83,8 @@ interface Args extends LaunchOptions {
   /** The launch options given, by flag, for the "already running" message. */
   launchFlags: string[];
   noUpdateCheck: boolean;
+  /** --split: shown in a new split of the host terminal. */
+  split: SplitDir | null;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -85,6 +93,7 @@ function parseArgs(argv: string[]): Args {
     session: DEFAULT_SESSION,
     launchFlags: [],
     noUpdateCheck: false,
+    split: null,
     url: null,
     incognito: false,
     scale: null,
@@ -94,7 +103,8 @@ function parseArgs(argv: string[]): Args {
   let sessionGiven = false;
   let i = 0;
   const first = argv[0];
-  if (first === "attach") args.command = "attach";
+  if (first === "open") i = 1;
+  else if (first === "attach") args.command = "attach";
   else if (first === "ls" || first === "list") args.command = "ls";
   else if (first === "kill") args.command = "kill";
   else if (first === "__server") args.command = "server";
@@ -132,6 +142,12 @@ function parseArgs(argv: string[]): Args {
         sessionGiven = true;
         break;
       case "--no-update-check": args.noUpdateCheck = true; break;
+      case "--split": {
+        const d = value();
+        if (d !== "right" && d !== "down") fail(`--split goes right or down, not "${d}"`);
+        args.split = d;
+        break;
+      }
       // Older termiums (0.3.0 pre-releases) restarted with --restore; a
       // restart snapshot is reopened whenever one is waiting, so it means nothing now.
       case "--restore": break;
@@ -176,6 +192,7 @@ function parseArgs(argv: string[]): Args {
   }
   if (!validSessionName(args.session)) fail(`bad session name "${args.session}" (letters, digits, . _ -; up to 64)`);
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
+  if (args.split && args.command !== "open") fail(`--split only applies to termium open`);
   if (args.incognito && args.profile) fail("--incognito and --profile can't be used together");
   if (args.command !== "open" && args.command !== "server" && args.command !== "start" && args.launchFlags.length) {
     fail(`${args.launchFlags.join(", ")} only apply when starting a session`);
@@ -269,10 +286,49 @@ async function update(): Promise<never> {
   process.exit(0);
 }
 
+/**
+ * `termium open --split DIR`: starts the session if needed (as `termium
+ * start` does, so its errors show here), then asks the host terminal for a
+ * split next to this pane that attaches to it.
+ */
+async function openSplit(args: Args): Promise<never> {
+  const cannot = (why: string): never => {
+    console.error(`termium: ${why}. Use termium's own splits instead (Ctrl+B v or -), or run termium attach${args.session === DEFAULT_SESSION ? "" : ` ${args.session}`} in a split of your own.`);
+    process.exit(1);
+  };
+  // The new pane runs this same termium without --split: it attaches to the
+  // session, starting it if needed, and a URL opens in a new tab shown there
+  // (as when a person runs it). Whatever goes wrong there stays on screen.
+  const pane = serverArgv({ ...args, url: null });
+  pane.splice(pane.indexOf("__server"), 1);
+  // Given, if only to be refused by a running session (serverArgv leaves the default out).
+  if (args.launchFlags.includes("--search") && !pane.includes("--search")) pane.push("--search", args.search);
+  if (args.noUpdateCheck) pane.push("--no-update-check");
+  if (args.url) pane.push(args.url);
+  // Nothing is done unless the host can make the split.
+  let split: PreparedSplit;
+  try {
+    split = prepareSplit(args.split!, pane, true);
+  } catch (e: any) {
+    cannot(e?.message ?? String(e));
+  }
+  if (args.launchFlags.length && (await sessionInfo(args.session).catch(() => null))) {
+    console.error(`termium: session "${args.session}" is already running, and ${args.launchFlags.join(", ")} only apply when starting one`);
+    process.exit(1);
+  }
+  try {
+    const id = split!.make();
+    console.log(`opened a new ${split!.host} split (pane ${id}) for session "${args.session}"`);
+  } catch (e: any) {
+    cannot(e?.message ?? String(e));
+  }
+  process.exit(0);
+}
+
 async function main(): Promise<void> {
   // Agents' commands have options of their own.
   const argv = process.argv.slice(2);
-  if (argv[0] === "ctl") return runCtl(argv.slice(1));
+  if (argv[0] === "ctl") return runCtl(argv.slice(1), selfArgv());
   if (argv[0] === "devtools") return runDevtools(argv.slice(1));
   const args = parseArgs(argv);
   switch (args.command) {
@@ -295,6 +351,8 @@ async function main(): Promise<void> {
       return startSession({ name: args.session, url: args.url, launchFlags: args.launchFlags, serverArgv: serverArgv(args) });
     }
     case "open":
+      if (args.split) return openSplit(args);
+    // falls through
     case "attach": {
       // A restart's snapshot waiting for this session (a restart now, or
       // one that failed to start): unless other launch options are given,

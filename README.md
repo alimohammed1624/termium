@@ -81,6 +81,7 @@ termium -s temp --incognito   # ...or with a throwaway profile
 termium attach [name]    # attach to a running session
 termium ls               # list sessions (attached or detached, pages, profile)
 termium kill [name]      # end a session and its browser
+termium open example.com --split right   # in a new split of tmux, herdr or kitty
 ```
 
 - `Ctrl+B d` detaches: the terminal gets its shell back, the browser and
@@ -95,6 +96,13 @@ termium kill [name]      # end a session and its browser
 - Closing the terminal (or `kill`ing the `termium` in it) only detaches.
   If the session itself dies, an attached terminal gets its screen back
   with a message.
+- `--split right|down` asks the terminal termium runs in for a real split
+  next to the current pane, which runs termium there (attaching to the
+  session, or starting it); errors stay on screen in it. It works in
+  tmux, herdr and kitty (with remote control on, `allow_remote_control
+  yes`, in a tab with the splits layout). Ghostty and WezTerm can't be
+  asked yet: termium says so, and its own splits (`Ctrl+B v` / `-`) work
+  everywhere.
 - `--browser`, `--profile`, `--incognito`, `--scale` and `--search`
   apply when a session starts; given to a running one they're an error
   (start another with `-s NAME`).
@@ -524,6 +532,7 @@ python3 tests/lifecycle.py               # second instances, kill -9 recovery, b
 python3 tests/sessions.py                # detach, re-attach, takeover, ls/kill, dead servers
 python3 tests/agent.py                   # termium ctl / start / devtools / --skill, another DevTools client
 python3 tests/multiplexers.py /tmp/mux   # inside a private tmux server and herdr session
+python3 tests/host-splits.py /tmp/splits # open --split and ctl split in tmux and herdr
 python3 tests/update.py                  # update check and self-update, with a fake GitHub
 ```
 

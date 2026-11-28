@@ -12,6 +12,7 @@ import { EXIT, type CtlRequest } from "./agent";
 import { lockHolder } from "./browser";
 import { sessionInfo } from "./client";
 import type { Hello } from "./server";
+import { prepareSplit, splitArgv, type PreparedSplit, type SplitDir } from "./split";
 import { DEFAULT_SESSION, FrameReader, PROTOCOL, dial, jsonFrame, sessionPaths, sweepErrFiles, validSessionName } from "./session";
 
 export const CTL_HELP = `Usage: termium ctl [-s NAME] [--json] [--timeout SEC] COMMAND [ARGS]
@@ -44,6 +45,9 @@ ID is an element id from \`snapshot\`, like 3:142@2):
                                 wait until the page has loaded, or the element / text /
                                 address appears (--gone: disappears)
   dialog accept|dismiss [TEXT]  answer a JavaScript dialog (TEXT for a prompt)
+  split right|down [URL]        show the session to the person: a new split of the terminal
+                                this runs in (tmux, herdr or kitty) attaches to it; focus
+                                stays here. A URL opens in a new tab shown there
 
 Options:
   -s, --session NAME   the session (default: "${DEFAULT_SESSION}")
@@ -68,6 +72,8 @@ interface Parsed {
   out?: string;
   timeoutMs?: number;
   req: CtlRequest;
+  /** `split`: done here, not by the session. */
+  split?: SplitDir;
 }
 
 const num = (s: string, what: string): number => {
@@ -87,6 +93,7 @@ export function parseCtl(argv: string[]): Parsed {
   let json = false;
   let out: string | undefined;
   let timeoutMs: number | undefined;
+  let split: SplitDir | undefined;
   const flags = new Set<string>();
   let tab: number | undefined;
   let xy: [number, number] | undefined;
@@ -268,11 +275,21 @@ export function parseCtl(argv: string[]): Parsed {
       maxArgs(0);
       break;
     }
+    case "split": {
+      const dir = pos.shift();
+      if (dir !== "right" && dir !== "down") fail(`split goes right or down${dir === undefined ? "" : `, not "${dir}"`}`);
+      if (tab !== undefined) fail("--tab doesn't apply to split");
+      split = dir;
+      if (pos.length) req.url = pos.shift();
+      if (req.url?.startsWith("-")) fail(`split's URL can't start with -`);
+      maxArgs(0);
+      break;
+    }
     default:
       fail(`unknown ctl command "${cmd}" (see termium ctl --help)`);
   }
   req.timeoutMs = timeoutMs;
-  return { session, json, out, timeoutMs, req };
+  return { session, json, out, timeoutMs, req, ...(split ? { split } : {}) };
 }
 
 /** Sends one request to session `name`; exits with a message if that can't be done. */
@@ -331,8 +348,9 @@ export async function request(name: string, req: CtlRequest, waitMs = (req.timeo
   });
 }
 
-export async function runCtl(argv: string[]): Promise<never> {
+export async function runCtl(argv: string[], self: string[]): Promise<never> {
   const p = parseCtl(argv);
+  if (p.split) return ctlSplit(p, self);
   const reply = await request(p.session, p.req);
   if (!reply.ok) {
     if (p.json) console.log(JSON.stringify({ ok: false, error: reply.error, code: reply.code }));
@@ -373,6 +391,31 @@ export async function runCtl(argv: string[]): Promise<never> {
     process.exit(0);
   }
   console.log(human(p.req, r));
+  process.exit(0);
+}
+
+/** `ctl split DIR [URL]`: a split of the host terminal attaches to the session. */
+async function ctlSplit(p: Parsed, self: string[]): Promise<never> {
+  const cannot = (why: string): never =>
+    fail(`${why}; the person can run termium attach ${p.session} in a pane of their own, or use termium's own splits (Ctrl+B v or -)`, EXIT.failed);
+  // Whether the host can split, before anything is done.
+  let split: PreparedSplit;
+  try {
+    split = prepareSplit(p.split!, splitArgv(self, p.session, p.req.url ?? null), false);
+  } catch (e: any) {
+    cannot(e?.message ?? String(e));
+  }
+  // The session must be running (and take agent commands): exits 3 if not.
+  const r = await request(p.session, { cmd: "tabs", timeoutMs: p.timeoutMs });
+  if (!r.ok) fail(String(r.error ?? "failed"), Number(r.code) || EXIT.failed);
+  let pane = "";
+  try {
+    pane = split!.make();
+  } catch (e: any) {
+    cannot(e?.message ?? String(e));
+  }
+  if (p.json) console.log(JSON.stringify({ host: split!.host, pane }));
+  else console.log(`opened a new ${split!.host} split (pane ${pane}) for session "${p.session}"${p.req.url ? `, opening ${p.req.url} in a new tab there` : ""}`);
   process.exit(0);
 }
 
