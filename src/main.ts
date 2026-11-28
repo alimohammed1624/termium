@@ -192,7 +192,7 @@ function parseArgs(argv: string[]): Args {
   }
   if (!validSessionName(args.session)) fail(`bad session name "${args.session}" (letters, digits, . _ -; up to 64)`);
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
-  const terminal = args.command === "open" || args.command === "attach" || args.command === "update";
+  const terminal = args.command === "open" || args.command === "attach";
   if (terminal && !args.leaderFlag && process.env.TERMIUM_LEADER) {
     const p = parseLeader(process.env.TERMIUM_LEADER);
     if ("error" in p) fail(`TERMIUM_LEADER: ${p.error}`);

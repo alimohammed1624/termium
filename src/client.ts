@@ -32,7 +32,7 @@ import {
   graphicsDir,
   sweepGraphicsFiles,
 } from "./session";
-import { chooseLeader, hostPrefixes } from "./leader";
+import { DEFAULT_LEADER, chooseLeader, hostPrefixes } from "./leader";
 import { drained, enterTerminal, out, queryCapabilities, querySizes, restoreTerminal, setTmuxPassthrough } from "./terminal";
 
 export interface ClientOptions {
@@ -419,7 +419,9 @@ export async function runClient(o: ClientOptions): Promise<void> {
   // not trap the terminal: the keys that leave (the leader then d, Ctrl+Q,
   // Ctrl+C) ask it for a sign of life, and without one the terminal is let go.
   let afterLeader = false;
-  const leaderKey = leader === "ctrl+space" ? " " : leader.slice("ctrl+".length);
+  const keyOf = (combo: string) => (combo === "ctrl+space" ? " " : combo.slice("ctrl+".length));
+  // The session's word for it once it answers (one older than leaders keeps Ctrl+B).
+  let leaderKey = keyOf(leader);
   let pingTimer: ReturnType<typeof setTimeout> | null = null;
   const unresponsive = () =>
     `termium: session "${o.name}" isn't responding${serverPid ? ` (pid ${serverPid})` : ""}; detached. ` +
@@ -850,6 +852,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     if (m?.t === "welcome") {
       welcomed = true;
       serverPid = Number(m.pid) || 0;
+      leaderKey = keyOf(typeof m.leader === "string" ? m.leader : DEFAULT_LEADER);
       // This terminal's termium is older than the session's (another copy was updated): say so on leaving.
       if (o.updateCheck && typeof m.version === "string" && isNewer(m.version, o.version)) {
         legacyNote =

@@ -78,10 +78,8 @@ function herdrPrefix(env: NodeJS.ProcessEnv): string[] {
   const path = env.HERDR_CONFIG_PATH || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config"), "herdr", "config.toml");
   try {
     const prefix = (Bun.TOML.parse(readFileSync(path, "utf8")) as { keys?: { prefix?: unknown } }).keys?.prefix;
-    if (typeof prefix === "string") {
-      const k = hostKey(prefix);
-      return k ? [k] : [];
-    }
+    // (herdr takes an empty or "none" prefix for a bad one: its default.)
+    if (typeof prefix === "string") return [hostKey(prefix) ?? DEFAULT_LEADER];
   } catch {}
   return [DEFAULT_LEADER];
 }

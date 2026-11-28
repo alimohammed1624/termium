@@ -264,7 +264,7 @@ termium update           # update to it (a release binary only)
   address line, "termium X is available (you have Y) · Ctrl+B U", shown
   while nothing else is open there (no dialog, address editing, help).
   The notice never takes the keyboard: everything you type or paste goes
-  to the page as usual. To answer it, press `Ctrl+B U` or click the notice
+  to the page as usual. To answer it, press the leader then `U` (`Ctrl+B U`) or click the notice
   or the badge: a box opens with `u` update now, `l` later (not offered
   again in this session unless a newer release comes out; asked again when
   the session restarts) and `s` skip this version (never offered again;
@@ -294,7 +294,7 @@ termium update           # update to it (a release binary only)
   their addresses, logins survive in the profile (not with
   `--incognito`), anything typed into a page and not saved is lost, so if
   a page may have unsaved changes (or a download is running) termium asks
-  first, as `Ctrl+Q` does. `l` leaves it for later (`Ctrl+B U` offers it
+  first, as `Ctrl+Q` does. `l` leaves it for later (the leader then `U` offers it
   again; the badge shows `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
   (from the new binary) offers the same restart, as a notice, and the
   restart runs that newer binary whichever terminal presses `r` (once it's

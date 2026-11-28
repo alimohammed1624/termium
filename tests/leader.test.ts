@@ -64,6 +64,12 @@ describe("hostPrefixes: herdr", () => {
     expect(hosts).toEqual([{ host: "herdr", keys: ["f12"] }]);
     expect(chooseLeader(undefined, hosts)).toBe("ctrl+b");
   });
+  test("an empty or \"none\" prefix is herdr's default (herdr falls back to it)", () => {
+    for (const v of ["", "none"]) {
+      writeFileSync(join(dir, "cfg", "herdr", "config.toml"), `[keys]\nprefix = "${v}"\n`);
+      expect(hostPrefixes(env({ HERDR_ENV: "1" }))).toEqual([{ host: "herdr", keys: ["ctrl+b"] }]);
+    }
+  });
   test("a config it can't read counts as herdr's default", () => {
     writeFileSync(join(dir, "cfg", "herdr", "config.toml"), "[keys\nprefix=");
     expect(hostPrefixes(env({ HERDR_ENV: "1" }))).toEqual([{ host: "herdr", keys: ["ctrl+b"] }]);

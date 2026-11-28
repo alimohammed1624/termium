@@ -43,7 +43,7 @@ import {
   type Restore,
 } from "./session";
 import { setSink } from "./terminal";
-import { parseLeader } from "./leader";
+import { DEFAULT_LEADER, parseLeader } from "./leader";
 import {
   MAX_AGE_MS,
   cachePath,
@@ -823,7 +823,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       client = c;
       everAttached = true;
       lastHello = h;
-      c.send({ t: "welcome", pid: process.pid, version });
+      c.send({ t: "welcome", pid: process.pid, version, leader: terminalOf(h).leader ?? DEFAULT_LEADER });
       setSink((data, done) => c.output(data, done));
       log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders} via=${h.via} leader=${h.leader ?? "-"}`);
       // Its own server (it opened the URL at start) or another one (a client
