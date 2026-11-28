@@ -6,6 +6,13 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Without Helium, termium finds and uses Chromium, Brave, Google Chrome or
+  Microsoft Edge (in that order) instead of refusing to start. A new
+  profile started on one of them says Helium wasn't found, so there is no
+  content blocker; a profile whose browser changed says logins may need
+  redoing.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added
