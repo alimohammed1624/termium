@@ -258,7 +258,7 @@ class Agent {
       case "picked":
         return req.wait ? this.waitPick(this.app.pickSeq) : this.lastPick();
       case "pick":
-        return this.pick(timeoutMs);
+        return this.pick();
       default:
         throw new CtlError(`unknown command "${req.cmd}"`, EXIT.usage);
     }
@@ -443,10 +443,15 @@ class Agent {
   }
 
   /** Turns pick mode on in the attached terminal and waits for the person's pick. */
-  private async pick(timeoutMs: number): Promise<unknown> {
+  private async pick(): Promise<unknown> {
     if (!this.app.attached) throw new CtlError("no terminal is attached to this session: nobody to pick an element");
-    const already = this.app.picking();
-    if (!already) await this.personFree(null, timeoutMs, "pick mode not turned on");
+    // While the person is busy, wait; but pick mode they turn on meanwhile is joined.
+    while (!this.app.picking() && this.app.humanBusy()) {
+      if (Date.now() >= this.deadline - 100) {
+        throw new CtlError("the person at the terminal is busy (typing, or editing the address, a prompt or help); pick mode not turned on. Try again", EXIT.timeout);
+      }
+      await Bun.sleep(100);
+    }
     if (!this.app.picking()) {
       if (!this.app.startPick(true)) throw new CtlError("couldn't turn pick mode on (is a page open?)");
       this.note("pick an element (Esc cancels)");

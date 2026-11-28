@@ -243,6 +243,31 @@ try:
     out, err = w.communicate(timeout=30)
     check("cancelled ctl pick isn't answered by a later pick", w.returncode == 1 and "cancelled" in err, (w.returncode, out, err))
 
+    # 15b. A non-editable widget inside a rich-text editor: as typed (nothing of it handed out).
+    since = len(t.raw)
+    pick_on(t); t.click(*center("#widget")); time.sleep(0.8)
+    r = ctl("picked", "--json")
+    clip = "\n".join(clipboards(t, since))
+    check("widget inside an editable: no content", json.loads(r.stdout).get("tag") == "span" and "widget-secret" not in r.stdout
+          and "widget-secret" not in clip, (r.stdout, clip))
+
+    # 15c. A scrolled page: what's under the pointer is picked (and outlined).
+    js("document.getElementById('far').scrollIntoView({block: 'center'})"); time.sleep(0.5)
+    pick_on(t); t.click(*center("#far")); time.sleep(0.8)
+    q = json.loads(ctl("picked", "--json").stdout or "{}")
+    check("pick on a scrolled page", q.get("selector") == "#far", q)
+    r = ctl("click", q.get("ref", "x"))
+    check("...and ctl click on it", r.returncode == 0 and js("window.farClicks") == 1, r.stderr)
+    js("scrollTo(0, 0)"); time.sleep(0.3)
+
+    # 15d. ctl pick waiting for a busy person joins the pick mode they turn on.
+    t.key("ctrl+l"); time.sleep(0.3)
+    w = ctl_bg("pick", "--timeout", "20"); time.sleep(1.0)
+    t.key("escape"); t.key("ctrl+b"); t.key("g"); time.sleep(0.3)
+    t.click(*center("#big"))
+    out, err = w.communicate(timeout=30)
+    check("ctl pick joins pick mode the person turned on while it waited", w.returncode == 0 and '"Big button"' in out, (w.returncode, out, err))
+
     # 16. A new document: picked says stale, and the id is refused.
     ref = json.loads(ctl("picked", "--json").stdout)["ref"]
     ctl("open", URL)

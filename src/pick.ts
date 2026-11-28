@@ -78,8 +78,11 @@ const DESCRIBE = `function () {
   // the page: not in the HTML (inputs lose their value, textareas and
   // editables their content, also inside the element), nor in the text.
   const FIELDS = "input, textarea, [contenteditable]:not([contenteditable=false])";
-  // (Inside an editable, all of it was typed: only the tag.)
-  const clean = el.cloneNode(!el.isContentEditable);
+  // Inside an editable (also a contenteditable=false part of one, a rich-text
+  // widget), all of it may have been typed: only the tag, no text, no name.
+  const EDITABLE = "[contenteditable]:not([contenteditable=false])";
+  const inEditable = el.isContentEditable || !!(el.parentElement && el.parentElement.closest(EDITABLE));
+  const clean = el.cloneNode(!inEditable);
   for (const f of [clean, ...clean.querySelectorAll(FIELDS)]) {
     if (!f.matches || !f.matches(FIELDS)) continue;
     if (f.localName === "input") f.removeAttribute("value");
@@ -87,7 +90,7 @@ const DESCRIBE = `function () {
   }
   const html = clean.outerHTML;
   let text = "";
-  if (el.isContentEditable || ["input", "textarea", "select"].includes(el.localName)) text = "";
+  if (inEditable || ["input", "textarea", "select"].includes(el.localName)) text = "";
   else if (el.querySelector(FIELDS)) {
     for (const s of clean.querySelectorAll("script, style, template, noscript")) s.remove();
     text = clean.textContent ?? "";
@@ -98,7 +101,7 @@ const DESCRIBE = `function () {
   const hasField = (n) => !!n && (n !== el || !el.matches(FIELDS)) &&
     (n.isContentEditable || n.matches(FIELDS) || [...n.querySelectorAll(FIELDS)].some((f) => f !== el));
   const by = (el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map((id) => (root.getElementById ? root.getElementById(id) : doc.getElementById(id)));
-  const nameSafe = ![el, ...by, ...(el.labels || [])].some(hasField);
+  const nameSafe = !inEditable && ![el, ...by, ...(el.labels || [])].some(hasField);
   return {
     nameSafe,
     tag: el.localName,
@@ -136,8 +139,13 @@ export class Picker {
 
   /** The node at (x, y), CSS px of the page's viewport (looking into same-process frames). */
   private async nodeAt(sid: string, x: number, y: number): Promise<number | null> {
+    // DOM.getNodeForLocation takes a point on the document: the viewport's scroll offset added.
+    const m = await this.cdp.send("Page.getLayoutMetrics", {}, sid).catch(() => null);
+    const v = m?.cssVisualViewport;
+    const dx = Number(v?.pageX) || 0;
+    const dy = Number(v?.pageY) || 0;
     const r = await this.cdp
-      .send("DOM.getNodeForLocation", { x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: false }, sid)
+      .send("DOM.getNodeForLocation", { x: Math.round(x + dx), y: Math.round(y + dy), includeUserAgentShadowDOM: false, ignorePointerEventsNone: false }, sid)
       .catch(() => null);
     return r?.backendNodeId ?? null;
   }
