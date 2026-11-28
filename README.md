@@ -98,10 +98,11 @@ termium open example.com --split right   # in a new split of tmux, herdr or kitt
   with a message.
 - `--split right|down` asks the terminal termium runs in for a real split
   next to the current pane, which runs termium there (attaching to the
-  session, or starting it); errors stay on screen in it. It works in tmux, herdr and kitty (with remote control on,
-  `allow_remote_control yes`, in a tab with the splits layout). Ghostty
-  and WezTerm can't be asked yet: termium says so, and its own splits
-  (`Ctrl+B v` / `-`) work everywhere.
+  session, or starting it); errors stay on screen in it. It works in
+  tmux, herdr and kitty (with remote control on, `allow_remote_control
+  yes`, in a tab with the splits layout). Ghostty and WezTerm can't be
+  asked yet: termium says so, and its own splits (`Ctrl+B v` / `-`) work
+  everywhere.
 - `--browser`, `--profile`, `--incognito`, `--scale` and `--search`
   apply when a session starts; given to a running one they're an error
   (start another with `-s NAME`).
