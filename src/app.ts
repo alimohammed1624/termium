@@ -2243,7 +2243,7 @@ export class App {
       const rowBg = cursor ? C.hover : active ? C.surface : C.panel;
       const style = cursor || active ? bg(rowBg) + fg(C.text) + BOLD : base;
       line(row, text, style);
-      this.zone(`space:${i}`, row, 1, fit(text, w), style, rowBg, w);
+      this.zone(`space:${space.id}`, row, 1, fit(text, w), style, rowBg, w);
       this.spaceHits.push({ row, index: i });
       row++;
     });
@@ -2300,7 +2300,7 @@ export class App {
       const style = i === active ? bg(C.background) + fg(C.text) + BOLD : bg(C.backdrop) + fg(C.dim);
       s += style + text + RESET + bg(C.backdrop) + fg(C.hover) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
-      this.zone(`tab:${i}`, 1, col + used, text, style, i === active ? C.background : C.backdrop, tw);
+      this.zone(`tab:${tabs[i]!.id}`, 1, col + used, text, style, i === active ? C.background : C.backdrop, tw);
       used += tw + 1;
     }
     if (last < first && items.length > 0) {
@@ -2309,7 +2309,7 @@ export class App {
       const text = truncate(items[active]!, room);
       s += bg(C.background) + fg(C.text) + BOLD + text + RESET + bg(C.backdrop);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
-      this.zone(`tab:${active}`, 1, col + used, text, bg(C.background) + fg(C.text) + BOLD, C.background);
+      this.zone(`tab:${tabs[active]!.id}`, 1, col + used, text, bg(C.background) + fg(C.text) + BOLD, C.background);
       used += width(text);
       last = active;
     }
@@ -2320,7 +2320,9 @@ export class App {
     }
     this.newTabHit = { start: col + used, end: col + used + width(plus) };
     s += bg(C.backdrop) + fg(C.muted) + plus;
-    this.zone("newtab", 1, col + used, plus, bg(C.backdrop) + fg(C.muted), C.backdrop);
+    // (The "+" can run a column into the update badge, which is drawn over it.)
+    const plusW = Math.max(0, Math.min(width(plus), w - used));
+    this.zone("newtab", 1, col + used, plus.slice(0, plusW), bg(C.backdrop) + fg(C.muted), C.backdrop);
     used += width(plus);
     const label = this.space ? ` ${this.space.name} ` : "";
     const pad = w - used;
@@ -3682,6 +3684,12 @@ export class App {
     const col = Math.floor(px / this.cellW) + 1;
     const row = Math.floor(py / this.cellH) + 1;
 
+    // Chrome under the pointer lights up, except while a button drags a page or a divider.
+    if (ev.action === "move") {
+      if (this.drag || this.mouseCapture) this.hover.leave();
+      else this.hover.move(col, row);
+    }
+
     if (this.mode === "help") {
       if (ev.action === "press") {
         this.mode = "normal";
@@ -3700,11 +3708,10 @@ export class App {
       if (ev.action === "release") {
         this.drag = null;
         this.relayoutAndRedraw();
+        this.hover.move(col, row);
       }
       return;
     }
-
-    if (ev.action === "move" && !this.mouseCapture) this.hover.move(col, row);
 
     if (ev.action === "move" && this.hoverPage && !this.mouseCapture &&
         ![...this.geom.values()].some((p) => p.item === this.hoverPage && inRect(p.content, col, row))) {
@@ -3715,6 +3722,7 @@ export class App {
     const captured = this.mouseCapture;
     if (captured && (ev.action === "move" || ev.action === "release")) {
       this.pageMouse(captured, ev, px, py);
+      if (!this.mouseCapture) this.hover.move(col, row);
       return;
     }
 

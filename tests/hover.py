@@ -125,6 +125,37 @@ try:
     time.sleep(0.3)
     check("tab hovered after the flash", bg(t, tab + 3, 1) == HOVER, bg(t, tab + 3, 1))
 
+    # Motion while an overlay (help) is up still counts: closing it lights what's under the pointer now.
+    move(t, tab + 3, 1)
+    t.key("ctrl+b"); t.key("question"); time.sleep(0.5)
+    move(t, 70, 20)
+    t.key("escape"); time.sleep(0.5)
+    check("after help, the old span isn't relit", bg(t, tab + 3, 1) == BACKGROUND, bg(t, tab + 3, 1))
+
+    # A drag on the page released over the "+": lit once the button is up.
+    plus = find(t, 1, " + ")  # (the back click went to the previous page: the tab's title changed)
+    t.mouse(700, 400, action="press")
+    for x in range(700, (plus - 1) * t.cell_w, -60):
+        t.mouse(x, 400 - (400 - 10) * (700 - x) // 700, action="drag")
+        time.sleep(0.01)
+    t.mouse(plus * t.cell_w, 10, action="drag")
+    time.sleep(0.2)
+    check("no hover while dragging a page", bg(t, plus + 1, 1) == BACKDROP, bg(t, plus + 1, 1))
+    t.mouse(plus * t.cell_w, 10, action="release")
+    time.sleep(0.25)
+    check("+ lit after the drag's release", bg(t, plus + 1, 1) == HOVER, bg(t, plus + 1, 1))
+
+    # A second tab; closing the tab that is flashing doesn't pass the flash on.
+    move(t, 70, 20)
+    t.key("ctrl+t"); time.sleep(0.5); t.type(URL); t.key("enter")
+    check("second tab", t.wait_for(lambda: " 2 " in t.line(1), 20))
+    t.wait_idle(1.0)
+    t.click_cell(tab + 3, 1)
+    time.sleep(0.03)
+    t.key("ctrl+w")
+    time.sleep(0.06)
+    check("the tab taking the closed one's place doesn't flash", bg(t, tab + 3, 1) != ACCENT, bg(t, tab + 3, 1))
+
     # A burst of motion over the page and chrome stays cheap.
     with t.lock:
         n = len(t.raw)
@@ -139,6 +170,8 @@ try:
     t.close()
 finally:
     srv.terminate()
+    # The session's own runtime dir means Term.close() leaves its server: stop it.
+    subprocess.run(MAIN + ["kill", "pr16-hover"], env={**os.environ, **ENV}, capture_output=True)
     shutil.rmtree(root, ignore_errors=True)
 
 print(f"\nscreenshots: {OUT}")
