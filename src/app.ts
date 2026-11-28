@@ -30,14 +30,17 @@ import {
   SYNC_START,
   deleteImage,
   drawImage,
+  drawImagePieces,
   out,
   placeholderCells,
   placeholderImageId,
+  placeholderSpan,
   setClipboard,
   transmitVirtual,
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { CONTEXT_PROBE, ClickAreas, Menu, around, type MenuEntry, type MenuStyle } from "./menu";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -267,11 +270,31 @@ const BROWSER_SHORTCUTS = new Set([
   "alt+shift+p", "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9",
 ]);
 
+/** Ctrl+B as a key, for what menus do in its name (Ctrl+B Ctrl+B sends it to the page). */
+const CTRL_B: KeyEvent = {
+  type: "key", key: "b", code: "KeyB", vk: 66, text: "", mods: { shift: false, alt: false, ctrl: true, meta: false },
+  event: "press", location: 0, legacy: false,
+};
+
+/** A plain letter key, for a click that does what that key does. */
+const letterKey = (k: string): KeyEvent => ({
+  ...CTRL_B, key: k, code: `Key${k.toUpperCase()}`, vk: k.toUpperCase().charCodeAt(0), text: k, mods: { ...CTRL_B.mods, ctrl: false },
+});
+
 /** While a page is blocked on a JavaScript dialog, only these make sense. */
 const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 
 /** The viewport of a page opened while no terminal is attached (until one is). */
 const DETACHED_VIEWPORT = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false, screenWidth: 1920, screenHeight: 1080 };
+
+const MENU_STYLE: MenuStyle = {
+  panel: bg(C.surface0) + fg(C.text),
+  active: bg(C.blue) + fg(C.crust),
+  key: fg(C.overlay),
+  disabled: fg(C.surface1),
+  separator: fg(C.surface1),
+  title: fg(C.mauve) + BOLD,
+};
 
 const SIDEBAR_W = 22;
 const TOP_ROWS = 2;
@@ -365,6 +388,19 @@ export class App {
   private navHits: { back: [number, number]; fwd: [number, number]; reload: [number, number]; url: [number, number] } | null = null;
   private spaceHits: { row: number; index: number }[] = [];
   private newSpaceRow = -1;
+  /** Clickable chrome registered as it's drawn (buttons, the × on tabs and panes...). */
+  private clicks = new ClickAreas();
+  /** An open context menu or dropdown: it has the mouse and keyboard until it closes. */
+  private menu: Menu | null = null;
+  /** The tab shown when the menu opened. */
+  private menuTab: Tab | undefined;
+  /** The tab under the pointer (it shows its ×), or -1. */
+  private tabHover = -1;
+  /** First tab shown when the tab bar was scrolled by hand (wheel, ‹ ›); null: keep the active tab in view. */
+  private tabScroll: number | null = null;
+  private tabRange = { first: 0, last: -1 };
+  /** A tab or space being dragged to a new place (pressed on it, button still down). */
+  private reorder: { kind: "tab"; tab: Tab } | { kind: "space"; space: Space } | null = null;
 
   private nextImage = 100;
   private nextTabId = 1;
@@ -812,6 +848,7 @@ export class App {
       this.cdp.send("Inspector.enable", {}, sid),
       this.ua ? this.cdp.send("Emulation.setUserAgentOverride", this.ua, sid) : null,
       this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: SELECT_POPUP, worldName: "termium", runImmediately: true }, sid),
+      this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: CONTEXT_PROBE, worldName: "termium", runImmediately: true }, sid),
       this.cdp.send("Page.setInterceptFileChooserDialog", { enabled: true }, sid),
       // Cross-site iframes and dedicated workers are separate targets.
       this.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sid),
@@ -983,6 +1020,9 @@ export class App {
   private onGone(page: Page | undefined): void {
     if (!page) return;
     this.clearForeign(page);
+    // An open menu may be about this page or its tab or space (redrawn away below).
+    this.menu = null;
+    this.phTiles.delete(page);
     if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
@@ -1531,6 +1571,9 @@ export class App {
    */
   private resetInput(): void {
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
+    this.menu = null;
+    this.reorder = null;
+    this.tabHover = -1;
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
     }
@@ -1567,6 +1610,7 @@ export class App {
     this.rows = rows;
     this.cellW = cellW;
     this.cellH = cellH;
+    this.menu = null; // placed for the old size
     if (this.started) {
       this.relayout();
       this.fullRedraw();
@@ -1591,6 +1635,8 @@ export class App {
 
   /** Recomputes pane geometry and fixes every page's viewport and screencast. */
   relayout(): void {
+    // A menu is about what was shown when it opened (a tab, its panes): another tab now, it goes.
+    if (this.menu && this.menuTab !== this.tab) this.menu = null;
     this.syncPrompt();
     this.noteShown();
     this.geom.clear();
@@ -2039,7 +2085,19 @@ export class App {
     if (this.nextImage > 0xfffffff0) this.nextImage = 1;
     // New picture placed first, old one deleted after, in one synchronized update.
     const replaces = page.imageIds[0] ?? null;
-    out(this.sync(drawImage(page.lastFrame, id, replaces, r.row, r.col, r.cols, r.rows) + this.takeStale() + this.cursorSeq()), done);
+    // An open menu over the pane: the picture goes around it (it would hide the menu's text).
+    const pieces = this.menu ? around(r, this.menu.rect) : [r];
+    const size = pieces.length === 1 && pieces[0] === r ? null : pngSize(page.lastFrame);
+    const draw = size
+      ? drawImagePieces(page.lastFrame, id, replaces, pieces.map((p) => {
+          const x = Math.round(((p.col - r.col) * size.w) / r.cols);
+          const y = Math.round(((p.row - r.row) * size.h) / r.rows);
+          const w = Math.max(1, Math.round(((p.col - r.col + p.cols) * size.w) / r.cols) - x);
+          const h = Math.max(1, Math.round(((p.row - r.row + p.rows) * size.h) / r.rows) - y);
+          return { ...p, x, y, w, h };
+        }))
+      : drawImage(page.lastFrame, id, replaces, r.row, r.col, r.cols, r.rows);
+    out(this.sync(draw + this.takeStale() + this.cursorSeq()), done);
     page.imageIds = [id];
     page.placed = { ...r };
     return true;
@@ -2095,6 +2153,9 @@ export class App {
       s += transmitVirtual(data, ids[i]!, cols, rows);
       if (moved) s += placeholderCells(this.phHigh, this.phColour(indexes[i]!), this.phRgb, t.row, t.col, cols, rows);
     });
+    this.phTiles.set(page, tiles.map((t, i) => ({ row: t.row, col: t.col, cols: t.cols, rows: t.rows, index: indexes[i]! })));
+    // Cells written just now over an open menu: the menu goes back on top.
+    if (moved && this.menu) s += this.drawMenu();
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;
     page.placed = { ...r };
@@ -2146,6 +2207,7 @@ export class App {
     // A dialog or file chooser hidden by another prompt comes back once that's done.
     this.syncPrompt();
     let s = "\x1b[?25l";
+    this.clicks.clear();
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
     if (mainCol > 1) s += this.drawSidebar();
@@ -2161,6 +2223,7 @@ export class App {
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
+    if (this.menu) s += this.drawMenu();
     out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
@@ -2172,6 +2235,14 @@ export class App {
     };
     const base = bg(C.mantle) + fg(C.subtext);
     line(1, " termium", bg(C.mantle) + fg(C.mauve) + BOLD);
+    // Hides the sidebar (Ctrl+B b); in the spaces picker it shows because of the picker: leaves it.
+    s += at(1, w - 2) + bg(C.mantle) + fg(C.overlay) + " « " + RESET;
+    this.clicks.add(1, w - 2, 3, (b) => {
+      if (b !== 0) return;
+      // Shown only for the spaces picker: putting the picker away hides it again.
+      if (this.mode === "spaces" && !this.sidebar) this.setMode("normal");
+      else this.chromeAction("b");
+    });
     line(2, " SPACES", base + "\x1b[2m");
     this.spaceHits = [];
     let row = 3;
@@ -2200,6 +2271,7 @@ export class App {
     for (; row < this.rows; row++) line(row, "", base);
     const hint = this.mode === "spaces" ? " j/k Enter Esc" : " ^B ? for keys";
     line(this.rows, hint, base + fg(C.overlay));
+    if (this.mode !== "spaces") this.clicks.add(this.rows, 1, width(hint) + 1, (b) => b === 0 && this.chromeAction("?"));
     return s;
   }
 
@@ -2216,7 +2288,9 @@ export class App {
       const title = pageTitle(tab.focused);
       const extra = pages.length > 1 ? ` ⊞${pages.length}` : "";
       const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
-      return ` ${i + 1} ${dot}${truncate(title, 22)}${extra} `;
+      // The active tab and the one under the pointer show a close button (its room is kept on every tab, so tabs don't shift).
+      const close = i === space!.active || i === this.tabHover ? "× " : "  ";
+      return ` ${i + 1} ${dot}${truncate(title, 22)}${extra} ${close}`;
     });
     const plus = " + ";
     // Scroll so the active tab is visible.
@@ -2225,6 +2299,9 @@ export class App {
     const total = (from: number, to: number) => items.slice(from, to + 1).reduce((a, t) => a + width(t) + 1, 0);
     const markers = (from: number) => (from > 0 ? 1 : 0) + (active < items.length - 1 ? 1 : 0);
     while (first < active && total(first, active) + width(plus) + markers(first) > w) first++;
+    // Scrolled by hand (wheel, ‹ ›): that, whether or not the active tab is in view.
+    if (this.tabScroll !== null && this.tabScrollFor === this.tab) first = Math.max(0, Math.min(this.tabScroll, items.length - 1));
+    else this.tabScroll = null;
 
     let s = at(1, col) + bg(C.crust);
     let used = 0;
@@ -2232,6 +2309,7 @@ export class App {
     if (first > 0) {
       // Tabs scrolled off to the left.
       s += fg(C.peach) + "‹";
+      this.clicks.add(1, col, 1, (b) => b === 0 && this.scrollTabs(-1));
       used += 1;
     }
     let last = first - 1;
@@ -2244,20 +2322,24 @@ export class App {
       const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
       s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
+      const x = col + used + tw - 2;
+      if (text.endsWith("× ")) this.clicks.add(1, x, 1, (b) => (b === 2 ? this.tabMenu(i, x) : this.closeTabAt(i)));
       used += tw + 1;
     }
     if (last < first && items.length > 0) {
-      // Not even the active tab fits whole: show it cut to the space there is.
-      const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
-      const text = truncate(items[active]!, room);
-      s += bg(C.base) + fg(C.text) + BOLD + text + RESET + bg(C.crust);
-      this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
+      // Not even the first tab shown (the active one, unless scrolled by hand) fits whole: cut it to the space there is.
+      const room = Math.max(1, w - used - width(plus) - (first < items.length - 1 ? 1 : 0));
+      const text = truncate(items[first]!, room);
+      s += (first === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay)) + text + RESET + bg(C.crust);
+      this.tabHits.push({ start: col + used, end: col + used + width(text), index: first });
       used += width(text);
-      last = active;
+      last = first;
     }
+    this.tabRange = { first, last };
     if (last < items.length - 1) {
       // Tabs that don't fit on the right.
       s += bg(C.crust) + fg(C.peach) + "›";
+      this.clicks.add(1, col + used, 1, (b) => b === 0 && this.scrollTabs(1));
       used += 1;
     }
     this.newTabHit = { start: col + used, end: col + used + width(plus) };
@@ -2297,30 +2379,56 @@ export class App {
     const rightW = Math.min(width(right), Math.max(0, notice.text ? w - 30 - modeW : Math.floor(w / 2)));
 
     const prompt = this.prompt;
+    // Clickable answers at the right end of the line, each with its key.
+    const buttons = (list: [label: string, yes: boolean][]) => {
+      const texts = list.map(([label]) => ` ${label} `);
+      const bw = texts.reduce((a, t) => a + width(t) + 1, 0);
+      return {
+        w: bw,
+        draw: (at0: number) => {
+          let x = at0;
+          let out = "";
+          list.forEach(([, yes], i) => {
+            out += bg(C.yellow) + " " + bg(C.base) + fg(C.text) + BOLD + texts[i] + RESET;
+            this.clicks.add(2, x + 1, width(texts[i]!), (b) => b === 0 && this.answerPrompt(yes));
+            x += width(texts[i]!) + 1;
+          });
+          return out;
+        },
+      };
+    };
     if (prompt && prompt.kind === "confirm") {
-      const text = fit(` ⚠ ${prompt.message}  [Enter] Yes  [Esc] No`, w - modeW);
+      const b = buttons([["Yes  Enter", true], ["No  Esc", false]]);
+      const text = fit(` ⚠ ${prompt.message}`, Math.max(0, w - modeW - b.w));
       this.promptCursor = null;
       this.navHits = null;
-      return s + bg(C.yellow) + fg(C.crust) + BOLD + text + RESET + bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
+      return s + bg(C.yellow) + fg(C.crust) + BOLD + text + RESET + b.draw(col + width(text)) +
+        bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
     }
     if (prompt && prompt.kind === "dialog") {
       const d = prompt.page.dialog;
       const label =
         d?.type === "prompt" ? `${d.message} ` :
-        d?.type === "confirm" ? `${d?.message}  [Enter] OK  [Esc] Cancel` :
-        d?.type === "beforeunload" ? "Leave this page? [Enter] Leave  [Esc] Stay" :
-        `${d?.message ?? ""}  [Enter] OK`;
-      const fieldW = w - modeW - 4;
-      let text = fit(` ⚠ ${label}`, d?.type === "prompt" ? Math.min(width(label) + 4, Math.floor(fieldW / 2)) : fieldW);
+        d?.type === "beforeunload" ? "Leave this page?" :
+        `${d?.message ?? ""}`;
+      const b = buttons(
+        d?.type === "beforeunload" ? [["Leave  Enter", true], ["Stay  Esc", false]] :
+        d?.type === "confirm" || d?.type === "prompt" ? [["OK  Enter", true], ["Cancel  Esc", false]] :
+        [["OK  Enter", true]],
+      );
+      const fieldW = w - modeW - 4 - b.w;
+      let text = fit(` ⚠ ${label}`, d?.type === "prompt" ? Math.min(width(label) + 4, Math.floor(fieldW / 2)) : Math.max(0, fieldW + 4));
       s += bg(C.yellow) + fg(C.crust) + BOLD + text + RESET;
       if (d?.type === "prompt") {
-        const rest = w - modeW - width(text);
+        const rest = w - modeW - width(text) - b.w;
         const v = prompt.edit.view(rest - 2);
         this.promptCursor = { row: 2, col: col + width(text) + 1 + v.cursorCol };
         s += bg(C.surface0) + fg(C.text) + " " + fit(v.text, rest - 1) + RESET;
+        s += b.draw(col + w - modeW - b.w);
       } else {
         this.promptCursor = null;
-        s += barBg + " ".repeat(Math.max(0, w - modeW - width(text)));
+        s += b.draw(col + width(text));
+        s += barBg + " ".repeat(Math.max(0, w - modeW - width(text) - b.w));
       }
       s += bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
       this.navHits = null;
@@ -2333,7 +2441,8 @@ export class App {
     const btnStyle = barBg + fg(C.subtext);
     s += btnStyle + back + fwd + reload + " ";
     const urlStart = col + width(back + fwd + reload) + 1;
-    const fieldW = Math.max(4, w - (urlStart - col) - rightW - modeW - 1);
+    const menuW = 3; // the ≡ button at the end
+    const fieldW = Math.max(4, w - (urlStart - col) - rightW - modeW - 1 - menuW);
     this.navHits = {
       back: [col, col + 3],
       fwd: [col + 3, col + 6],
@@ -2366,7 +2475,10 @@ export class App {
     if (rightW > 0) s += barBg + (notice.text ? notice.style : fg(C.peach)) + fit(right, rightW);
     if (modeW) s += bg(C.mauve) + fg(C.crust) + BOLD + mode;
     const used = (urlStart - col) + fieldW + 1 + rightW + modeW;
-    if (used < w) s += RESET + barBg + " ".repeat(w - used);
+    if (used < w - menuW) s += RESET + barBg + " ".repeat(w - menuW - used);
+    // Every action, with its keys.
+    s += RESET + at(2, col + w - menuW) + barBg + fg(C.text) + BOLD + " ≡ ";
+    this.clicks.add(2, col + w - menuW, menuW, (b) => b === 0 && this.openMainMenu(col + w - 1));
     return s + RESET;
   }
 
@@ -2390,7 +2502,14 @@ export class App {
       const title = pageTitle(page) === page.url.replace(/^https?:\/\//, "") ? "" : pageTitle(page);
       const flag = page.dialog ? "! " : page.loading ? "◌ " : "";
       const text = ` ${flag}${title}${title && host ? " — " : ""}${host}`;
-      s += at(g.header.row, g.header.col) + style + fit(text, g.header.cols) + RESET;
+      const { row, col, cols } = g.header;
+      if (cols < 8) {
+        s += at(row, col) + style + fit(text, cols) + RESET;
+        continue;
+      }
+      // A close button at the right end (right-click the header for more).
+      s += at(row, col) + style + fit(text, cols - 3) + " × " + RESET;
+      this.clicks.add(row, col + cols - 3, 3, (b) => (b === 2 ? this.paneMenu(page, col + cols - 3, row) : this.closePage(page)));
     }
     for (const sep of this.seps) {
       if (sep.split.dir !== "h") continue;
@@ -2852,7 +2971,12 @@ export class App {
     const wrapped = (style: string, text: string) => {
       for (const l of wrapWords(text, inner - 1)) add([style, ` ${l}`]);
     };
-    const choice = (k: string, what: string) => add([key, ` ${k.padEnd(5)}`], [txt, what]);
+    // Each choice's line is clickable: a click does what its key does.
+    const choiceAt = new Map<number, string>();
+    const choice = (k: string, what: string) => {
+      choiceAt.set(lines.length, k);
+      add([key, ` ${k.padEnd(5)}`], [txt, what]);
+    };
     const headline = () => add([ok, ` termium ${nv}`], [txt, ` is available (you have ${cur})`]);
     const byHand = () => {
       add([dim, " update by hand:"]);
@@ -2922,6 +3046,8 @@ export class App {
     s += at(top + 1, left) + panel + fit("", boxW);
     const shown = Math.max(0, boxH - 4);
     for (let i = 0; i < shown; i++) {
+      const k = choiceAt.get(i);
+      if (k) this.clicks.add(top + 2 + i, left, boxW, (b) => b === 0 && this.updateKey(letterKey(k), k));
       let line = "";
       let used = 0;
       for (const [style, text] of lines[i] ?? []) {
@@ -2934,6 +3060,13 @@ export class App {
     }
     s += at(top + boxH - 2, left) + panel + fit("", boxW);
     s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(`  ${footer}`, boxW) + RESET;
+    // Its keys ("u update · l later") click too: in a short terminal the choice lines may be cut.
+    let x = left + 2;
+    for (const seg of footer.split(" · ")) {
+      const k = /^([a-z]) /.exec(seg)?.[1];
+      if (k && x + width(seg) <= left + boxW) this.clicks.add(top + boxH - 1, x, width(seg), (b) => b === 0 && this.updateKey(letterKey(k), k));
+      x += width(seg) + 3;
+    }
     return s + RESET;
   }
 
@@ -2967,8 +3100,9 @@ export class App {
       case "mouse":
         return this.onMouse(ev);
       case "paste": {
-        // The update box steps aside: a paste always reaches the page.
+        // The update box (or a menu) steps aside: a paste always reaches the page.
         if (this.mode === "update") this.closeUpdate(false);
+        this.closeMenu();
         // Help, prefix, resize and space picking own the keyboard: a paste
         // then must not slip through to the page underneath.
         if (this.mode !== "normal") return;
@@ -3007,6 +3141,7 @@ export class App {
     }
     const combo = comboOf(ev);
 
+    if (this.menu) return this.menuKey(ev, combo);
     if (this.mode === "update") return this.updateKey(ev, combo);
     if (this.mode === "help") {
       this.mode = "normal";
@@ -3616,9 +3751,18 @@ export class App {
       return;
     }
     if (this.mode === "update") {
-      // A click anywhere puts the box away (unanswered; the notice stays).
-      if (ev.action === "press") this.closeUpdate(this.updateBox?.state === "failed");
+      // A click on a choice answers it; anywhere else puts the box away (unanswered; the notice stays).
+      const inBox = row > TOP_ROWS && col >= this.mainCol(); // (the chrome around it isn't clickable meanwhile)
+      if (ev.action === "press" && !(inBox && this.clicks.click(col, row, ev.button))) this.closeUpdate(this.updateBox?.state === "failed");
       return;
+    }
+
+    if (this.menu) return this.menuMouse(ev, col, row);
+
+    if (this.reorder) {
+      if (ev.action === "move") return this.reorderTo(col, row);
+      this.reorder = null;
+      if (ev.action === "release") return this.queueChrome();
     }
 
     if (this.drag) {
@@ -3642,6 +3786,16 @@ export class App {
       return;
     }
 
+    if (ev.action === "move") {
+      const hover = row === 1 ? (this.tabHits.find((h) => col >= h.start && col < h.end)?.index ?? -1) : -1;
+      if (hover !== this.tabHover) {
+        this.tabHover = hover;
+        this.queueChrome();
+      }
+    }
+    if (ev.action === "wheel" && row === 1 && col >= this.mainCol()) {
+      return this.scrollTabs(ev.wheel === "up" || ev.wheel === "left" ? -1 : 1);
+    }
     if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
 
     const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
@@ -3659,13 +3813,17 @@ export class App {
 
   /** Handles clicks on the sidebar, tab bar, URL bar, pane headers and separators. */
   private chromeClick(ev: MouseEvent, col: number, row: number): boolean {
+    if (this.clicks.click(col, row, ev.button)) return true;
     const mainCol = this.mainCol();
     if (col < mainCol) {
-      if (ev.button !== 0) return true;
       const hit = this.spaceHits.find((h) => h.row === row);
+      if (hit && ev.button === 2) this.spaceMenu(hit.index, col, row);
+      if (ev.button !== 0) return true;
       if (hit) {
         if (this.mode === "spaces") this.mode = "normal";
         this.switchSpace(hit.index);
+        const space = this.spaces[hit.index];
+        if (space) this.reorder = { kind: "space", space };
       } else if (row === this.newSpaceRow) this.newSpace();
       return true;
     }
@@ -3678,7 +3836,11 @@ export class App {
       if (hit) {
         const tab = this.space?.tabs[hit.index];
         if (ev.button === 1 && tab) this.closeTab(tab);
-        else if (ev.button === 0) this.selectTab(hit.index);
+        else if (ev.button === 2) this.tabMenu(hit.index, col);
+        else if (ev.button === 0) {
+          this.selectTab(hit.index);
+          if (tab) this.reorder = { kind: "tab", tab };
+        }
       } else if (this.newTabHit && col >= this.newTabHit.start && col < this.newTabHit.end && ev.button === 0) {
         this.newTab();
       }
@@ -3713,6 +3875,7 @@ export class App {
     const header = [...this.geom.values()].find((p) => p.header && inRect(p.header, col, row));
     if (header) {
       if (ev.button === 1) this.closePage(header.item);
+      else if (ev.button === 2) this.paneMenu(header.item, col, row);
       else this.focusPage(header.item);
       return true;
     }
@@ -3734,6 +3897,355 @@ export class App {
     // Keep dragging the same split after the relayout rebuilt the handles.
     const same = this.seps.find((s) => s.split === split);
     if (same) d.sep = same;
+  }
+
+  /** Moves the tab or space being dragged to where the pointer is (it may have closed meanwhile). */
+  private reorderTo(col: number, row: number): void {
+    const r = this.reorder!;
+    if (r.kind === "tab") {
+      const space = this.space;
+      const from = space ? space.tabs.indexOf(r.tab) : -1;
+      const own = this.tabHits.find((h) => h.index === from);
+      const hit = row === 1 ? this.tabHits.find((h) => col >= h.start && col < h.end) : undefined;
+      if (!space || from < 0 || !own || !hit || hit.index === from) return;
+      // Only once the pointer is over where the dragged tab would be after
+      // the swap: a wider neighbour isn't swapped straight back.
+      const w = own.end - own.start;
+      if (hit.index > from ? col < hit.end - w : col >= hit.start + w) return;
+      const active = space.tabs[space.active];
+      space.tabs.splice(from, 1);
+      space.tabs.splice(hit.index, 0, r.tab);
+      // The active tab stays active wherever it is now (another may have been selected mid-drag).
+      space.active = Math.max(0, space.tabs.indexOf(active!));
+    } else {
+      const from = this.spaces.indexOf(r.space);
+      const hit = col < this.mainCol() ? this.spaceHits.find((h) => h.row === row) : undefined;
+      if (from < 0 || !hit || hit.index === from) return;
+      const active = this.spaces[this.activeSpace];
+      this.spaces.splice(from, 1);
+      this.spaces.splice(hit.index, 0, r.space);
+      this.activeSpace = Math.max(0, this.spaces.indexOf(active!));
+    }
+    this.queueChrome();
+  }
+
+  // ---------------------------------------------------------- menus
+  //
+  // Right-click menus (tabs, spaces, pane headers, pages) and the ≡ menu:
+  // every action has a click, and each shows its keys.
+
+  /** Where each page's placeholder images are (tmux): see drawMenu. */
+  private phTiles = new Map<Page, (Rect & { index: number })[]>();
+
+  /**
+   * The open menu. With placeholders, a placeholder cell carries on from the
+   * one to its left: the cells right of the menu (on its rows) are written
+   * again, each row starting from an explicit column.
+   */
+  private drawMenu(): string {
+    const m = this.menu!;
+    let s = m.draw(MENU_STYLE);
+    if (!this.placeholders) return s;
+    const right = m.rect.col + m.rect.cols;
+    for (const page of this.geom.keys()) {
+      for (const t of this.phTiles.get(page) ?? []) {
+        if (right <= t.col || right >= t.col + t.cols) continue;
+        const colour = this.phColour(t.index);
+        for (let row = Math.max(t.row, m.rect.row); row < Math.min(t.row + t.rows, m.rect.row + m.rect.rows); row++) {
+          s += placeholderSpan(this.phHigh, colour, this.phRgb, row, right, row - t.row, right - t.col, t.col + t.cols - right);
+        }
+      }
+    }
+    return s;
+  }
+
+  private openMenu(entries: MenuEntry[], point: { col: number; row: number }, opts: { title?: string; align?: "left" | "right" } = {}): void {
+    if (!this.attached || this.covered()) return;
+    if (this.mode !== "normal") this.setMode("normal");
+    this.menu = new Menu(entries, point, { col: 1, row: 1, cols: this.cols, rows: this.rows }, opts);
+    this.menuTab = this.tab;
+    // Pages under it are drawn around it from now on.
+    this.fullRedraw();
+  }
+
+  private closeMenu(): void {
+    if (!this.menu) return;
+    this.menu = null;
+    this.fullRedraw();
+  }
+
+  private menuMouse(ev: MouseEvent, col: number, row: number): void {
+    const m = this.menu!;
+    if (ev.action === "move") {
+      const i = m.hit(col, row);
+      if (i !== m.active && m.contains(col, row)) {
+        m.active = i;
+        this.queueChrome();
+      }
+    } else if (ev.action === "wheel") {
+      m.scroll(ev.wheel === "up" ? -1 : ev.wheel === "down" ? 1 : 0);
+      this.queueChrome();
+    } else if (ev.action === "press") {
+      // A click outside only closes the menu.
+      const item = m.item(m.hit(col, row));
+      if (item) this.runMenuItem(item.run);
+      else if (!m.contains(col, row)) this.closeMenu();
+    }
+  }
+
+  /** Arrows, Enter and Escape work the menu; any other key closes it and does what it does. */
+  private menuKey(ev: KeyEvent, combo: string): void {
+    const r = this.menu!.key(combo);
+    if (r === "handled") return this.queueChrome();
+    if (r && r !== "close") return this.runMenuItem(r.run.run);
+    this.closeMenu();
+    if (r === null) this.onKey(ev);
+  }
+
+  private runMenuItem(run: () => void): void {
+    this.closeMenu();
+    run();
+    this.queueChrome();
+  }
+
+  /** What Ctrl+B then `combo` does, from a button or menu. */
+  private chromeAction(combo: string): void {
+    if (this.mode !== "normal") this.setMode("normal");
+    this.prefixAction(combo, CTRL_B);
+    this.queueChrome();
+  }
+
+  /** What the shortcut `combo` does, from a button or menu. */
+  private shortcutAction(combo: string): void {
+    if (this.mode !== "normal") this.setMode("normal");
+    this.globalShortcut(combo);
+    this.queueChrome();
+  }
+
+  /** The ≡ menu: every action in the keys help, with its keys. */
+  private openMainMenu(rightCol: number): void {
+    const tab = this.tab;
+    const multi = !!tab && leaves(tab.root).length > 1;
+    const page = this.focused;
+    const key = (label: string, keys: string, combo: string, disabled = false): MenuEntry =>
+      ({ label, key: keys, disabled, run: () => this.shortcutAction(combo) });
+    const prefix = (label: string, keys: string, combo: string, disabled = false): MenuEntry =>
+      ({ label, key: keys, disabled, run: () => this.chromeAction(combo) });
+    this.openMenu([
+      key("Edit address", "Ctrl+L", "ctrl+l", !page),
+      key("Back", "Alt+←", "alt+arrowleft", !page),
+      key("Forward", "Alt+→", "alt+arrowright", !page),
+      key("Reload", "Ctrl+R", "ctrl+r", !page),
+      key("Hard reload", "Ctrl+Shift+R", "ctrl+shift+r", !page),
+      { label: "Copy selection", key: "Ctrl+C", disabled: !page, run: () => page && void this.copySelection(page) },
+      { label: "Copy page address", disabled: !page, run: () => page && this.copyText(page.url, "address") },
+      "-",
+      key("New tab", "Ctrl+T", "ctrl+t"),
+      prefix("Next tab", "^B n", "n"),
+      prefix("Previous tab", "^B p", "p"),
+      prefix("Close tab", "^B X", "shift+x", !tab),
+      "-",
+      prefix("Split right", "^B v", "v", !page),
+      prefix("Split down", "^B -", "-", !page),
+      prefix(tab?.zoomed ? "Unzoom pane" : "Zoom pane", "^B z", "z", !multi),
+      prefix("Resize panes", "^B r", "r", !multi),
+      key("Close pane", "Ctrl+W", "ctrl+w", !page),
+      "-",
+      key("Zoom in", "Alt+=", "alt+="),
+      key("Zoom out", "Alt+-", "alt+-"),
+      key("Actual size", "Alt+0", "alt+0"),
+      "-",
+      prefix("Spaces…", "^B w", "w"),
+      prefix("New space", "^B N", "shift+n"),
+      prefix("Rename space", "^B W", "shift+w"),
+      prefix("Close space", "^B D", "shift+d"),
+      prefix(this.sidebar ? "Hide sidebar" : "Show sidebar", "^B b", "b"),
+      "-",
+      prefix("Send Ctrl+B to the page", "^B ^B", "ctrl+b", !page),
+      prefix("Update termium", "^B U", "shift+u"),
+      prefix("Keyboard shortcuts", "^B ?", "?"),
+      prefix("Detach", "^B d", "d"),
+      key("Quit", "Ctrl+Q", "ctrl+q"),
+    ], { col: rightCol, row: 3 }, { align: "right", title: "termium" });
+  }
+
+  /** Right-click on a tab (it's selected first, as what its actions act on). */
+  private tabMenu(i: number, col: number): void {
+    const space = this.space;
+    const tab = space?.tabs[i];
+    if (!space || !tab) return;
+    this.selectTab(i);
+    // The tab may be gone by the time an item is chosen (closed by an agent, its page crashed...).
+    const live = (run: () => void) => () => {
+      if (this.locateTab(tab)) run();
+    };
+    const url = tab.focused.url.includes(MARKER) ? undefined : tab.focused.url;
+    this.openMenu([
+      { label: "Reload", key: "Ctrl+R", run: live(() => this.reload(tab.focused)) },
+      { label: "Duplicate", run: live(() => this.newTab(url)) },
+      { label: "New tab", key: "Ctrl+T", run: () => this.newTab() },
+      "-",
+      { label: "Split right", key: "^B v", run: live(() => this.chromeAction("v")) },
+      { label: "Split down", key: "^B -", run: live(() => this.chromeAction("-")) },
+      "-",
+      ...this.spaces.filter((s) => s !== space).map((s): MenuEntry => ({ label: `Move to ${s.name}`, run: live(() => this.moveTab(tab, s)) })),
+      { label: "Move to a new space", disabled: space.tabs.length < 2, run: live(() => this.moveTab(tab, null)) },
+      "-",
+      { label: "Close tab", key: "^B X", run: live(() => this.closeTab(tab)) },
+      {
+        label: "Close other tabs",
+        disabled: space.tabs.length < 2,
+        run: live(() => void this.closeGroup(space.tabs.filter((t) => t !== tab).flatMap((t) => leaves(t.root)), "space")),
+      },
+    ], { col, row: 2 }, { title: truncate(pageTitle(tab.focused), 30) });
+  }
+
+  /** Right-click on a space in the sidebar (it's switched to first). */
+  private spaceMenu(i: number, col: number, row: number): void {
+    if (this.mode === "spaces") this.setMode("normal");
+    this.switchSpace(i);
+    this.openMenu([
+      { label: "New tab", key: "Ctrl+T", run: () => this.newTab() },
+      { label: "Rename space", key: "^B W", run: () => this.chromeAction("shift+w") },
+      { label: "Close space", key: "^B D", run: () => this.chromeAction("shift+d") },
+      "-",
+      { label: "New space", key: "^B N", run: () => this.chromeAction("shift+n") },
+    ], { col, row: row + 1 }, { title: this.spaces[i]?.name });
+  }
+
+  /** Right-click on a pane's header. */
+  private paneMenu(page: Page, col: number, row: number): void {
+    this.focusPage(page);
+    const tab = this.tab;
+    // On its pane, whichever pane has focus by then (an agent may have moved it).
+    const live = (run: () => void) => () => {
+      if (!this.pages.has(page.sessionId) || !this.tab || !leaves(this.tab.root).includes(page)) return;
+      this.focusPage(page);
+      run();
+    };
+    this.openMenu([
+      { label: "Split right", key: "^B v", run: live(() => this.chromeAction("v")) },
+      { label: "Split down", key: "^B -", run: live(() => this.chromeAction("-")) },
+      { label: tab?.zoomed ? "Unzoom pane" : "Zoom pane", key: "^B z", run: live(() => this.chromeAction("z")) },
+      "-",
+      { label: "Close pane", key: "Ctrl+W", run: live(() => this.closePage(page)) },
+    ], { col, row: row + 1 }, { title: truncate(pageTitle(page), 30) });
+  }
+
+  private menuSeq = 0;
+
+  /**
+   * After a right-click reached a page: unless the page showed its own menu
+   * (it cancelled `contextmenu`), termium shows one: back, forward, reload,
+   * copy (the link, the selection, the address). Every frame is asked
+   * (iframes, cross-site ones included); each answer is taken once.
+   */
+  private async pageMenu(page: Page, released: Promise<unknown>, col: number, row: number): Promise<void> {
+    const seq = ++this.menuSeq;
+    // (Linux fires contextmenu as the button goes down: from the press on.)
+    const pressed = this.lastClick.time - 20;
+    const t = this.ticket();
+    await released;
+    // The probe notes the click once every listener has run (a timer after it).
+    await Bun.sleep(40);
+    type Info = { at: number; prevented: boolean; link: string; selection: boolean };
+    const sessions = [page.sessionId, ...[...this.frameOwner].filter(([, p]) => p === page).map(([sid]) => sid)];
+    const ask = async (sid: string): Promise<Info[]> => {
+      const frames: string[] = [];
+      const walk = (n: any) => {
+        frames.push(n.frame.id);
+        for (const c of n.childFrames ?? []) walk(c);
+      };
+      walk((await this.cdp.send("Page.getFrameTree", {}, sid)).frameTree);
+      return Promise.all(frames.map(async (frameId) => {
+        // The world the probe runs in (same name: the same world, not a new one).
+        const { executionContextId } = await this.cdp.send("Page.createIsolatedWorld", { frameId, worldName: "termium" }, sid);
+        const r = await this.cdp.send("Runtime.evaluate", {
+          expression: "window.__termiumContext ? window.__termiumContext() : null",
+          contextId: executionContextId,
+          returnByValue: true,
+        }, sid);
+        return r?.result?.value as Info;
+      }).map((p) => p.catch(() => null))).then((all) => all.filter((i): i is Info => !!i));
+    };
+    const found = (await Promise.all(sessions.map((sid) => ask(sid).catch(() => [])))).flat();
+    // Older answers (a right-click termium didn't send, an agent's) aren't about this one.
+    const info = found.filter((i) => i.at >= pressed).sort((a, b) => b.at - a.at)[0];
+    if (!info || info.prevented || seq !== this.menuSeq || !t.valid() || this.menu || this.focused !== page || this.mouseButtons) return;
+    const live = (run: () => void) => () => {
+      if (this.pages.has(page.sessionId)) run();
+    };
+    const link = info.link;
+    this.openMenu([
+      { label: "Back", key: "Alt+←", run: live(() => void this.history(page, -1)) },
+      { label: "Forward", key: "Alt+→", run: live(() => void this.history(page, 1)) },
+      { label: "Reload", key: "Ctrl+R", run: live(() => this.reload(page)) },
+      "-",
+      ...(link
+        ? [
+            { label: "Open link in new tab", run: live(() => this.newTab(link)) },
+            { label: "Copy link address", run: live(() => this.copyText(link, "link")) },
+          ]
+        : []),
+      ...(info.selection ? [{ label: "Copy", key: "Ctrl+C", run: live(() => void this.copySelection(page)) }] : []),
+      { label: "Copy page address", run: live(() => this.copyText(page.url, "address")) },
+    ], { col, row });
+  }
+
+  private copyText(text: string, what: string): void {
+    out(setClipboard(text));
+    this.showToast(`Copied ${what}`, 1500);
+  }
+
+  /** Moves a tab to another space (null: a new one), and goes there. */
+  private moveTab(tab: Tab, to: Space | null): void {
+    const from = this.locateTab(tab);
+    if (!from || from === to) return;
+    if (!to) {
+      to = this.newSpaceModel();
+      this.spaces.push(to);
+    }
+    const i = from.tabs.indexOf(tab);
+    from.tabs.splice(i, 1);
+    from.recent = from.recent.filter((t) => t !== tab);
+    if (from.active > i) from.active--;
+    from.active = Math.max(0, Math.min(from.active, from.tabs.length - 1));
+    to.tabs.push(tab);
+    to.active = to.tabs.length - 1;
+    if (from.tabs.length === 0) this.spaces.splice(this.spaces.indexOf(from), 1);
+    this.activeSpace = this.spaces.indexOf(to);
+    this.prompt = null;
+    this.relayoutAndRedraw();
+  }
+
+  /** Scrolls the tab bar by one tab (wheel, ‹ ›), leaving the active tab as it is. */
+  private scrollTabs(delta: number): void {
+    const n = this.space?.tabs.length ?? 0;
+    const { first, last } = this.tabRange;
+    if ((delta > 0 && last >= n - 1) || (delta < 0 && first <= 0)) return;
+    this.tabScroll = Math.max(0, Math.min(n - 1, first + delta));
+    this.tabScrollFor = this.tab ?? null;
+    this.queueChrome();
+  }
+
+  private tabScrollFor: Tab | null = null;
+
+  private closeTabAt(i: number): void {
+    const tab = this.space?.tabs[i];
+    if (tab) this.closeTab(tab);
+  }
+
+  /** A click on a prompt's button: what Enter (yes) or Escape does. */
+  private answerPrompt(yes: boolean): void {
+    const p = this.prompt;
+    if (p?.kind === "confirm") {
+      this.prompt = null;
+      if (yes) p.onYes();
+      this.syncPrompt();
+      this.queueChrome();
+    } else if (p?.kind === "dialog") {
+      this.answerDialog(p.page, yes, yes && p.page.dialog?.type === "prompt" ? p.edit.text : "");
+    }
   }
 
   private pageMouse(page: Page, ev: MouseEvent, px: number, py: number): void {
@@ -3799,7 +4311,8 @@ export class App {
     } else {
       this.mouseButtons &= ~(bits[ev.button] ?? 0);
       if (this.mouseButtons === 0) this.mouseCapture = null;
-      void send({ type: "mouseReleased", x, y, button: name, buttons: this.mouseButtons, clickCount: this.lastClick.count, modifiers });
+      const sent = send({ type: "mouseReleased", x, y, button: name, buttons: this.mouseButtons, clickCount: this.lastClick.count, modifiers });
+      if (ev.button === 2) void this.pageMenu(page, sent, Math.floor(px / this.cellW) + 1, Math.floor(py / this.cellH) + 1);
     }
   }
 
@@ -4041,6 +4554,13 @@ export function frameFits(base64Png: string, css: { w: number; h: number }): boo
   // Each side is rounded once scaled, so the other, derived from it, can be
   // off by its ratio to that side, plus a couple of pixels.
   return Math.abs(h - (w * css.h) / css.w) <= 2 + css.h / css.w && Math.abs(w - (h * css.w) / css.h) <= 2 + css.w / css.h;
+}
+
+/** A PNG's size in pixels, from its header (null if it isn't one). */
+function pngSize(base64Png: string): { w: number; h: number } | null {
+  const head = Buffer.from(base64Png.slice(0, 44), "base64");
+  if (head.length < 24 || head.readUInt32BE(12) !== 0x49484452) return null; // "IHDR"
+  return { w: head.readUInt32BE(16), h: head.readUInt32BE(20) };
 }
 
 function sameSize<T extends { w: number; h: number; dsf?: number }>(a: T | null, b: T | null): boolean {

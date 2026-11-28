@@ -175,6 +175,32 @@ export function drawImage(
 }
 
 /**
+ * Like drawImage, but shows only some pieces of the picture: each piece is
+ * a cell rectangle and the part of the picture (in pixels) drawn there.
+ * Used to leave a hole for text drawn over a page (an open menu): text
+ * under a picture would be hidden.
+ */
+export function drawImagePieces(
+  base64Png: string,
+  id: number,
+  replaces: number | null,
+  pieces: { row: number; col: number; cols: number; rows: number; x: number; y: number; w: number; h: number }[],
+): string {
+  const parts: string[] = [];
+  for (let i = 0; i < base64Png.length; i += CHUNK) {
+    const chunk = base64Png.slice(i, i + CHUNK);
+    const more = i + CHUNK < base64Png.length ? 1 : 0;
+    parts.push(`${ESC}_G${i === 0 ? `a=t,f=100,i=${id},q=2,m=${more}` : `m=${more}`};${chunk}${ST}`);
+  }
+  pieces.forEach((p, k) => {
+    parts.push(`${ESC}[${p.row};${p.col}H`);
+    parts.push(`${ESC}_Ga=p,i=${id},p=${k + 1},q=2,C=1,c=${p.cols},r=${p.rows},x=${p.x},y=${p.y},w=${p.w},h=${p.h}${ST}`);
+  });
+  if (replaces !== null) parts.push(`${ESC}_Ga=d,d=I,i=${replaces},q=2${ST}`);
+  return parts.join("");
+}
+
+/**
  * Synchronized output (DECSET 2026): the terminal shows what comes between
  * these two at once, so a redraw never shows a cleared screen or a pane
  * whose old picture is gone and new one not yet there. Terminals without
@@ -258,6 +284,19 @@ export function transmitVirtual(base64Png: string, id: number, cols: number, row
     parts.push(`${ESC}_G${ctrl};${chunk}${ST}`);
   }
   return parts.join("");
+}
+
+/**
+ * Placeholder text for part of one row of an image: `n` cells at (row,
+ * col) showing its row `imgRow` from column `imgCol` on. The first cell
+ * carries all its marks, so it doesn't depend on the cell to its left (text
+ * drawn over the image's cells, a menu, breaks that chain).
+ */
+export function placeholderSpan(high: number, colour: number, rgb: boolean, row: number, col: number, imgRow: number, imgCol: number, n: number): string {
+  if (n <= 0 || imgRow >= PLACEHOLDER_MAX || imgCol >= PLACEHOLDER_MAX) return "";
+  const fg = rgb ? `38;2;${(colour >> 16) & 0xff};${(colour >> 8) & 0xff};${colour & 0xff}` : `38;5;${colour & 0xff}`;
+  const bare = "\u{10EEEE}".repeat(Math.max(0, Math.min(n, PLACEHOLDER_MAX - imgCol) - 1));
+  return `${ESC}[0m${ESC}[${fg}m${ESC}[${row};${col}H\u{10EEEE}${DIACRITICS[imgRow]}${DIACRITICS[imgCol]}${DIACRITICS[high & 0xff]}${bare}${ESC}[0m`;
 }
 
 /**
