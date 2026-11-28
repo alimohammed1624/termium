@@ -37,6 +37,7 @@ import {
   transmitVirtual,
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
+import { Favicons, IconLayer, siteColour } from "./favicon";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
@@ -348,6 +349,13 @@ export class App {
   private staleImages: number[] = [];
   /** Inside fullRedraw: one synchronized update around everything it draws. */
   private redrawing = false;
+  /** Site icons, and where they're placed in the tab bar and sidebar. */
+  private favicons: Favicons;
+  private icons = new IconLayer(() => {
+    const id = this.nextImage++;
+    if (this.nextImage > 0xfffffff0) this.nextImage = 1;
+    return id;
+  });
 
   private zoom = 1;
   sidebar = true;
@@ -393,7 +401,9 @@ export class App {
   constructor(
     private cdp: CDP,
     private opts: AppOptions,
-  ) {}
+  ) {
+    this.favicons = new Favicons(cdp, () => this.queueChrome());
+  }
 
   // ---------------------------------------------------------- startup
 
@@ -1098,7 +1108,10 @@ export class App {
     if (!page || frameId !== page.targetId) return;
     page.loading = loading;
     if (loading) page.crashed = false;
-    else void this.refreshInfo(page);
+    else {
+      void this.refreshInfo(page);
+      void this.favicons.refresh(page, this.cellW * 2, this.cellH);
+    }
     this.queueChrome();
   }
 
@@ -1112,6 +1125,8 @@ export class App {
       for (const info of targetInfos) {
         const page = this.byTarget.get(info.targetId);
         if (!page || (page.title === info.title && page.url === info.url)) continue;
+        // A script that changes the title may have changed the icon too (an unread count).
+        if (page.title !== info.title && !page.loading) void this.favicons.recheck(page, this.cellW * 2, this.cellH);
         page.title = info.title;
         page.url = info.url;
         changed = true;
@@ -1478,6 +1493,7 @@ export class App {
     this.phInUse.clear();
     this.phReleasing = [];
     this.staleImages = [];
+    this.icons.reset(); // (the previous terminal's)
     this.phRgb = !!t.rgbIds;
     this.phBase = Math.floor(Math.random() * 0xffff00);
     this.phNext = 1 + Math.floor(Math.random() * PLACEHOLDER_IDS);
@@ -2125,6 +2141,7 @@ export class App {
     // so nothing is ever deleted wholesale.
     const s = SYNC_START + RESET + this.takeStale();
     for (const page of this.pages.values()) page.placed = null;
+    this.staleImages.push(...this.icons.reset());
     out(s + "\x1b[2J");
     this.redrawing = true;
     try {
@@ -2148,9 +2165,13 @@ export class App {
     let s = "\x1b[?25l";
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
+    this.icons.begin();
     if (mainCol > 1) s += this.drawSidebar();
     s += this.drawTabBar(mainCol, mainW);
     s += this.drawUrlBar(mainCol, mainW);
+    const icons = this.icons.end();
+    s += RESET + icons.draw;
+    this.staleImages.push(...icons.stale);
     if (this.mode === "help") {
       out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
       return;
@@ -2167,8 +2188,8 @@ export class App {
   private drawSidebar(): string {
     let s = "";
     const w = SIDEBAR_W;
-    const line = (row: number, text: string, style: string) => {
-      s += at(row, 1) + style + fit(text, w) + RESET;
+    const line = (row: number, text: string, style: string, icon?: { page: Page; at: number }) => {
+      s += at(row, 1) + style + this.withIcon(fit(text, w), row, 1, style, icon) + RESET;
     };
     const base = bg(C.mantle) + fg(C.subtext);
     line(1, " termium", bg(C.mantle) + fg(C.mauve) + BOLD);
@@ -2184,14 +2205,19 @@ export class App {
       const cursor = this.mode === "spaces" && i === this.spaceCursor;
       const marker = cursor ? "▸" : active ? "●" : " ";
       const count = `${space.tabs.length}`;
-      const name = truncate(`${marker} ${i + 1} ${space.name}`, w - count.length - 2);
+      // The site of the space's current tab, before its name (the loading mark while it loads).
+      const page = space.tabs[space.active]?.focused;
+      const head = `${marker} ${i + 1} `;
+      const loading = !!page?.loading && hasSite(page);
+      const site = page && hasSite(page) && !loading ? page : null;
+      const name = truncate(`${head}${loading ? "◌ " : site ? "  " : ""}${space.name}`, w - count.length - 2);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
       const style = cursor
         ? bg(C.surface1) + fg(C.text) + BOLD
         : active
           ? bg(C.surface0) + fg(C.text) + BOLD
           : base;
-      line(row, text, style);
+      line(row, text, style, site ? { page: site, at: 1 + head.length } : undefined);
       this.spaceHits.push({ row, index: i });
       row++;
     });
@@ -2216,13 +2242,17 @@ export class App {
       const title = pageTitle(tab.focused);
       const extra = pages.length > 1 ? ` ⊞${pages.length}` : "";
       const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
-      return ` ${i + 1} ${dot}${truncate(title, 22)}${extra} `;
+      // The site's icon, unless a dialog or loading mark takes its place.
+      const head = ` ${i + 1} `;
+      const site = !dot && hasSite(tab.focused);
+      const text = `${head}${dot || (site ? "  " : "")}${truncate(title, 22)}${extra} `;
+      return { text, icon: site ? { page: tab.focused, at: head.length } : undefined };
     });
     const plus = " + ";
     // Scroll so the active tab is visible.
     let first = 0;
     const active = space?.active ?? 0;
-    const total = (from: number, to: number) => items.slice(from, to + 1).reduce((a, t) => a + width(t) + 1, 0);
+    const total = (from: number, to: number) => items.slice(from, to + 1).reduce((a, t) => a + width(t.text) + 1, 0);
     const markers = (from: number) => (from > 0 ? 1 : 0) + (active < items.length - 1 ? 1 : 0);
     while (first < active && total(first, active) + width(plus) + markers(first) > w) first++;
 
@@ -2236,21 +2266,22 @@ export class App {
     }
     let last = first - 1;
     for (let i = first; i < items.length; i++) {
-      const text = items[i]!;
+      const { text, icon } = items[i]!;
       const tw = width(text);
       const more = i < items.length - 1 ? 1 : 0; // room for a "›" if tabs follow
       if (used + tw + width(plus) + more > w) break;
       last = i;
       const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
-      s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
+      s += style + this.withIcon(text, 1, col + used, style, icon) + RESET + bg(C.crust) + fg(C.surface1) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
       used += tw + 1;
     }
     if (last < first && items.length > 0) {
       // Not even the active tab fits whole: show it cut to the space there is.
       const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
-      const text = truncate(items[active]!, room);
-      s += bg(C.base) + fg(C.text) + BOLD + text + RESET + bg(C.crust);
+      const text = truncate(items[active]!.text, room);
+      const style = bg(C.base) + fg(C.text) + BOLD;
+      s += style + this.withIcon(text, 1, col + used, style, items[active]!.icon) + RESET + bg(C.crust);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
       used += width(text);
       last = active;
@@ -2270,6 +2301,20 @@ export class App {
     }
     if (badge && bw) s += RESET + at(1, col + w) + badge.style + truncate(badge.text, bw);
     return s + RESET;
+  }
+
+  /**
+   * `text` (drawn from (row, col) in `style`) with the two cells at
+   * `icon.at` showing the page's site: its icon, or a dot in the site's
+   * colour (no icon, or no pictures through tmux).
+   */
+  private withIcon(text: string, row: number, col: number, style: string, icon?: { page: Page; at: number }): string {
+    if (!icon || width(text) < icon.at + 3) return text;
+    const png = this.placeholders ? null : this.favicons.icon(icon.page, icon.page.url, this.cellW * 2, this.cellH);
+    const cells = png
+      ? this.icons.cell(row, col + icon.at, 2, `${png.key} ${style}`, png.png)
+      : fg(siteColour(icon.page.url)) + "●" + style + " ";
+    return text.slice(0, icon.at) + cells + text.slice(icon.at + 2);
   }
 
   private modeLabel(): string {
@@ -3988,6 +4033,11 @@ function editCommands(ev: KeyEvent): string[] | undefined {
     case "y": return ["redo"];
   }
   return undefined;
+}
+
+/** A page of a site (not a new tab's blank page): its tab shows the site's icon. */
+function hasSite(page: Page): boolean {
+  return /^(https?|file):/i.test(page.url) && !page.url.includes(MARKER);
 }
 
 function hostOf(url: string): string {
