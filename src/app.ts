@@ -146,6 +146,8 @@ export interface AgentTab {
 
 interface Tab {
   id: number;
+  /** Its order in its space: tabs are in increasing `pos` (a closed tab keeps its own, to go back between the same ones). */
+  pos: number;
   root: Node<Page>;
   focused: Page;
   zoomed: boolean;
@@ -163,7 +165,7 @@ interface Space {
 /** A closed tab or space that can be reopened (see reopen). */
 type Closed =
   | { kind: "tab"; title: string; space: Space; tab: ClosedTab; toast?: number }
-  | { kind: "space"; title: string; space: Space; name: string; index: number; active: number; tabs: ClosedTab[]; toast?: number };
+  | { kind: "space"; title: string; space: Space; active: number; tabs: ClosedTab[]; toast?: number };
 
 type Placement =
   | { kind: "tab"; space: Space; index: number; editUrl: boolean; url?: string; background?: boolean; agent?: boolean }
@@ -978,12 +980,12 @@ export class App {
       this.cdp.send("Target.closeTarget", { targetId: old.targetId }).catch(() => {});
     } else if (placement.kind === "replace") {
       const space = this.space!;
-      space.tabs.splice(space.active + 1, 0, { id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false });
+      space.tabs.splice(space.active + 1, 0, { id: this.nextTabId++, pos: posAt(space.tabs, space.active + 1), root: leaf(page), focused: page, zoomed: false });
       space.active++;
     } else if (placement.kind === "tab") {
       const space = this.spaces.includes(placement.space) ? placement.space : this.space!;
-      const tab: Tab = { id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false };
       const index = Math.min(placement.index, space.tabs.length);
+      const tab: Tab = { id: this.nextTabId++, pos: posAt(space.tabs, index), root: leaf(page), focused: page, zoomed: false };
       space.tabs.splice(index, 0, tab);
       // An agent's tab opens in the background while the person is busy (checked as it arrives).
       if (placement.background || (placement.agent && this.humanBusy())) {
@@ -1000,7 +1002,7 @@ export class App {
         tab.zoomed = false;
       } else {
         const space = this.space!;
-        space.tabs.push({ id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false });
+        space.tabs.push({ id: this.nextTabId++, pos: posAt(space.tabs, space.tabs.length), root: leaf(page), focused: page, zoomed: false });
         space.active = space.tabs.length - 1;
       }
     }
@@ -1055,11 +1057,11 @@ export class App {
         const closing = this.closingTabs.get(tab);
         this.closingTabs.delete(tab);
         const byPerson = page.closing && !page.agentClosing;
-        if (closing && byPerson && !this.closingSpaces.has(space)) this.remember({ ...closing, space, tab: { ...closing.tab, index: i } });
+        if (closing && byPerson && !this.closingSpaces.has(space)) this.remember({ ...closing, space });
         const spaceClosing = space.tabs.length === 0 ? this.closingSpaces.get(space) : undefined;
         if (spaceClosing) {
           this.closingSpaces.delete(space);
-          if (byPerson) this.remember({ ...spaceClosing, index: this.spaces.indexOf(space) });
+          if (byPerson) this.remember(spaceClosing);
         }
         space.recent = space.recent.filter((t) => t !== tab && space.tabs.includes(t));
         const back = wasActive ? space.recent[0] : undefined;
@@ -1362,7 +1364,7 @@ export class App {
   }
 
   /** A tab as it is now, to reopen once it's closed: its title, splits, and its pages' histories (read now, while they're open). */
-  private closedTab(tab: Tab, index = 0): Closed & { kind: "tab" } {
+  private closedTab(tab: Tab): Closed & { kind: "tab" } {
     const node = (n: Node<Page>): SavedNode =>
       n.kind === "leaf"
         ? { url: n.item.url.includes(MARKER) || n.item.url === "about:blank" ? "" : n.item.url }
@@ -1374,7 +1376,7 @@ export class App {
         Bun.sleep(2000).then(() => null),
       ]),
     );
-    const t: ClosedTab = { root: node(tab.root), focus: Math.max(0, pages.indexOf(tab.focused)), zoomed: tab.zoomed, history, index };
+    const t: ClosedTab = { root: node(tab.root), focus: Math.max(0, pages.indexOf(tab.focused)), zoomed: tab.zoomed, history, pos: tab.pos };
     return { kind: "tab", title: pageTitle(tab.focused), space: this.space!, tab: t };
   }
 
@@ -1382,7 +1384,7 @@ export class App {
   private remember(c: Closed): void {
     this.closed.push(c);
     while (this.closed.length > CLOSED_MAX) this.closed.shift();
-    const name = truncate(c.kind === "tab" ? c.title : c.name, 40);
+    const name = truncate(c.title, 40);
     const text = c.kind === "tab" ? `Closed "${name}"` : `Closed space "${name}" (${c.tabs.length === 1 ? "1 tab" : `${c.tabs.length} tabs`})`;
     c.toast = this.showToast(text, 6000, { label: "Undo", run: () => void this.reopen(c) });
   }
@@ -1392,11 +1394,6 @@ export class App {
     if (!c) return Promise.resolve(void this.showToast("Nothing closed to reopen"));
     const i = this.closed.indexOf(c);
     if (i < 0) return Promise.resolve(); // reopened already
-    // Those closed after it were closed without it there: once it's back, their places are one further on.
-    for (const o of this.closed.slice(i + 1)) {
-      if (c.kind === "tab" && o.kind === "tab" && o.space === c.space && o.tab.index >= c.tab.index) o.tab.index++;
-      if (c.kind === "space" && o.kind === "space" && o.index >= c.index) o.index++;
-    }
     this.closed.splice(i, 1);
     if (c.toast !== undefined) this.dismissToast(c.toast);
     // One at a time: each goes back to its place among those reopened before it.
@@ -1406,30 +1403,28 @@ export class App {
   private reopening = Promise.resolve();
 
   private async reopenNow(c: Closed): Promise<void> {
-    if (c.kind === "tab") {
-      const space = this.spaces.includes(c.space) ? c.space : this.space!;
-      await this.reopenTab(space, c.tab, false);
-      return this.relayoutAndRedraw();
-    }
-    let space = this.spaces.includes(c.space) ? c.space : null;
-    if (!space) {
-      space = this.newSpaceModel();
-      space.name = c.name;
-      const at = Math.min(c.index, this.spaces.length);
+    // Its space comes back too if it's gone (as a closed tab's window does in Chrome).
+    const space = c.space;
+    if (!this.spaces.includes(space)) {
+      // Spaces are in the order of their ids (new ones go last).
+      space.tabs = [];
+      space.active = 0;
+      space.recent = [];
+      const at = this.spaces.filter((s) => s.id < space.id).length;
       this.spaces.splice(at, 0, space);
       if (this.activeSpace >= at && this.spaces.length > 1) this.activeSpace++;
-      // Tabs closed from it earlier go back into it.
-      for (const o of this.closed) if (o.space === c.space) o.space = space;
+    }
+    if (c.kind === "tab") {
+      await this.reopenTab(space, c.tab, false);
+      if (space.tabs.length === 0) this.dropSpace(space);
+      return this.relayoutAndRedraw();
     }
     const tabs: (Tab | null)[] = [];
     for (const ct of c.tabs) tabs.push(await this.reopenTab(space, ct, true));
     const si = this.spaces.indexOf(space);
     if (si < 0) return;
-    if (space.tabs.length === 0) {
-      // None came back: the empty space goes again.
-      this.spaces.splice(si, 1);
-      if (this.activeSpace > si) this.activeSpace--;
-    } else {
+    if (space.tabs.length === 0) this.dropSpace(space);
+    else {
       const active = tabs[c.active];
       if (active && space.tabs.includes(active)) space.active = space.tabs.indexOf(active);
       this.activeSpace = si;
@@ -1438,13 +1433,22 @@ export class App {
     this.relayoutAndRedraw();
   }
 
+  /** A space put back for a reopen that brought none of its tabs back goes again (the last one stays). */
+  private dropSpace(space: Space): void {
+    const si = this.spaces.indexOf(space);
+    if (si < 0 || this.spaces.length === 1) return;
+    this.spaces.splice(si, 1);
+    if (this.activeSpace > si) this.activeSpace--;
+  }
+
   /** Opens a closed tab at its old place in `space`, and then rebuilds its pages' histories. */
   private async reopenTab(space: Space, ct: ClosedTab, background: boolean): Promise<Tab | null> {
     const histories = await Promise.all(ct.history.map((h) => h ?? null));
     const plans = histories.map((h) => (h ? replayPlan(h, (u) => u.includes(MARKER) || u === "about:blank") : null));
     const root = mapLeaves(ct.root, (i, old) => plans[i]?.urls[0] ?? old);
-    const r = await this.openSavedTab(space, Math.min(ct.index, space.tabs.length), { ...ct, root }, background);
+    const r = await this.openSavedTab(space, space.tabs.filter((t) => t.pos < ct.pos).length, { ...ct, root }, background);
     if (!r) return null;
+    r.tab.pos = ct.pos;
     const pages = leaves(r.tab.root);
     if (pages.length === countLeaves(root)) pages.forEach((p, i) => void this.replayHistory(p, plans[i] ?? null));
     return r.tab;
@@ -1502,10 +1506,14 @@ export class App {
         seq = page.navSeq;
         ok = await answered(seq);
       }
-      // Back to its entry: the last one with its address (an entry that didn't load isn't there).
+      // Back to its entry: `forward` entries back if that's its address, else the last one with
+      // its address (an entry that didn't load isn't there; an address can be in it twice).
       const h = ok && plan.forward > 0 ? await history() : null;
       if (h && alive() && page.navSeq === seq && !same(h.entries[h.currentIndex]?.url, current)) {
-        const target = h.entries.slice(0, h.currentIndex).reverse().find((e) => same(e.url, current));
+        const counted = h.entries[h.currentIndex - plan.forward];
+        const target = counted && same(counted.url, current)
+          ? counted
+          : h.entries.slice(0, h.currentIndex).reverse().find((e) => same(e.url, current));
         if (target) {
           ownTraversal = 1;
           await this.cdp.send("Page.navigateToHistoryEntry", { entryId: target.id }, page.sessionId).catch(() => {});
@@ -3518,8 +3526,8 @@ export class App {
       case "shift+d":
         if (space) {
           const closed: Closed & { kind: "space" } = {
-            kind: "space", title: space.name, space, name: space.name, index: this.activeSpace, active: space.active,
-            tabs: space.tabs.map((t, i) => this.closedTab(t, i).tab),
+            kind: "space", title: space.name, space, active: space.active,
+            tabs: space.tabs.map((t) => this.closedTab(t).tab),
           };
           void this.closeGroup(space.tabs.flatMap((t) => leaves(t.root)), "space", () => this.closingSpaces.set(space, closed));
         }
@@ -4443,6 +4451,14 @@ export function frameFits(base64Png: string, css: { w: number; h: number }): boo
 
 function sameSize<T extends { w: number; h: number; dsf?: number }>(a: T | null, b: T | null): boolean {
   return !!a && !!b && a.w === b.w && a.h === b.h && a.dsf === b.dsf;
+}
+
+/** An order key for a tab put at `index` in `tabs`: between its neighbours' keys. */
+function posAt(tabs: Tab[], index: number): number {
+  const a = tabs[index - 1]?.pos;
+  const b = tabs[index]?.pos;
+  if (a !== undefined && b !== undefined) return (a + b) / 2;
+  return a !== undefined ? a + 1 : b !== undefined ? b - 1 : 0;
 }
 
 function pageTitle(page: Page): string {

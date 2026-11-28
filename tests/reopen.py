@@ -212,6 +212,50 @@ try:
     t.key("ctrl+shift+t")
     check("older Undo, then the newer: both back in their order", wait(lambda: tabs() == order, 20), (tabs(), order))
 
+    def click_older_undo(n):
+        t.wait_for(lambda: t.text().count("Undo") == n, 3)
+        col, row = toast_cell("Undo")  # the older toast is the upper one
+        t.click(col * t.cell_w + 3, (row - 1) * t.cell_h + 8)
+
+    # 6e. ...the other way round: close the right one, then the left; Undo the right one first.
+    t.key("ctrl+b"); t.key(str(num["o=b"])); wait(lambda: active()[2] == "o=b")
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "o=b" for x in tabs()))
+    t.key("ctrl+b"); t.key(str(num["o=a"])); wait(lambda: active()[2] == "o=a")
+    t.mouse(5, 5, action="move")
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "o=a" for x in tabs()))
+    click_older_undo(2)
+    wait(lambda: any(x[2] == "o=b" for x in tabs()))
+    t.key("ctrl+shift+t")
+    check("closed right then left, older Undo first: both back in their order", wait(lambda: tabs() == order, 20), (tabs(), order))
+
+    # 6f. A tab whose space was closed after it: its Undo brings the space back, then the space's
+    # Undo brings the rest into it, in order.
+    t.key("ctrl+b"); t.key("shift+n"); time.sleep(0.6); t.type(f"{BASE}?q=1"); t.key("enter")
+    wait(lambda: active()[2] == "q=1")
+    new_tab(f"{BASE}?q=2")
+    spaceq = active()[0]
+    before_q = tabs()
+    t.mouse(5, 5, action="move")
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "q=2" for x in tabs()))
+    t.key("ctrl+b"); t.key("shift+d"); wait(lambda: all(x[0] != spaceq for x in tabs()))
+    click_older_undo(2)
+    check("the tab's Undo brings its space back with it", wait(lambda: (spaceq, 1, "q=2") in tabs(), 20), tabs())
+    t.key("ctrl+shift+t")
+    check("...and the space's Undo the rest, in order", wait(lambda: tabs() == before_q, 20), (tabs(), before_q))
+
+    # 6g. The same address twice in its history: it goes back to the right one.
+    new_tab(f"{BASE}?h=A"); go(f"{BASE}?h=B"); wait(lambda: active()[2] == "h=B")
+    go(f"{BASE}?h=A"); wait(lambda: active()[2] == "h=A" and history() >= 4)
+    go(f"{BASE}?h=C"); wait(lambda: active()[2] == "h=C")
+    for want in ("h=A", "h=B", "h=A"):
+        t.key("alt+left"); wait(lambda: active()[2] == want); time.sleep(0.3)
+    hdepth = history()
+    t.key("ctrl+w"); wait(lambda: all(not x[2].startswith("h=") for x in tabs()))
+    t.key("ctrl+shift+t")
+    wait(lambda: active()[2] == "h=A" and history() == hdepth, 25); time.sleep(1)
+    t.key("alt+right")
+    check("an address twice in its history: forward goes to the entry after the right one", wait(lambda: active()[2] == "h=B", 10), active())
+
     # 7. A tab closed from a space that was then closed and reopened goes back into that space.
     t.key("ctrl+b"); t.key("shift+n"); time.sleep(0.6); t.type(f"{BASE}?y=1"); t.key("enter")
     wait(lambda: active()[2] == "y=1")

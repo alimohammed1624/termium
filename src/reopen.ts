@@ -20,8 +20,8 @@ export interface ClosedTab {
   focus: number;
   zoomed: boolean;
   history: (Promise<NavHistory | null> | undefined)[];
-  /** Its place in its space. */
-  index: number;
+  /** Its order key in its space (see Tab.pos in app.ts). */
+  pos: number;
 }
 
 /**
