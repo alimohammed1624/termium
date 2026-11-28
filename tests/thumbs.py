@@ -61,6 +61,19 @@ def preview(t):
     """The tab preview: a direct placement PREVIEW_COLS (40) wide, on row 3."""
     return placed(t, lambda p: p[0] == 3 and p[2] == 40)
 
+LISTEN = "window.__ev = []; for (const k of ['mousedown','mouseup','click','wheel']) addEventListener(k, () => __ev.push(k), true); 0"
+
+def events(t, page):
+    """Mouse events the page saw since listen() (None if it can't be asked)."""
+    r = ctl(t, "--json", "eval", "window.__ev || null", str(page))
+    try:
+        return json.loads(r.stdout).get("value")
+    except ValueError:
+        return None
+
+def listen(t, page):
+    ctl(t, "eval", LISTEN, str(page))
+
 def tab_col(t, label):
     i = t.line(1).find(label)
     return i + 1 if i >= 0 else None
@@ -79,6 +92,8 @@ def setup_tabs(t, name):
     check(f"[{name}] background tab opened", r.returncode == 0, r.stdout + r.stderr)
     time.sleep(1.5); t.wait_idle(0.8, 10)
     check(f"[{name}] three tabs", len(tabs(t)) == 3, tabs(t))
+    for x in tabs(t):
+        listen(t, x["id"])
 
 def run_direct():
     t = start({}, "direct")
@@ -116,14 +131,27 @@ def run_direct():
         check("clicking the preview switches to its tab", ok, active(t))
         time.sleep(0.5)
         check("preview gone after the switch", not preview(t), preview(t))
+        check("the switched-to page saw nothing of that click", events(t, 3) == [], events(t, 3))
 
         # A second space, with one tab.
         t.key("ctrl+b"); t.key("shift+n"); time.sleep(0.6)
         t.type(f"{BASE}/page.html?space=2"); t.key("enter")
         t.wait_idle(1.0, 15); time.sleep(1.0)
+        space2 = (active(t) or {}).get("id")
+        listen(t, space2)
         # Hover space 1 in the sidebar (row 3): its contact sheet.
         move(t, 5, 3)
         check("space contact sheet shows after a pause", t.wait_text("· 3 tabs", 4), t.text()[:400])
+        # Wheel and a click over the sheet's backdrop never reach the page it hides.
+        t.scroll(1400, 800)
+        time.sleep(0.4)
+        check("wheel over the sheet's backdrop stays there", "· 3 tabs" in t.text() and events(t, space2) == [], events(t, space2))
+        t.click_cell(150, 40)
+        check("a click on the backdrop closes the sheet", t.wait_for(lambda: "· 3 tabs" not in t.text(), 3))
+        time.sleep(0.3)
+        check("...and doesn't reach the page", events(t, space2) == [], events(t, space2))
+        move(t, 5, 4); move(t, 5, 3)
+        check("the sheet shows again", t.wait_text("· 3 tabs", 4))
         thumbs = lambda: placed(t, lambda p: p[1] >= 23 and p[2] < 40)
         check("contact sheet has a picture per tab", t.wait_for(lambda: len(thumbs()) >= 3, 6), t.placements)
         check("the page picture is gone under the sheet", not placed(t, lambda p: p[2] > 100), t.placements)
@@ -140,6 +168,8 @@ def run_direct():
             t.click_cell(col + 2, row - 2)
             ok = t.wait_for(lambda: (active(t) or {}).get("space") == 1 and (active(t) or {}).get("tab") == 1, 5)
             check("clicking a sheet thumbnail switches space and tab", ok, active(t))
+            time.sleep(0.4)
+            check("the switched-to page saw nothing of that click", events(t, 1) == [], events(t, 1))
         time.sleep(0.8)
         check("the sheet is gone after the switch", "· 3 tabs" not in t.text())
         check("the page picture is back", t.wait_for(lambda: placed(t, lambda p: p[2] > 100), 4), t.placements)
@@ -154,6 +184,31 @@ def run_direct():
         t.key("escape")
         check("picker sheet goes with the picker", t.wait_for(lambda: "· 1 tab" not in t.text(), 4))
         check("pane picture back after the picker", t.wait_for(lambda: placed(t, lambda p: p[2] > 100), 4), t.placements)
+
+        # A page's dialog opening under a hover sheet puts the sheet away, so the whole message shows.
+        ctl(t, "eval", "setTimeout(() => alert('first line\\nsecond line'), 1500); 0", "1")
+        move(t, 100, 30); move(t, 5, 3)
+        check("sheet up before the dialog", t.wait_text("· 3 tabs", 4))
+        check("the dialog's whole message shows", t.wait_text("second line", 5) and "· 3 tabs" not in t.text(), t.text()[:500])
+        t.key("enter"); time.sleep(0.5)
+        move(t, 100, 30)
+
+        # A preview narrower than its label (a tall page in a short terminal): only the
+        # label and the picture are the preview; the page beside it isn't.
+        t.resize(160, 12); time.sleep(1.5)
+        col2 = tab_col(t, " 2 ")
+        move(t, col2 + 3, 1)
+        check("preview in a short terminal", t.wait_for(lambda: placed(t, lambda p: p[0] == 3 and p[2] <= 40 and p[1] >= col2 - 5), 5), t.placements)
+        pv = placed(t, lambda p: p[0] == 3 and p[2] <= 40 and p[1] >= col2 - 5)
+        if pv:
+            (_, (row, pcol, c, r)), = pv.items()
+            check("the picture is narrower than its label", c < 40, (row, pcol, c, r))
+            if c < 38:
+                move(t, pcol + 1, 2); move(t, pcol + c + 1, 5)
+                time.sleep(0.3)
+                t.click_cell(pcol + c + 1, 5)
+                time.sleep(0.8)
+                check("a click beside the picture doesn't switch tab", (active(t) or {}).get("tab") == 1, active(t))
     finally:
         t.close()
 
@@ -175,6 +230,10 @@ def run_text():
         t.shot(f"{OUT}/text-sheet.png")
         move(t, 100, 40)
         check("text sheet clears", t.wait_for(lambda: "· 3 tabs" not in t.text(), 3))
+        # Too short for every tab: the rest are counted.
+        t.resize(160, 6); time.sleep(1.0)
+        move(t, 5, 4); move(t, 5, 3)
+        check("text sheet counts the tabs that don't fit", t.wait_text("+2 more", 4), t.text())
     finally:
         t.close()
 

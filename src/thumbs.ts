@@ -12,6 +12,8 @@ export const THUMB_MAX_H = 240;
 export const HOVER_DWELL_MS = 450;
 /** Width of a tab's preview, in cells. */
 export const PREVIEW_COLS = 40;
+/** Most pictures in one contact sheet (the rest are counted as "+N more"). */
+export const SHEET_MAX = 24;
 /** Thumbnails stack above the pages' pictures (z-index 0). */
 export const THUMB_Z = 1;
 
@@ -168,7 +170,8 @@ export function sheetLayout(area: Rect, n: number, cellW: number, cellH: number,
   const rowH = th + 2; // picture, title, gap
   const fitRows = Math.floor((area.rows - 2) / rowH); // under the header and a blank row
   if (fitRows < 1 || area.cols < tw + gap + 2) return null;
-  let shown = Math.min(n, perRow * fitRows);
+  // At most SHEET_MAX pictures, well under the cache's size: a sheet never evicts its own.
+  let shown = Math.min(n, perRow * fitRows, SHEET_MAX);
   // Room for the "+N more" line.
   if (shown < n && 2 + Math.ceil(shown / perRow) * rowH + 1 > area.rows) shown = Math.max(1, shown - perRow);
   const lines = Math.ceil(shown / perRow);
