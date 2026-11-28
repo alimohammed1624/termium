@@ -39,6 +39,7 @@ import {
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
+import { ReaderMode, readerHint } from "./reader";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
 
@@ -278,6 +279,10 @@ const TOP_ROWS = 2;
 /** URL fragment that marks pages termium created; random so real URLs never match. */
 const MARKER = `#termium-${crypto.randomUUID().slice(0, 8)}-`;
 
+/** The key (after the leader) that toggles reader mode, and how hints show the pair. */
+const READER_KEY = "R";
+const READER_TOGGLE = `^B ${READER_KEY}`;
+
 const HELP: [string, string][] = [
   ["Ctrl+L / F6 / Alt+D", "edit address"],
   ["Ctrl+T", "new tab"],
@@ -300,6 +305,7 @@ const HELP: [string, string][] = [
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
+  [READER_KEY, "reader mode: the article as text"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
@@ -390,10 +396,33 @@ export class App {
   private ua: object | null = null;
   private initialTargets = new Set<string>();
 
+  /** Reader mode: articles as terminal text (src/reader.ts). */
+  private reader: ReaderMode<Page>;
+  private readerHit: [number, number] | null = null;
+
   constructor(
     private cdp: CDP,
     private opts: AppOptions,
-  ) {}
+  ) {
+    this.reader = new ReaderMode<Page>(cdp, {
+      page: (sid) => (sid ? this.pages.get(sid) : undefined),
+      isOpen: (page) => this.isOpen(page),
+      shown: () => this.relayoutAndRedraw(),
+      redraw: (page) => this.drawReader(page),
+      chrome: () => this.queueChrome(),
+      navigate: (page, url) => this.go(page, url),
+      openInBackground: (url) => {
+        const space = this.space;
+        if (space) void this.placePage({ kind: "tab", space, index: space.active + 1, editUrl: false, url, background: true });
+      },
+      toast: (text) => this.showToast(text),
+      copy: (text) => out(setClipboard(text)),
+      terminal: (seq) => {
+        if (this.attached) out(seq);
+      },
+      log: (msg) => this.opts.log(msg),
+    });
+  }
 
   // ---------------------------------------------------------- startup
 
@@ -983,6 +1012,7 @@ export class App {
   private onGone(page: Page | undefined): void {
     if (!page) return;
     this.clearForeign(page);
+    this.reader.forget(page);
     if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
@@ -1455,6 +1485,7 @@ export class App {
     if (this.mode === "update" || this.mode === "help") this.mode = "normal";
     if (this.prompt && (this.prompt.kind === "url" || this.prompt.kind === "rename" || this.prompt.kind === "confirm")) this.prompt = null;
     this.terminalGen++;
+    this.reader.terminalReset();
     this.attached = true;
     this.pixelMouse = t.pixelMouse;
     this.placeholders = t.placeholders;
@@ -1519,6 +1550,7 @@ export class App {
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
   detach(): void {
     this.terminalGen++;
+    this.reader.terminalReset();
     this.attached = false;
     this.resetInput();
     if (this.started) this.relayout();
@@ -1608,7 +1640,8 @@ export class App {
       this.seps = tab.zoomed ? [] : seps;
     }
     for (const page of this.pages.values()) {
-      if (visible.has(page)) this.showPage(page);
+      // A pane in reader mode shows text: no picture, no screencast.
+      if (visible.has(page) && !this.reader.isOn(page)) this.showPage(page);
       else this.hidePage(page);
     }
   }
@@ -2031,7 +2064,7 @@ export class App {
   /** Draws the page's latest frame into its pane; false if there was nothing to draw. */
   private paint(page: Page, done?: () => void): boolean {
     const g = this.geom.get(page);
-    if (!g || !page.lastFrame || this.covered() || this.closingAll || page === this.panelPage) return false;
+    if (!g || !page.lastFrame || this.covered() || this.closingAll || page === this.panelPage || this.reader.isOn(page)) return false;
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
     if (this.placeholders) return this.paintPlaceholders(page, r, done);
@@ -2043,6 +2076,14 @@ export class App {
     page.imageIds = [id];
     page.placed = { ...r };
     return true;
+  }
+
+  /** Draws a pane in reader mode: the article as text. */
+  private drawReader(page: Page): void {
+    const g = this.geom.get(page);
+    if (!g || !this.started || !this.attached || this.closingAll || this.covered() || page === this.panelPage) return;
+    if (g.content.cols < 1 || g.content.rows < 1) return;
+    out(this.sync(this.reader.draw(page, g.content, readerHint(READER_TOGGLE)) + this.cursorSeq()));
   }
 
   /**
@@ -2129,7 +2170,7 @@ export class App {
     this.redrawing = true;
     try {
       this.drawChrome();
-      if (!this.covered()) for (const page of this.geom.keys()) this.paint(page);
+      if (!this.covered()) for (const page of this.geom.keys()) this.reader.isOn(page) ? this.drawReader(page) : this.paint(page);
     } finally {
       this.redrawing = false;
       out(SYNC_END);
@@ -2145,6 +2186,7 @@ export class App {
     if (!this.started || this.closingAll || !this.attached) return;
     // A dialog or file chooser hidden by another prompt comes back once that's done.
     this.syncPrompt();
+    this.reader.checkSelect(this.focused, (p) => this.geom.has(p) && !this.covered());
     let s = "\x1b[?25l";
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
@@ -2333,7 +2375,10 @@ export class App {
     const btnStyle = barBg + fg(C.subtext);
     s += btnStyle + back + fwd + reload + " ";
     const urlStart = col + width(back + fwd + reload) + 1;
-    const fieldW = Math.max(4, w - (urlStart - col) - rightW - modeW - 1);
+    // Reader mode, offered when the page looks like an article.
+    const readerOn = !!page && this.reader.isOn(page);
+    const readerBtn = page && !prompt && this.reader.offered(page) ? (readerOn ? " ≡ Page " : " ≡ Reader ") : "";
+    const fieldW = Math.max(4, w - (urlStart - col) - rightW - modeW - 1 - width(readerBtn));
     this.navHits = {
       back: [col, col + 3],
       fwd: [col + 3, col + 6],
@@ -2360,12 +2405,14 @@ export class App {
       const icon = page?.crashed ? fg(C.red) + "✖ " : secure ? fg(C.green) + "🔒" : fg(C.overlay) + "  ";
       s += bg(C.surface0) + " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2) + RESET;
     }
+    this.readerHit = readerBtn ? [urlStart + fieldW, urlStart + fieldW + width(readerBtn)] : null;
+    if (readerBtn) s += (readerOn ? bg(C.mauve) + fg(C.crust) + BOLD : bg(C.surface1) + fg(C.text)) + readerBtn + RESET;
     s += barBg + " ";
-    const rightCol = urlStart + fieldW + 1;
+    const rightCol = urlStart + fieldW + width(readerBtn) + 1;
     this.noticeHit = notice.text && rightW > 0 ? [rightCol, rightCol + Math.min(width(notice.text), rightW)] : null;
     if (rightW > 0) s += barBg + (notice.text ? notice.style : fg(C.peach)) + fit(right, rightW);
     if (modeW) s += bg(C.mauve) + fg(C.crust) + BOLD + mode;
-    const used = (urlStart - col) + fieldW + 1 + rightW + modeW;
+    const used = (urlStart - col) + fieldW + width(readerBtn) + 1 + rightW + modeW;
     if (used < w) s += RESET + barBg + " ".repeat(w - used);
     return s + RESET;
   }
@@ -2978,7 +3025,7 @@ export class App {
           this.queueChrome();
         } else if (p) {
           // A yes/no prompt or a page blocked on alert/confirm: nowhere for text to go.
-        } else if (this.focused) {
+        } else if (this.focused && !this.reader.isOn(this.focused)) {
           void this.pastePage(this.focused, ev.text);
         }
         return;
@@ -3007,6 +3054,9 @@ export class App {
     }
     const combo = comboOf(ev);
 
+    // Select mode in reader mode (the terminal selecting text): keys bring it back first.
+    if (this.reader.selecting && this.mode === "normal" && !this.prompt &&
+        this.reader.selectKey(combo, this.geom.get(this.reader.selecting)?.content)) return;
     if (this.mode === "update") return this.updateKey(ev, combo);
     if (this.mode === "help") {
       this.mode = "normal";
@@ -3034,6 +3084,12 @@ export class App {
     if (this.globalShortcut(combo)) return;
     const page = this.focused;
     if (!page) return;
+    // Reader mode takes every other key (none reaches the page underneath).
+    const rg = this.geom.get(page);
+    if (this.reader.isOn(page)) {
+      if (rg) this.reader.key(page, combo, rg.content);
+      return;
+    }
     if (BROWSER_RESERVED.has(combo)) return;
     if (BROWSER_SHORTCUTS.has(combo)) {
       this.domKey(page, ev, "keydown");
@@ -3149,6 +3205,9 @@ export class App {
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
+      case `shift+${READER_KEY.toLowerCase()}`:
+        if (page) void this.reader.toggle(page);
+        return;
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
       case "shift+u": this.openUpdate(); return;
@@ -3654,6 +3713,10 @@ export class App {
       if (this.mode !== "normal") this.setMode("normal");
       this.focusPage(g.item);
     }
+    if (this.reader.isOn(g.item)) {
+      if (this.hoverPage === g.item) this.leaveHover();
+      return this.reader.mouse(g.item, ev, col, row, g.content);
+    }
     this.pageMouse(g.item, ev, px, py);
   }
 
@@ -3694,6 +3757,7 @@ export class App {
         if (page.loading) this.cdp.send("Page.stopLoading", {}, page.sessionId).catch(() => {});
         else this.reload(page);
       } else if (col >= n.url[0] && col < n.url[1] && !this.prompt) this.openUrlPrompt(page);
+      else if (this.readerHit && col >= this.readerHit[0] && col < this.readerHit[1]) void this.reader.toggle(page);
       else if (this.noticeHit && col >= this.noticeHit[0] && col < this.noticeHit[1]) this.openUpdate();
       return true;
     }
@@ -3932,6 +3996,16 @@ export class App {
 
   isOpen(page: Page): boolean {
     return this.pages.get(page.sessionId) === page;
+  }
+
+  agentReaderOn(page: Page): boolean {
+    return this.reader.isOn(page);
+  }
+
+  /** Turns reader mode on, off or over for a page: whether it's on now, and whether the page looks like an article. */
+  async agentReader(page: Page, want: "on" | "off" | "toggle"): Promise<{ on: boolean; readable: boolean }> {
+    const on = await this.reader.set(page, want === "toggle" ? !this.reader.isOn(page) : want === "on");
+    return { on, readable: this.reader.readable(page) };
   }
 
   /** Answers a page's JavaScript dialog (alert, confirm, prompt, "Leave this page?"). */

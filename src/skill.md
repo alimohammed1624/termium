@@ -64,6 +64,7 @@ it) loads a new document they're stale (exit 1): take a new snapshot.
 | `eval JS [TAB]` | run JavaScript in the page (promises awaited); prints JSON |
 | `wait load\|selector CSS\|text TEXT\|url PART [--gone]` | wait until it's there (or gone) |
 | `dialog accept\|dismiss [TEXT]` | answer an alert/confirm/prompt/"Leave page?" |
+| `reader [on\|off\|toggle] [TAB]` | show the page's article as terminal text for the person (or the page again) |
 
 Options: `--tab N` (`-t N`) for commands that act on a tab, `--json` for
 machine-readable output, `--timeout SEC` (default 30). Exit status: 0 done,

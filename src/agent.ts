@@ -29,7 +29,7 @@ export const EXIT = { ok: 0, failed: 1, usage: 2, noSession: 3, timeout: 4, part
 
 /** Commands that act on pages or tabs: a session runs these one at a time (see onCtl in server.ts). */
 // (Not `dialog`: answering one must work while an `open` waits on the page it blocks.)
-export const ACTING = new Set(["open", "select", "close", "click", "type", "key", "scroll"]);
+export const ACTING = new Set(["open", "select", "close", "click", "type", "key", "scroll", "reader"]);
 
 export interface CtlRequest {
   cmd: string;
@@ -57,6 +57,8 @@ export interface CtlRequest {
   value?: string;
   gone?: boolean;
   accept?: boolean;
+  /** reader: turn reader mode on, off, or over. */
+  reader?: "on" | "off" | "toggle";
   timeoutMs?: number;
 }
 
@@ -255,6 +257,17 @@ class Agent {
         return this.wait(req, timeoutMs);
       case "dialog":
         return this.dialog(req);
+      case "reader": {
+        const page = this.page(req.tab);
+        await this.personFree(page, timeoutMs, "reader mode not changed");
+        if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
+        this.step("reader mode not changed");
+        const was = this.app.agentReaderOn(page);
+        const r = await this.app.agentReader(page, req.reader ?? "toggle");
+        const asked = req.reader === "on" || (req.reader !== "off" && !was);
+        this.note(asked && !r.on ? `no article found in tab ${page.num}` : `reader mode ${r.on ? "on" : "off"} in tab ${page.num}`);
+        return { tab: page.num, ...r };
+      }
       default:
         throw new CtlError(`unknown command "${req.cmd}"`, EXIT.usage);
     }

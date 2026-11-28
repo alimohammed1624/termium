@@ -211,6 +211,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
 | `N` / `W` / `D` | new / rename / close space |
 | `b` | show or hide the sidebar |
+| `R` | reader mode: the article as text (see below) |
 | `Ctrl+B` | send Ctrl+B to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |
@@ -224,6 +225,26 @@ Ctrl+Backspace (delete word) and Alt/Ctrl+←/→.
 The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
 divider between panes.
+
+### Reader mode
+
+On a page that looks like an article, the address bar shows **≡ Reader**.
+Click it, or press `Ctrl+B R`, to show the article as terminal text: a
+comfortable column of at most 80 cells, with headings, lists, quotes, tables,
+code blocks and links, in your terminal's own font and colours. Mozilla's
+Readability (the library behind Firefox Reader View) picks the article out of
+the page.
+
+| Key | Does |
+| --- | --- |
+| `j` / `k`, ↓ / ↑, Space / `b`, PgDn / PgUp, `g` / `G`, the wheel | scroll |
+| Click a link, or `Tab` / `Shift+Tab` then Enter | follow it (reader mode stays on); middle or Ctrl+click opens a background tab |
+| `s` | select: termium lets go of the mouse so your terminal selects and copies the text; any key comes back |
+| `y` | copy the whole article as Markdown |
+| `Esc`, `Ctrl+B R` or **≡ Page** | back to the page |
+
+termium remembers where you were in each article. `termium ctl reader
+[on|off|toggle]` does the same for agents.
 
 ### Updates
 
