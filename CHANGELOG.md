@@ -6,6 +6,14 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `termium open [URL] --split right|down` opens the session in a real
+  split of the terminal termium runs in, next to the current pane: tmux,
+  herdr, and kitty (with remote control). Agents get the same with
+  `termium ctl split right|down [URL]`, which keeps the focus where it
+  was. Elsewhere (Ghostty, WezTerm) it says why and suggests termium's
+  own splits.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added
