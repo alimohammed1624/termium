@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { TOAST_MAX, layoutToasts, pause, remaining, resume, timerBar, type Toast, type ToastAction, type ToastBox } from "./toast";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -355,8 +356,21 @@ export class App {
   private mode: Mode = "normal";
   private prompt: Prompt | null = null;
   private spaceCursor = 0;
-  private toast: { text: string; until: number } | null = null;
-  private toastTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Toasts, oldest first (see src/toast.ts). */
+  private toasts: Toast[] = [];
+  private nextToast = 1;
+  private toastTick: ReturnType<typeof setInterval> | null = null;
+  /** Where toasts were last drawn (for clicks, and to clear them when they go). */
+  private toastBoxes: ToastBox[] = [];
+  private toastLast = "";
+  /** The toast under the pointer: its timer waits. */
+  private toastHover: Toast | null = null;
+  /** The pointer's cell, to tell which toast is under it when they move. */
+  private pointer: { col: number; row: number } | null = null;
+  /** A press on a toast: the rest of that click (moves, release) is the toast's too. */
+  private toastPressed = false;
+  /** Toasts can't be seen (a dialog's message or an overlay over the pages, or no terminal): their timers wait. */
+  private toastsHeld = false;
 
   private geom = new Map<Page, PaneGeom<Page>>();
   private seps: SepGeom<Page>[] = [];
@@ -1531,6 +1545,10 @@ export class App {
    */
   private resetInput(): void {
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
+    // Where that terminal's pointer was means nothing in the next one.
+    this.pointer = null;
+    this.toastPressed = false;
+    this.hoverToast(null);
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
     }
@@ -2095,6 +2113,8 @@ export class App {
       s += transmitVirtual(data, ids[i]!, cols, rows);
       if (moved) s += placeholderCells(this.phHigh, this.phColour(indexes[i]!), this.phRgb, t.row, t.col, cols, rows);
     });
+    // Placeholder cells written over toasts: draw those again.
+    if (moved && this.toastBoxes.length) s += this.drawToasts(true);
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;
     page.placed = { ...r };
@@ -2125,6 +2145,7 @@ export class App {
     // so nothing is ever deleted wholesale.
     const s = SYNC_START + RESET + this.takeStale();
     for (const page of this.pages.values()) page.placed = null;
+    this.toastBoxes = [];
     out(s + "\x1b[2J");
     this.redrawing = true;
     try {
@@ -2161,6 +2182,7 @@ export class App {
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
+    s += this.drawToasts(true);
     out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
@@ -2289,11 +2311,10 @@ export class App {
     let s = at(2, col) + barBg;
     const mode = this.modeLabel();
     const zoom = this.zoom !== 1 ? ` ${Math.round(this.zoom * 100)}% ` : "";
-    const toast = this.toast && this.toast.until > Date.now() ? ` ${this.toast.text} ` : "";
     const modeW = width(mode);
-    // Update news, unless a toast has something to say right now; the address keeps 20 columns.
-    const notice = toast ? { text: "", style: "" } : this.notice(Math.max(0, w - 30 - modeW - width(zoom)));
-    const right = (toast || notice.text) + zoom;
+    // Update news; the address keeps 20 columns.
+    const notice = this.notice(Math.max(0, w - 30 - modeW - width(zoom)));
+    const right = notice.text + zoom;
     const rightW = Math.min(width(right), Math.max(0, notice.text ? w - 30 - modeW : Math.floor(w / 2)));
 
     const prompt = this.prompt;
@@ -2937,11 +2958,149 @@ export class App {
     return s + RESET;
   }
 
-  showToast(text: string, ms = 3000): void {
-    this.toast = { text, until: Date.now() + ms };
-    if (this.toastTimer) clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => this.queueChrome(), ms + 20);
+  /**
+   * Shows a toast for `ms` (longer while hovered), stacked over the pages'
+   * bottom-right corner. A click dismisses it; with an action, a click on
+   * its label runs it first. Returns its id (for dismissToast).
+   */
+  showToast(text: string, ms = 3000, action?: ToastAction): number {
+    const now = Date.now();
+    // The same note again starts over rather than stacking a copy.
+    const same = action ? -1 : this.toasts.findIndex((t) => t.text === text && !t.action);
+    if (same >= 0) this.toasts.splice(same, 1);
+    this.holdToasts();
+    const toast: Toast = { id: this.nextToast++, text, ms, left: ms, since: this.toastsHeld ? null : now, action };
+    this.toasts.push(toast);
+    while (this.toasts.length > TOAST_MAX) this.toasts.shift();
+    this.toastChanged();
+    if (!this.toastTick) this.toastTick = setInterval(() => this.tickToasts(), 40);
+    return toast.id;
+  }
+
+  dismissToast(id: number): void {
+    const before = this.toasts.length;
+    this.toasts = this.toasts.filter((t) => t.id !== id);
+    if (this.toasts.length !== before) this.toastChanged();
+  }
+
+  private toastChanged(): void {
+    if (this.toastHover && !this.toasts.includes(this.toastHover)) this.toastHover = null;
     this.queueChrome();
+  }
+
+  /** Stops the toasts' timers while they can't be seen, and starts them again after. */
+  private holdToasts(): void {
+    const held = !this.attached || this.covered() || !!this.panelPage;
+    if (held === this.toastsHeld) return;
+    this.toastsHeld = held;
+    const now = Date.now();
+    for (const t of this.toasts) {
+      if (held) pause(t, now);
+      else if (t !== this.toastHover) resume(t, now);
+    }
+  }
+
+  /** Shrinks the timer lines and lets expired toasts go. */
+  private tickToasts(): void {
+    this.holdToasts();
+    const now = Date.now();
+    const live = this.toasts.filter((t) => remaining(t, now) > 0);
+    if (live.length !== this.toasts.length) {
+      this.toasts = live;
+      this.toastChanged();
+    }
+    if (!this.toasts.length && !this.toastBoxes.length) {
+      if (this.toastTick) clearInterval(this.toastTick);
+      this.toastTick = null;
+      return;
+    }
+    if (!this.started || this.closingAll || !this.attached || this.covered()) return;
+    const s = this.drawToasts(false);
+    if (s) out(this.sync(s + RESET + this.cursorSeq()));
+  }
+
+  /**
+   * The toasts' cells: where toasts were and no longer are cleared, then
+   * the toasts drawn. Unless forced, "" when nothing changed.
+   */
+  private drawToasts(force: boolean): string {
+    this.holdToasts();
+    const now = Date.now();
+    const area = this.toastArea();
+    const shown = this.toasts.filter((t) => remaining(t, now) > 0);
+    // In placeholder cells, a row's cells count on from the one to their
+    // left: there toasts keep to the right edge, with nothing after them.
+    const boxes = area && !this.toastsHeld ? layoutToasts(shown, area, this.placeholders ? 0 : 1) : [];
+    // Toasts shift as others come and go: the one under the pointer now waits.
+    const p = this.pointer;
+    this.hoverToast((p && boxes.find((b) => inRect(b, p.col, p.row))?.toast) ?? null);
+    let s = "";
+    const same = (a: ToastBox, b: ToastBox) => a.row === b.row && a.col === b.col && a.rows === b.rows && a.cols === b.cols;
+    // Toasts under an overlay or a dialog's message aren't cleared: that
+    // was drawn over them, and clearing now would cut into it.
+    const pr = this.panelPage && this.geom.get(this.panelPage)?.content;
+    const drawnOver = this.covered() || !!(pr && area && pr.row === area.row && pr.col === area.col && pr.rows === area.rows && pr.cols === area.cols);
+    const gone = drawnOver ? [] : this.toastBoxes.filter((old) => !boxes.some((b) => same(b, old)));
+    for (const r of gone) for (let y = 0; y < r.rows; y++) s += at(r.row + y, r.col) + RESET + " ".repeat(r.cols);
+    if (gone.length && this.placeholders) {
+      // Cleared cells were part of a picture: write its placeholders again.
+      setTimeout(() => {
+        for (const page of this.geom.keys()) page.placed = null;
+        for (const page of this.geom.keys()) this.paint(page);
+      }, 0);
+    }
+    for (const b of boxes) {
+      const t = b.toast;
+      const boxBg = bg(t === this.toastHover ? C.surface1 : C.surface0);
+      const { action, close } = b;
+      const textW = b.cols - 1 - width(action + close);
+      b.lines.forEach((line, i) => {
+        s += at(b.row + i, b.col) + boxBg + fg(C.text) + " " + fit(line, textW);
+        s += i > 0 ? " ".repeat(width(action + close)) : fg(C.blue) + BOLD + action + RESET + boxBg + fg(C.overlay) + close;
+      });
+      s += at(b.row + b.lines.length, b.col) + boxBg + fg(C.peach) + timerBar(remaining(t, now) / t.ms, b.cols) + RESET;
+    }
+    this.toastBoxes = boxes;
+    if (!force && s === this.toastLast) return "";
+    this.toastLast = s;
+    return s;
+  }
+
+  /** Toasts go in the bottom-right pane (the whole page area if there's none). */
+  private toastArea(): Rect | null {
+    let best: Rect | null = null;
+    for (const g of this.geom.values()) {
+      const r = g.content;
+      if (!best || r.col + r.cols > best.col + best.cols || (r.col + r.cols === best.col + best.cols && r.row + r.rows > best.row + best.rows)) best = r;
+    }
+    if (best) return best;
+    const col = this.mainCol();
+    return this.rows > 3 ? { row: 3, col, cols: this.cols - col + 1, rows: this.rows - 2 } : null;
+  }
+
+  /** A press on a toast: its action (on the label), and it goes. */
+  private toastClick(ev: MouseEvent, box: ToastBox, col: number, row: number): void {
+    if (ev.button > 2) return;
+    const t = box.toast;
+    this.dismissToast(t.id);
+    const a = box.actionHit;
+    if (t.action && ev.button === 0 && a && row === box.row && col >= a[0] && col < a[1]) {
+      try {
+        t.action.run();
+      } catch (e) {
+        this.opts.log(`toast action failed: ${e}`);
+      }
+    }
+  }
+
+  /** Pauses the timer of the toast under the pointer (only); true if that changed. */
+  private hoverToast(t: Toast | null): boolean {
+    if (t === this.toastHover) return false;
+    const now = Date.now();
+    if (this.toastHover && !this.toastsHeld) resume(this.toastHover, now);
+    if (t) pause(t, now);
+    this.toastHover = t;
+    return true;
   }
 
   // ---------------------------------------------------------- input
@@ -3637,8 +3796,27 @@ export class App {
 
     // Pointer captured by a page while a button is held.
     const captured = this.mouseCapture;
+    this.pointer = captured ? null : { col, row };
+    const toast = captured ? undefined : this.toastBoxes.find((b) => inRect(b, col, row));
+    if (this.hoverToast(toast?.toast ?? null)) this.queueChrome();
     if (captured && (ev.action === "move" || ev.action === "release")) {
       this.pageMouse(captured, ev, px, py);
+      return;
+    }
+    // Toasts take clicks and motion over them; the wheel scrolls the page below.
+    // A click begun on a toast stays its own after the toast goes: the page
+    // under it gets neither the drag nor the release.
+    // (A new press, or a move with no button held, means its release was missed.)
+    if (ev.action === "press" || (ev.action === "move" && ev.button === 3)) this.toastPressed = false;
+    if (this.toastPressed && (ev.action === "move" || ev.action === "release")) {
+      if (ev.action === "release") this.toastPressed = false;
+      return;
+    }
+    if (toast && ev.action !== "wheel") {
+      if (ev.action === "press") {
+        this.toastPressed = true;
+        this.toastClick(ev, toast, col, row);
+      }
       return;
     }
 

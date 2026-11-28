@@ -149,6 +149,14 @@ export function querySizes(): void {
 const CHUNK = 4096;
 
 /**
+ * z-index that puts a picture under text and under cells with a background
+ * colour of their own (kitty graphics protocol: below INT32_MIN / 2), so
+ * toasts drawn as text over a page show on top of its picture. Cells with
+ * the default background (all of a pane's) still show the picture.
+ */
+export const BELOW_CELLS = -1_073_741_825;
+
+/**
  * Transmits a base64 PNG as image `id`, places it at (row, col) scaled to
  * cols x rows cells, then frees the image `replaces` so the swap has no
  * visible gap.
@@ -167,7 +175,7 @@ export function drawImage(
     const chunk = base64Png.slice(i, i + CHUNK);
     const more = i + CHUNK < base64Png.length ? 1 : 0;
     const ctrl =
-      i === 0 ? `a=T,f=100,i=${id},p=1,q=2,C=1,c=${cols},r=${rows},m=${more}` : `m=${more}`;
+      i === 0 ? `a=T,f=100,i=${id},p=1,q=2,C=1,z=${BELOW_CELLS},c=${cols},r=${rows},m=${more}` : `m=${more}`;
     parts.push(`${ESC}_G${ctrl};${chunk}${ST}`);
   }
   if (replaces !== null) parts.push(`${ESC}_Ga=d,d=I,i=${replaces},q=2${ST}`);
