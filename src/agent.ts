@@ -13,6 +13,7 @@ import type { AgentTab, App, Page } from "./app";
 import type { DevToolsEndpoint } from "./browser";
 import type { CDP } from "./cdp";
 import { decodePng, encodeRegion, type Raster } from "./png";
+import { PageHints, hintLabels } from "./hints";
 
 /** A failure to report to the agent as is; `code` becomes the exit status. */
 export class CtlError extends Error {
@@ -35,7 +36,7 @@ export interface CtlRequest {
   cmd: string;
   /** Page number to act on; the focused page if absent. */
   tab?: number;
-  /** Element id "TAB:NODE@DOC" (from snapshot). */
+  /** Element id "TAB:NODE@DOC" (from snapshot), or a label from `hints`. */
   ref?: string;
   url?: string;
   newTab?: boolean;
@@ -237,6 +238,8 @@ class Agent {
         return this.close(req);
       case "snapshot":
         return this.snapshot(this.page(req.tab));
+      case "hints":
+        return this.hints(this.page(req.tab));
       case "text":
         return this.text(this.page(req.tab));
       case "click":
@@ -317,8 +320,19 @@ class Agent {
     this.app.showToast(`agent: ${clip(what, 70)}`, 2500);
   }
 
-  /** The element an id names: its page and backend node id. */
-  private element(ref: string | undefined): { page: Page; node: number } {
+  /**
+   * The element an id (or a label from `hints`, on tab `tab`) names: its
+   * page and backend node id (and for a label, the point it was listed at).
+   */
+  private element(ref: string | undefined, tab?: number): { page: Page; node: number; at?: { x: number; y: number } } {
+    if (/^[a-z]{1,4}$/i.test(ref ?? "")) {
+      const page = this.page(tab);
+      const hints = page.agentHints;
+      const hint = hints?.labels.get(ref!.toLowerCase());
+      if (!hints || !hint) throw new CtlError(`no hint "${ref}" on tab ${page.num}: labels come from \`termium ctl hints\``);
+      if (hints.gen !== (page.docGen ?? 0)) throw new CtlError(`stale hint ${ref}: the page changed since those hints; take new ones`);
+      return { page, node: hint.node, at: { x: hint.x, y: hint.y } };
+    }
     const m = /^(\d+):(\d+)@(\d+)$/.exec(ref ?? "");
     if (!m) throw new CtlError(`bad element id "${ref ?? ""}": ids look like 3:142@2 (take them from \`termium ctl snapshot\`)`, EXIT.usage);
     const page = this.page(Number(m[1]));
@@ -485,6 +499,49 @@ class Agent {
     return { tab: page.num, url: t.url, title: t.title, snapshot: lines.join("\n") };
   }
 
+  /**
+   * The clickable elements in view, with the labels the person's link
+   * hints would give them (the same view gets the same labels), and ids
+   * (`click LABEL` and `click ID` both work, for this document).
+   */
+  private async hints(page: Page): Promise<unknown> {
+    const gen = page.docGen ?? 0;
+    const hints = new PageHints((m, p, s) => this.cdp.send(m, p, s), page);
+    let found, nodes;
+    try {
+      found = await hints.collect();
+      nodes = await hints.nodes();
+    } finally {
+      void hints.clear();
+    }
+    const labels = hintLabels(found.length);
+    const byLabel = new Map<string, { node: number; x: number; y: number }>();
+    const list = found.map((h, i) => {
+      const node = nodes[i] ?? 0;
+      if (node) byLabel.set(labels[i]!, { node, x: h.x, y: h.y });
+      return {
+        label: labels[i]!,
+        ...(node ? { id: `${page.num}:${node}@${gen}` } : {}),
+        tag: h.tag,
+        ...(h.role ? { role: h.role } : {}),
+        text: h.text,
+        ...(h.href ? { href: h.href } : {}),
+        x: h.x,
+        y: h.y,
+        rect: { x: h.left, y: h.top, w: h.width, h: h.height },
+      };
+    });
+    // Unless the page moved on to another document meanwhile: then they'd name the wrong elements.
+    if ((page.docGen ?? 0) === gen) {
+      page.agentHints = { gen, labels: byLabel };
+      const ids = [...byLabel.values()].map((h) => h.node);
+      if (page.agentIds?.gen === gen) for (const n of ids) page.agentIds.nodes.add(n);
+      else page.agentIds = { gen, nodes: new Set(ids) };
+    }
+    const t = this.describe(page);
+    return { tab: page.num, url: t.url, title: t.title, hints: list };
+  }
+
   private async render(page: Page, nodes: any[], lines: string[], depth: number, frameDepth: number): Promise<void> {
     const byId = new Map<string, any>(nodes.map((n) => [n.nodeId, n]));
     const root = nodes.find((n) => !n.parentId) ?? nodes[0];
@@ -595,7 +652,22 @@ class Agent {
    * slow to take the pointer (a heavy mousemove handler) stops it there; a
    * press is always followed by its release, so no button is left held.
    */
-  private async mouseClick(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
+  private mouseClick(
+    page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number,
+    check?: () => Promise<void>,
+  ): Promise<void> {
+    // Not while termium takes a screenshot of the page: input sent meanwhile lands
+    // as if at a pixel ratio of 1 (at HiDPI, half way to the page's corner). Once
+    // it's the click's turn, the deadline and `check` (that the target is still
+    // there) come first: nothing goes to the page if either fails.
+    return this.app.withPage(page, async () => {
+      this.step("not clicked");
+      await check?.();
+      return this.mouseClickNow(page, x, y, button, count);
+    });
+  }
+
+  private async mouseClickNow(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
     const sid = page.sessionId;
     const bit = button === "left" ? 1 : button === "right" ? 2 : 4;
     const send = (p: object) => this.cdp.send("Input.dispatchMouseEvent", p, sid);
@@ -629,10 +701,11 @@ class Agent {
       this.note(`clicked at ${Math.round(x)},${Math.round(y)}`);
       return { tab: page.num, x, y, ...(dialog ? { dialog } : {}) };
     }
-    const { page, node } = this.element(req.ref);
+    const { page, node, at } = this.element(req.ref, req.tab);
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
     this.step("not clicked");
-    const { x, y } = await this.centre(page, node);
+    // A label: where `hints` found the element on top (its centre may be covered); an id: its centre.
+    const { x, y } = at ?? (await this.centre(page, node));
     // Something else on top (a cookie banner, an overlay, also one over the
     // frame the element is in) would take the click: then nothing is clicked,
     // and the agent is told what covers it.
@@ -643,10 +716,17 @@ class Agent {
       `function () { return !!(this.disabled || (this.closest && this.closest("fieldset:disabled")) || (this.getAttribute && this.getAttribute("aria-disabled") === "true")); }`,
     ).catch(() => false);
     if (disabled) throw new CtlError(`element ${req.ref} is disabled; not clicked`);
-    const cover = await this.coverAt(page, node, objectId, x, y);
-    if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
+    const gen = page.docGen;
+    const check = async () => {
+      if (page.docGen !== gen) throw new CtlError(`stale id ${req.ref}: the page changed meanwhile; not clicked. Take a new snapshot (or hints)`);
+      const cover = await this.coverAt(page, node, objectId, x, y);
+      if (cover && at) throw new CtlError(`hint ${req.ref} isn't where it was listed (${cover} is there now: the page scrolled or changed); not clicked. Take hints again`);
+      if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
+    };
+    await check();
     this.step("not clicked");
-    const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count));
+    // (Checked again once it's the click's turn: see mouseClick.)
+    const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count, check));
     // (The page is held by its dialog: it can't be asked for the element's name.)
     const label = dialog ? "an element" : await this.label(page, objectId);
     this.note(`clicked ${label}`);
@@ -677,9 +757,12 @@ class Agent {
                 let d = null;
                 try { d = e.contentDocument; } catch {}
                 if (!d) break;
+                // (Its scale too: a frame can be scaled by a CSS transform.)
                 const b = e.getBoundingClientRect();
-                x -= b.left + e.clientLeft;
-                y -= b.top + e.clientTop;
+                const sx = e.offsetWidth > 0 && b.width > 0 ? b.width / e.offsetWidth : 1;
+                const sy = e.offsetHeight > 0 && b.height > 0 ? b.height / e.offsetHeight : 1;
+                x = (x - b.left - e.clientLeft * sx) / sx;
+                y = (y - b.top - e.clientTop * sy) / sy;
                 const inner = d.elementFromPoint(x, y);
                 if (!inner) break;
                 e = inner;

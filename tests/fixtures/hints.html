@@ -1,0 +1,59 @@
+<!doctype html>
+<html><head><title>Hints fixture</title>
+<style>
+  body { font: 15px sans-serif; margin: 12px; background: #fff; }
+  .grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px 14px; margin: 10px 0; }
+  .grid a, .grid button { padding: 4px 6px; }
+  #cover-wrap { position: relative; display: inline-block; }
+  #cover { position: absolute; inset: 0; background: rgba(200, 200, 200, .9); }
+  .far { margin-top: 2000px; }
+  [role=button] { display: inline-block; border: 1px solid #888; padding: 3px 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Hints fixture</h1>
+<div class="grid" id="links"></div>
+<div class="grid" id="buttons"></div>
+<p>
+  <input id="field" placeholder="A field"> <input id="check" type="checkbox"> <label for="check">check</label>
+  <select id="sel"><option>One</option><option>Two</option></select>
+  <span id="rb" role="button">role button</span>
+  <a id="nested" href="#nested"><span tabindex="0">nested span in a link</span></a>
+  <button id="off" disabled>disabled</button>
+  <span id="cover-wrap"><button id="covered">covered</button><span id="cover"></span></span>
+  <span id="shadow-host"></span>
+  <a id="real" href="page.html?from=hints">a real link</a>
+</p>
+<p>
+  <span style="position: relative; display: inline-block"><button id="half">half covered</button><span style="position: absolute; left: 35%; right: 0; top: 0; bottom: 0; background: #ccc"></span></span>
+  <iframe id="frame" style="width: 220px; height: 44px; border: 4px solid #888; vertical-align: middle"
+    srcdoc="<body style='margin:6px'><button id='fb'>frame button</button><script>document.addEventListener('click', (e) => parent.clicks.push({ id: e.target.id, ctrl: e.ctrlKey, meta: e.metaKey, trusted: e.isTrusted }), true)</script></body>"></iframe>
+</p>
+<p style="height: 100px">
+  <iframe id="frame2" style="width: 160px; height: 40px; border: 2px solid #888; transform: scale(1.5, 2); transform-origin: 0 0"
+    srcdoc="<body style='margin:4px'><button id='fb2'>scaled frame button</button><script>document.addEventListener('click', (e) => parent.clicks.push({ id: e.target.id, ctrl: e.ctrlKey, meta: e.metaKey, trusted: e.isTrusted }), true)</script></body>"></iframe>
+</p>
+<p class="far"><a id="below" href="#below">below the fold</a></p>
+<script>
+  const links = document.getElementById("links"), buttons = document.getElementById("buttons");
+  for (let i = 1; i <= 40; i++) {
+    const a = document.createElement("a");
+    a.id = "l" + i; a.href = "#l" + i; a.textContent = "link " + i;
+    links.appendChild(a);
+  }
+  for (let i = 1; i <= 24; i++) {
+    const b = document.createElement("button");
+    b.id = "b" + i; b.textContent = "button " + i;
+    buttons.appendChild(b);
+  }
+  const root = document.getElementById("shadow-host").attachShadow({ mode: "open" });
+  root.innerHTML = '<button id="sb">shadow button</button>';
+  window.clicks = [];
+  document.addEventListener("click", (e) => {
+    const t = e.composedPath().find((n) => n.id) || e.target;
+    window.clicks.push({ id: t.id, ctrl: e.ctrlKey, meta: e.metaKey, trusted: e.isTrusted });
+    // Hash links stay put (no scrolling to themselves); the real link goes where it goes.
+    if (t.id !== "real" && t.closest && t.closest("a")) e.preventDefault();
+  }, true);
+</script>
+</body></html>
