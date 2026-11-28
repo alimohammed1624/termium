@@ -31,11 +31,15 @@ export interface Run {
   h?: string;
 }
 
-/** `ind`: list nesting depth; `q`: blockquote depth; `mk`: list marker ("*" bullet, or "3."). */
-export type Block =
-  | { k: "p" | "h" | "tr"; c: Run[]; lv?: number; ind: number; q: number; mk?: string }
-  | { k: "pre"; text: string; lang?: string; ind: number; q: number; mk?: string }
-  | { k: "hr"; ind: number; q: number };
+/**
+ * `ind`: list nesting depth; `q`: blockquote depth; `mk`: list marker ("*"
+ * bullet, or "3."); `a`: element ids in it (where #fragment links land).
+ */
+export type Block = (
+  | { k: "p" | "h" | "tr"; c: Run[]; lv?: number; mk?: string }
+  | { k: "pre"; text: string; lang?: string; mk?: string }
+  | { k: "hr" }
+) & { ind: number; q: number; a?: string[] };
 
 export interface Article {
   title: string;
@@ -57,16 +61,18 @@ const WALKER = String.raw`
   const FLATTEN = new Set(["PRE", "UL", "OL", "MENU", "HR", "TABLE", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "DT", "DD"]);
   const MAX_BLOCKS = 6000, MAX_CHARS = 1500000;
   const out = [];
-  let chars = 0, cur = null, mark = null, ind = 0, q = 0, flat = 0;
+  let chars = 0, cur = null, mark = null, ind = 0, q = 0, flat = 0, ids = [];
   const linkOf = (a) => { const h = String(a.href || ""); return /^(https?|file):/i.test(h) ? h : ""; };
-  const push = (b) => { if (out.length < MAX_BLOCKS && chars < MAX_CHARS) out.push(b); };
+  const push = (b) => { if (out.length < MAX_BLOCKS && chars < MAX_CHARS) out.push(withIds(b)); };
+  // Ids seen before a block starts belong to it.
+  const withIds = (b) => { if (ids.length) { b.a = (b.a || []).concat(ids.splice(0)); } return b; };
   const takeMark = () => { const m = mark; mark = null; return m === null ? undefined : m; };
   const flush = () => {
     if (!cur || flat) return;
     const b = cur, c = b.c;
     cur = null;
     while (c.length) { const l = c[c.length - 1]; l.t = l.t.replace(/[ \n]+$/, ""); if (l.t) break; c.pop(); }
-    if (!c.some((r) => r.t.trim())) { if (b.mk !== undefined && mark === null) mark = b.mk; return; }
+    if (!c.some((r) => r.t.trim())) { if (b.mk !== undefined && mark === null) mark = b.mk; if (b.a) ids.unshift(...b.a); return; }
     push(b);
   };
   const open = (k, lv) => {
@@ -75,7 +81,7 @@ const WALKER = String.raw`
     open1(k, lv);
   };
   const open1 = (k, lv) => {
-    cur = { k, ind, q, c: [] };
+    cur = withIds({ k, ind, q, c: [] });
     if (lv) cur.lv = lv;
     const m = takeMark();
     if (m !== undefined) cur.mk = m;
@@ -96,6 +102,12 @@ const WALKER = String.raw`
     if (n.nodeType !== 1) return;
     const tag = String(n.tagName).toUpperCase();
     if (SKIP.has(tag) || n.hidden || n.getAttribute("aria-hidden") === "true") return;
+    const id = n.getAttribute("id") || (tag === "A" ? n.getAttribute("name") : "");
+    if (id && ids.length < 50) {
+      // Inline, inside an open block: that block. Otherwise the next one.
+      if (cur && !BLOCK.has(tag) && !FLATTEN.has(tag) && cur.c.length) (cur.a = cur.a || []).push(String(id));
+      else ids.push(String(id));
+    }
     if (flat && FLATTEN.has(tag)) { text(" ", s, h); kids(n, s, h); text(" ", s, h); return; }
     switch (tag) {
       case "BR": if (cur) text(flat ? " " : "\n", s, h); return;
@@ -166,6 +178,7 @@ export const EXTRACT_JS = String.raw`(() => {
   ${WALKER}
   walk(article.content, 0, "");
   flush();
+  if (ids.length && out.length) withIds(out[out.length - 1]);
   return { title: String(article.title || document.title || ""), byline: String(article.byline || ""),
     site: String(article.siteName || ""), blocks: out };
 })()`;
@@ -203,7 +216,8 @@ export function parseArticle(v: unknown): Article | null {
     });
   const blocks: Block[] = [];
   for (const b of o.blocks.slice(0, 6000) as any[]) {
-    const base = { ind: nest(b?.ind), q: nest(b?.q) };
+    const ids = Array.isArray(b?.a) ? b.a.filter((x: unknown) => typeof x === "string" && x && x.length <= 200).slice(0, 50) : [];
+    const base = { ind: nest(b?.ind), q: nest(b?.q), ...(ids.length ? { a: ids as string[] } : {}) };
     const mk = typeof b?.mk === "string" && /^(\*|\d{1,6}\.)$/.test(b.mk) ? b.mk : undefined;
     if (b?.k === "p" || b?.k === "h" || b?.k === "tr") {
       const c = runs(b.c);
@@ -423,9 +437,10 @@ export function layout(a: Article, w: number): Layout {
   let prev: Block | null = null;
   const offset = a.blocks.length - blocks.length;
   blocks.forEach((b, i) => {
-    block = i + offset;
     const tight = prev && ((prev.ind > 0 && b.ind > 0 && prev.k !== "pre" && b.k !== "pre" && b.k !== "h") || (prev.k === "tr" && b.k === "tr"));
+    // (The blank line goes with the block before: a block starts at its text.)
     if (lines.length && !tight) blank();
+    block = i + offset;
     prev = b;
     const l = lead(b);
     const avail = Math.max(1, w - l.w);
@@ -571,39 +586,66 @@ export class ReaderView {
   private lay: Layout | null = null;
   /** Lines of text in the pane (its height less the status line). */
   private rows = 1;
-  /** The block at the top, to keep across reflows (and between visits). */
-  private anchor = -1;
+  /** Where the top is (block, and how far into it), kept across reflows and between visits. */
+  private anchor: Position | null = null;
 
   constructor(public status: "loading" | "ready" = "loading") {}
 
-  setArticle(a: Article, url: string, anchorBlock = -1): void {
+  setArticle(a: Article, url: string, at: Position | null = null): void {
     this.article = a;
     this.url = url;
     this.status = "ready";
     this.lay = null;
     this.top = 0;
     this.focus = -1;
-    this.anchor = anchorBlock;
+    this.anchor = at;
   }
 
-  /** The block shown at the top (remembered as the reading position). */
-  topBlock(): number {
-    return this.lay?.lines[this.top]?.block ?? this.anchor;
+  /** Where the top of the pane is in the article (remembered as the reading position). */
+  position(): Position | null {
+    const lines = this.lay?.lines;
+    const block = lines?.[this.top]?.block;
+    if (!lines || block === undefined) return this.anchor;
+    let start = this.top;
+    while (start > 0 && lines[start - 1]!.block === block) start--;
+    let end = this.top;
+    while (end < lines.length && lines[end]!.block === block) end++;
+    return { block, frac: (this.top - start) / Math.max(1, end - start) };
+  }
+
+  /** The top line for a position in the current layout. */
+  private lineOf(p: Position): number {
+    const lines = this.lay!.lines;
+    const start = lines.findIndex((l) => l.block >= p.block);
+    if (start < 0) return Math.max(0, lines.length - 1);
+    if (lines[start]!.block !== p.block) return start;
+    let end = start;
+    while (end < lines.length && lines[end]!.block === p.block) end++;
+    return start + Math.min(end - start - 1, Math.floor(p.frac * (end - start) + 1e-9));
   }
 
   layoutFor(cols: number): Layout | null {
     if (!this.article) return null;
     const w = columnWidth(cols);
     if (!this.lay || this.lay.width !== w) {
-      const keep = this.lay ? this.topBlock() : this.anchor;
+      const keep = this.lay ? this.position() : this.anchor;
       this.lay = layout(this.article, w);
-      this.top = 0;
-      if (keep >= 0) {
-        const i = this.lay.lines.findIndex((l) => l.block >= keep);
-        if (i >= 0) this.top = i;
-      }
+      this.top = keep ? this.lineOf(keep) : 0;
     }
     return this.lay;
+  }
+
+  /** Scrolls to the block holding element id `id` (a #fragment); false if there's none. */
+  scrollToId(id: string): boolean {
+    const block = this.article?.blocks.findIndex((b) => b.a?.includes(id)) ?? -1;
+    if (block < 0) return false;
+    this.focus = -1;
+    this.anchor = { block, frac: 0 };
+    if (this.lay) {
+      this.top = Math.min(this.lineOf(this.anchor), this.maxTop());
+      this.anchor = this.position();
+    }
+    return true;
   }
 
   private maxTop(): number {
@@ -614,7 +656,7 @@ export class ReaderView {
     const top = Math.max(0, Math.min(this.maxTop(), this.top + by));
     if (top === this.top) return false;
     this.top = top;
-    this.anchor = this.topBlock();
+    this.anchor = this.position();
     return true;
   }
 
@@ -650,7 +692,7 @@ export class ReaderView {
   /** The link at a cell of the pane, if any. */
   linkAt(r: Rect, col: number, row: number): string | null {
     const lay = this.layoutFor(r.cols);
-    if (!lay) return null;
+    if (!lay || row - r.row < 0 || row - r.row >= textRows(r)) return null; // (the status line hides the rest)
     const line = lay.lines[this.top + row - r.row];
     let x = col - (r.col + Math.floor((r.cols - lay.width) / 2));
     if (!line || x < 0) return null;
@@ -664,8 +706,8 @@ export class ReaderView {
 
   /** Draws the pane: the text column centred, and a status line at the bottom. */
   draw(r: Rect, hint: string, selecting: boolean): string {
-    const statusRows = r.rows >= 4 ? 1 : 0;
-    this.rows = Math.max(1, r.rows - statusRows);
+    const statusRows = r.rows - textRows(r);
+    this.rows = textRows(r);
     const lay = this.layoutFor(r.cols);
     if (lay) this.top = Math.min(this.top, this.maxTop());
     const left = lay ? Math.floor((r.cols - lay.width) / 2) : 2;
@@ -702,6 +744,17 @@ export class ReaderView {
   }
 }
 
+/** A position in an article: a block, and how far into its lines (0 to 1). */
+export interface Position {
+  block: number;
+  frac: number;
+}
+
+/** Rows of text in a reader pane: all but the status line (when there's room for one). */
+function textRows(r: Rect): number {
+  return Math.max(1, r.rows - (r.rows >= 4 ? 1 : 0));
+}
+
 function fitTo(s: string, n: number): string {
   let outStr = "";
   let w = 0;
@@ -728,6 +781,8 @@ export interface ReaderHost<P extends ReaderPage> {
   /** The page whose main session this is. */
   page(sessionId: string | undefined): P | undefined;
   isOpen(page: P): boolean;
+  /** A navigation of the page has started and not yet committed (its old document still answers). */
+  navigating(page: P): boolean;
   /** Reader mode went on (the picture must go) or off (the picture comes back). */
   shown(page: P, on: boolean): void;
   /** The pane's text changed (scrolled, article arrived). */
@@ -753,6 +808,10 @@ interface PageState {
   doc: string;
   /** termium's isolated world in the current document. */
   world?: { seq: number; id: number };
+  /** The #fragment of the address (where to start reading). */
+  hash: string;
+  /** set() is reading the article (newDocument leaves it to it). */
+  asking?: boolean;
 }
 
 /** Mouse reporting as enterTerminal turns it on (see terminal.ts). */
@@ -760,6 +819,14 @@ const MOUSE_ON = `${CSI}?1003h`;
 const MOUSE_OFF = `${CSI}?1003l`;
 
 const noHash = (url: string) => url.replace(/#.*$/, "");
+const hashOf = (url: string) => {
+  const h = /#(.*)$/.exec(url)?.[1] ?? "";
+  try {
+    return decodeURIComponent(h);
+  } catch {
+    return h;
+  }
+};
 
 /** Keys that scroll and leave select mode on. */
 const SCROLL_KEYS: Record<string, "line" | "page" | "end"> = {
@@ -768,8 +835,8 @@ const SCROLL_KEYS: Record<string, "line" | "page" | "end"> = {
 
 export class ReaderMode<P extends ReaderPage> {
   private state = new WeakMap<P, PageState>();
-  /** Reading positions by address (top block), most recent last. */
-  private positions = new Map<string, number>();
+  /** Reading positions by address, most recent last. */
+  private positions = new Map<string, Position>();
   /** The page whose pane is in select mode (mouse reporting off), if any. */
   selecting: P | null = null;
 
@@ -787,14 +854,23 @@ export class ReaderMode<P extends ReaderPage> {
     });
     cdp.on("Page.navigatedWithinDocument", (p, sid) => {
       const page = main(sid, p.frameId);
-      // A single-page app's new "page": looked at again once it has drawn. (Not a jump to an anchor.)
-      if (page && noHash(String(p.url ?? "")) !== this.st(page).doc) this.newDocument(page, String(p.url), 800);
+      if (!page) return;
+      const url = String(p.url ?? "");
+      // A single-page app's new "page": looked at again once it has drawn.
+      if (noHash(url) !== this.st(page).doc) return this.newDocument(page, url, 800);
+      // A jump within the page (a #fragment link): the reader follows.
+      const s = this.st(page);
+      s.hash = hashOf(url);
+      if (s.view?.article) {
+        if (s.view.scrollToId(s.hash)) host.redraw(page);
+        s.hash = "";
+      }
     });
   }
 
   private st(page: P): PageState {
     let s = this.state.get(page);
-    if (!s) this.state.set(page, (s = { readable: false, seq: 0, view: null, doc: "" }));
+    if (!s) this.state.set(page, (s = { readable: false, seq: 0, view: null, doc: "", hash: "" }));
     return s;
   }
 
@@ -815,7 +891,11 @@ export class ReaderMode<P extends ReaderPage> {
 
   /** The page closed. */
   forget(page: P): void {
-    if (this.selecting === page) this.selecting = null;
+    if (this.selecting === page) {
+      // (Not select(null): the pane is going, nothing to redraw.)
+      this.selecting = null;
+      this.host.terminal(MOUSE_ON);
+    }
     this.state.delete(page);
   }
 
@@ -829,6 +909,7 @@ export class ReaderMode<P extends ReaderPage> {
     const s = this.st(page);
     const seq = ++s.seq;
     s.doc = noHash(url);
+    s.hash = hashOf(url);
     const wasReadable = s.readable;
     s.readable = false;
     if (s.view) {
@@ -841,13 +922,19 @@ export class ReaderMode<P extends ReaderPage> {
     void (async () => {
       if (delay) await Bun.sleep(delay);
       if (!(await this.settled(page, seq))) return;
-      const readable = (await this.evaluate(page, READERABLE_JS, 5000).catch(() => false)) === true;
-      if (s.seq !== seq || !this.host.isOpen(page)) return;
-      if (readable !== s.readable) {
-        s.readable = readable;
-        this.host.chrome();
+      // Pages that fill in their article after loading are looked at again a few times.
+      for (const wait of [0, 2000, 5000]) {
+        if (wait) await Bun.sleep(wait);
+        if (s.seq !== seq || !this.host.isOpen(page)) return;
+        const readable = (await this.evaluate(page, READERABLE_JS, 5000).catch(() => false)) === true;
+        if (s.seq !== seq || !this.host.isOpen(page)) return;
+        if (readable !== s.readable) {
+          s.readable = readable;
+          this.host.chrome();
+        }
+        if (s.view && !s.asking && !s.view.article) await this.read(page, seq, false);
+        if (readable || s.view) return;
       }
-      if (s.view) await this.read(page, seq, false);
     })().catch((e) => this.host.log(`reader: ${e}`));
   }
 
@@ -916,7 +1003,10 @@ export class ReaderMode<P extends ReaderPage> {
       return false;
     }
     const doc = s.doc || noHash(page.url);
-    s.view.setArticle(article, doc, this.positions.get(doc) ?? -1);
+    s.view.setArticle(article, doc, this.positions.get(doc) ?? null);
+    // An address with a #fragment starts there (once: coming back later, the reading position wins).
+    if (s.hash) s.view.scrollToId(s.hash);
+    s.hash = "";
     this.host.redraw(page);
     return true;
   }
@@ -931,7 +1021,26 @@ export class ReaderMode<P extends ReaderPage> {
     if (s.view) return true;
     s.view = new ReaderView("loading");
     this.host.shown(page, true);
-    return this.read(page, s.seq, true);
+    s.asking = true;
+    try {
+      // A page still on its way (a navigation not yet committed, or a
+      // document still loading) is read once it's there (20 s at most).
+      const end = Date.now() + 20_000;
+      for (;;) {
+        if (s.view === null || !this.host.isOpen(page)) return false;
+        if (this.host.navigating(page) && Date.now() < end) {
+          await Bun.sleep(100);
+          continue;
+        }
+        const seq = s.seq;
+        const same = await this.settled(page, seq);
+        if (s.view === null) return false;
+        if (!same && s.seq !== seq && Date.now() < end) continue;
+        return await this.read(page, s.seq, true);
+      }
+    } finally {
+      s.asking = false;
+    }
   }
 
   toggle(page: P): Promise<boolean> {
@@ -951,7 +1060,8 @@ export class ReaderMode<P extends ReaderPage> {
     if (!v.article || !v.url) return;
     const key = noHash(v.url);
     this.positions.delete(key);
-    this.positions.set(key, v.topBlock());
+    const at = v.position();
+    if (at) this.positions.set(key, at);
     while (this.positions.size > 200) this.positions.delete(this.positions.keys().next().value!);
   }
 
@@ -992,7 +1102,7 @@ export class ReaderMode<P extends ReaderPage> {
   key(page: P, combo: string, rect: Rect): boolean {
     const v = this.state.get(page)?.view;
     if (!v) return false;
-    const rows = Math.max(1, rect.rows - (rect.rows >= 4 ? 1 : 0));
+    const rows = textRows(rect);
     let moved = false;
     switch (combo) {
       case "j": case "arrowdown": moved = v.scroll(1); break;
@@ -1059,4 +1169,3 @@ export class ReaderMode<P extends ReaderPage> {
 export function readerHint(toggle: string): string {
   return `j/k Space scroll · Tab/Enter links · s select · y copy · Esc or ${toggle}: page`;
 }
-

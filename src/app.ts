@@ -407,6 +407,7 @@ export class App {
     this.reader = new ReaderMode<Page>(cdp, {
       page: (sid) => (sid ? this.pages.get(sid) : undefined),
       isOpen: (page) => this.isOpen(page),
+      navigating: (page) => !!page.navigating || page.navStarted > 0,
       shown: () => this.relayoutAndRedraw(),
       redraw: (page) => this.drawReader(page),
       chrome: () => this.queueChrome(),

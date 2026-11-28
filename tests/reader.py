@@ -20,8 +20,19 @@ SESSION = "pr27-reader"
 with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0)); PORT = sock.getsockname()[1]
 PY = shutil.which("python3") or sys.executable
-srv = subprocess.Popen([PY, "-m", "http.server", str(PORT), "--bind", "127.0.0.1",
-                        "--directory", os.path.join(ROOT, "tests", "fixtures")],
+# The fixtures, served from a separate process; ?delay=SEC answers late (a slow page).
+SERVER = r"""
+import http.server, sys, time, urllib.parse
+class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        d = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("delay")
+        if d: time.sleep(float(d[0]))
+        super().do_GET()
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])),
+    lambda *a, **k: H(*a, directory=sys.argv[2], **k)).serve_forever()
+"""
+srv = subprocess.Popen([PY, "-c", SERVER, str(PORT), os.path.join(ROOT, "tests", "fixtures")],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(0.5)
 BASE = f"http://127.0.0.1:{PORT}"
@@ -167,6 +178,71 @@ try:
     check("ctl reader on a non-article stays off", r.get("on") is False and r.get("readable") is False, r)
     check("and says why", t.wait_text("no article found in tab", 5), t.line(2))
     check("the page itself is shown again", "≡" not in t.line(2) and "^B R: page" not in t.line(t.rows), t.line(t.rows))
+
+    # A #fragment link scrolls the reader to its target.
+    ctl("open", f"{BASE}/article-blog.html")
+    r = ctl("reader", "on")
+    check("reader on the blog again", r.get("on") is True and t.wait_text("The problem with pages", 10), r)
+    row = next((r for r in range(3, t.rows) if "Skip to the closing thoughts" in t.line(r)), None)
+    check("the skip link is on screen", row is not None, pane())
+    if row is not None:
+        t.click_cell(t.line(row).index("Skip to the closing") + 3, row)
+        # (Near the end, it can only come as far up as the end of the article allows.)
+        check("a #fragment link scrolls to its target", t.wait_for(lambda: "Closing thoughts" in pane() and "100%" in t.line(t.rows), 5), pane())
+        check("...and the address has the fragment", url().endswith("#closing"), url())
+
+    # The reading position is kept inside a paragraph (not just the paragraph).
+    t.key("g"); time.sleep(0.2)
+    for _ in range(20):
+        t.key("j"); time.sleep(0.08)
+        top = t.line(3)[22:].strip()  # (past the sidebar)
+        if top and top[0].islower():
+            break
+    time.sleep(0.3)
+    top = t.line(3)
+    check("scrolled to the middle of a paragraph", top[22:].strip()[:1].islower(), top)
+    mark = set(t.placements)
+    t.key("escape")
+    t.wait_for(lambda: len(images_since(mark)) > 0, 10)
+    leader("shift+r")
+    check("toggling back returns to the same line", t.wait_for(lambda: t.line(3) == top, 10), (t.line(3), top))
+
+    # A row hidden under the status line can't be clicked.
+    t.key("g"); time.sleep(0.3)
+    row = next((r for r in range(3, t.rows) if "an outside page" in t.line(r)), None)
+    if row is not None:
+        col = t.line(row).index("an outside page") + 3
+        t.resize(140, row); time.sleep(1.0)
+        check("after a resize the link sits under the status line", "^B R: page" in t.line(row) and "an outside page" not in t.line(row), t.line(row))
+        before_url = url()
+        t.click_cell(col, row); time.sleep(1.5)
+        check("clicking the status line follows no hidden link", url() == before_url, url())
+        t.resize(140, 40); time.sleep(1.0)
+    else:
+        check("the outside link is on screen", False, pane())
+
+    # Select mode in a pane that closes: mouse reporting comes back.
+    leader("v"); time.sleep(1.5)
+    t.key("escape"); time.sleep(0.3)
+    leader("h"); time.sleep(0.3)
+    t.key("s"); time.sleep(0.3)
+    raw_off = len(t.raw)
+    check("select mode in the left pane", "SELECT" in t.text(), t.line(t.rows))
+    tabs = ctl("tabs")
+    left = next((x["id"] for x in tabs if "article-blog" in x["url"]), None) if isinstance(tabs, list) else None
+    ctl("close", str(left), "--force")
+    check("closing it turns mouse reporting back on", t.wait_for(lambda: b"\x1b[?1003h" in bytes(t.raw[raw_off:]), 5))
+
+    # An article filled in after the page loaded is still offered.
+    ctl("open", f"{BASE}/article-late.html")
+    check("a late article gets the reader button", t.wait_for(lambda: "≡ Reader" in t.line(2), 15), t.line(2))
+
+    # Reader mode asked for while a slow page is still on its way reads that page.
+    ctl("open", "--no-wait", f"{BASE}/article-news.html?delay=3")
+    time.sleep(0.3)
+    r = ctl("reader", "on")
+    check("ctl reader on during a slow navigation reads the new page", r.get("on") is True, r)
+    check("...its article", t.wait_text("A tram depot that stood empty", 10), pane()[:300])
 finally:
     t.close()
     srv.terminate()

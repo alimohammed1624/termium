@@ -26,7 +26,7 @@ describe("parseArticle", () => {
       title: "T\x1b[31m‮",
       blocks: [
         { k: "p", c: [{ t: "hi\x07 there", s: BOLD | 64, h: "javascript:alert(1)" }], ind: 99, q: -3 },
-        { k: "p", c: [{ t: "go", h: "https://ok.example/" }], ind: 0, q: 0, mk: "\x1b[2J" },
+        { k: "p", c: [{ t: "go", h: "https://ok.example/" }], ind: 0, q: 0, mk: "\x1b[2J", a: ["top", 7, "", "x".repeat(300)] },
         { k: "pre", text: "a\tb\x1b[0m\r\n", ind: 0, q: 0, lang: "bad lang!" },
         { k: "script", c: [] },
         { k: "p", c: [] },
@@ -35,7 +35,7 @@ describe("parseArticle", () => {
     expect(a.title).toBe("T[31m");
     expect(a.blocks).toEqual([
       { k: "p", c: [{ t: "hi there", s: BOLD }], ind: 8, q: 0 },
-      { k: "p", c: [{ t: "go", s: 0, h: "https://ok.example/" }], ind: 0, q: 0 },
+      { k: "p", c: [{ t: "go", s: 0, h: "https://ok.example/" }], ind: 0, q: 0, a: ["top"] },
       { k: "pre", text: "a\tb[0m\n", ind: 0, q: 0 },
     ]);
   });
@@ -127,9 +127,9 @@ describe("ReaderView", () => {
     v.draw(rect, "hint", false);
     expect(v.scroll(-5)).toBe(false);
     expect(v.scroll(40)).toBe(true);
-    const block = v.topBlock();
+    const at = v.position();
     v.draw({ ...rect, cols: 40 }, "hint", false);
-    expect(v.topBlock()).toBe(block);
+    expect(v.position()).toEqual(at);
     v.scrollTo(1e9);
     const lines = layout(long, columnWidth(40)).lines.length;
     expect(v.top).toBe(lines - (rect.rows - 1));
@@ -150,6 +150,65 @@ describe("ReaderView", () => {
     const row = rect.row + line - v.top;
     expect(v.linkAt(rect, left + width("para 15 "), row)).toBe("https://e.x/15");
     expect(v.linkAt(rect, left, row)).toBeNull();
+  });
+
+  test("the position keeps the place inside a long block, across reflows and visits", () => {
+    const code: Article = {
+      title: "",
+      byline: "",
+      site: "",
+      blocks: [
+        { k: "p", c: [{ t: "intro" }], ind: 0, q: 0 },
+        { k: "pre", text: Array.from({ length: 60 }, (_, i) => `line ${String(i).padStart(3, "0")}`).join("\n"), ind: 0, q: 0 },
+        { k: "p", c: [{ t: "outro" }], ind: 0, q: 0 },
+      ],
+    };
+    const v = new ReaderView();
+    v.setArticle(code, "u");
+    v.draw(rect, "hint", false);
+    v.scroll(29);
+    const top = () => (v.layoutFor(rect.cols)!.lines[v.top]!.cells.map((c) => c.t).join(""));
+    expect(top()).toBe("▏ line 027");
+    // A narrower pane wraps nothing here: the same line stays on top.
+    v.draw({ ...rect, cols: 60 }, "hint", false);
+    expect(v.layoutFor(60)!.lines[v.top]!.cells.map((c) => c.t).join("")).toBe("▏ line 027");
+    // A later visit starts where it was left.
+    const w = new ReaderView();
+    w.setArticle(code, "u", v.position());
+    w.draw(rect, "hint", false);
+    expect(w.layoutFor(rect.cols)!.lines[w.top]!.cells.map((c) => c.t).join("")).toBe("▏ line 027");
+  });
+
+  test("#fragments scroll to the block holding the id", () => {
+    const withIds: Article = { ...long, blocks: long.blocks.map((b, i) => (i === 42 ? { ...b, a: ["closing"] } : b)) };
+    const v = new ReaderView();
+    v.setArticle(withIds, "u");
+    v.draw(rect, "hint", false);
+    expect(v.scrollToId("nope")).toBe(false);
+    expect(v.scrollToId("closing")).toBe(true);
+    expect(v.layoutFor(rect.cols)!.lines[v.top]!.cells.map((c) => c.t).join("")).toBe("para 42");
+    // Before it's laid out too (an address with a #fragment).
+    const w = new ReaderView();
+    w.setArticle(withIds, "u");
+    w.scrollToId("closing");
+    w.draw(rect, "hint", false);
+    expect(w.layoutFor(rect.cols)!.lines[w.top]!.cells.map((c) => c.t).join("")).toBe("para 42");
+  });
+
+  test("the status line hides the row under it from clicks", () => {
+    const v = new ReaderView();
+    v.setArticle(long, "u");
+    v.draw(rect, "hint", false);
+    const lay = v.layoutFor(rect.cols)!;
+    const left = rect.col + Math.floor((rect.cols - lay.width) / 2);
+    // Scroll so a link sits on the last row, under the status line.
+    const link = lay.links[1]!;
+    v.scrollTo(link.line - (rect.rows - 1));
+    const statusRow = rect.row + rect.rows - 1;
+    expect(v.linkAt(rect, left + width("para 15 "), statusRow)).toBeNull();
+    expect(v.linkAt(rect, left + width("para 15 "), statusRow - 1)).toBeNull(); // para 14
+    v.scroll(1);
+    expect(v.linkAt(rect, left + width("para 15 "), statusRow - 1)).toBe("https://e.x/15");
   });
 
   test("output has no stray controls beyond SGR, cursor moves and OSC 8", () => {
