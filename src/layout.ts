@@ -47,13 +47,81 @@ export function contains<T>(node: Node<T>, item: T): boolean {
   return node.kind === "leaf" ? node.item === item : contains(node.a, item) || contains(node.b, item);
 }
 
-/** Replaces the leaf holding `item` with a split of it and `added`. */
-export function splitLeaf<T>(node: Node<T>, item: T, added: T, dir: Dir): Node<T> {
+/**
+ * Replaces the leaf holding `item` with a split of it and `added`
+ * (`added` right of / below it; with `before`, left of / above it).
+ */
+export function splitLeaf<T>(node: Node<T>, item: T, added: T, dir: Dir, before = false): Node<T> {
   if (node.kind === "leaf") {
     if (node.item !== item) return node;
-    return { kind: "split", dir, ratio: 0.5, a: node, b: leaf(added) };
+    return before
+      ? { kind: "split", dir, ratio: 0.5, a: leaf(added), b: node }
+      : { kind: "split", dir, ratio: 0.5, a: node, b: leaf(added) };
   }
-  return { ...node, a: splitLeaf(node.a, item, added, dir), b: splitLeaf(node.b, item, added, dir) };
+  return { ...node, a: splitLeaf(node.a, item, added, dir, before), b: splitLeaf(node.b, item, added, dir, before) };
+}
+
+/** A side of a pane to split it on: the new pane goes there. */
+export type Side = "left" | "right" | "up" | "down";
+
+export function sideDir(side: Side): { dir: Dir; before: boolean } {
+  return { dir: side === "left" || side === "right" ? "h" : "v", before: side === "left" || side === "up" };
+}
+
+/** Panes in a row along `dir` (a split the other way counts as one). */
+function span<T>(node: Node<T>, dir: Dir): number {
+  return node.kind === "split" && node.dir === dir ? span(node.a, dir) + span(node.b, dir) : 1;
+}
+
+/**
+ * Gives the panes in a row (or column) under `node`, laid out in `area`,
+ * the same share of it, tmux's even layout: three panes side by side get
+ * a third each, not a half and two quarters. Whole cells: the separators
+ * between them are counted, and what doesn't divide evenly is at most one
+ * cell. Splits the other way inside are left as they are, unless `deep`
+ * (then every row and column is evened out). Changes the ratios in place.
+ */
+export function equalize<T>(node: Node<T>, area: Rect, deep = false): void {
+  if (node.kind === "leaf") return;
+  const na = span(node.a, node.dir);
+  const n = na + span(node.b, node.dir);
+  let ra: Rect;
+  let rb: Rect;
+  if (node.dir === "h") {
+    // n panes and n-1 one-column separators: the first child gets na panes' share and its own separators.
+    const avail = area.cols - 1;
+    if (avail < 2) return;
+    const aw = clamp(Math.round(((area.cols - (n - 1)) * na) / n + (na - 1)), 1, avail - 1);
+    node.ratio = aw / avail;
+    ra = { ...area, cols: aw };
+    rb = { ...area, col: area.col + aw + 1, cols: avail - aw };
+  } else {
+    // Stacked panes have no separator (each pane's header divides it from the one above).
+    if (area.rows < 2) return;
+    const ah = clamp(Math.round((area.rows * na) / n), 1, area.rows - 1);
+    node.ratio = ah / area.rows;
+    ra = { ...area, rows: ah };
+    rb = { ...area, row: area.row + ah, rows: area.rows - ah };
+  }
+  if (node.a.kind === "split" && (deep || node.a.dir === node.dir)) equalize(node.a, ra, deep);
+  if (node.b.kind === "split" && (deep || node.b.dir === node.dir)) equalize(node.b, rb, deep);
+}
+
+/**
+ * Where the divider would go if the pane in `rect` (header included) were
+ * split in two along `dir`: the cells of the new divider inside `content`,
+ * as computeLayout would place it.
+ */
+export function splitPreview(rect: Rect, content: Rect, dir: Dir): Rect | null {
+  if (dir === "h") {
+    const avail = rect.cols - 1;
+    if (avail < 2) return null;
+    const col = rect.col + clamp(Math.round(avail * 0.5), 1, avail - 1);
+    return { col, row: content.row, cols: 1, rows: content.rows };
+  }
+  if (rect.rows < 2) return null;
+  const row = rect.row + clamp(Math.round(rect.rows * 0.5), 1, rect.rows - 1);
+  return row >= content.row && row < content.row + content.rows ? { col: content.col, row, cols: content.cols, rows: 1 } : null;
 }
 
 /** Puts `next` where `item` was. */
