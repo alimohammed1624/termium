@@ -2,8 +2,9 @@
 // (no per-tab "audible" state, no per-tab mute command), but the browser's
 // own tab audio state is there for extensions (chrome.tabs: audible,
 // mutedInfo). So termium loads a tiny extension of its own over its DevTools
-// pipe (Extensions.loadUnpacked; Google Chrome takes it only with
-// --enable-unsafe-extension-debugging) and asks its service worker.
+// pipe (Extensions.loadUnpacked; some Chrome releases take it only with
+// --enable-unsafe-extension-debugging, which termium passes) and asks its
+// service worker.
 //
 // That's the browser's real tab mute, the one Chrome's tab strip uses: it
 // covers every frame (cross-site iframes too), <audio>/<video>, Web Audio
