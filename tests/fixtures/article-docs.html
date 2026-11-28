@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Configuring the widget server — Widget docs</title></head><body>
+<div class="sidebar"><ul><li><a href="#">Install</a></li><li><a href="#">Configure</a></li><li><a href="#">Deploy</a></li><li><a href="#">API</a></li></ul></div>
+<div class="content"><div role="main">
+<h1>Configuring the widget server</h1>
+<p>The widget server reads its settings from a single file, <code>widgets.toml</code>, at start-up. Every key has a sensible default, so a new install needs none of them. The terminal has outlived almost every interface that came after it. It is fast, it is scriptable, and it never asks you to wait for a spinner.</p>
+<h2>A minimal configuration</h2>
+<p>This is the smallest file that changes anything. It moves the server to another port and turns on request logging. Reading on the web, by contrast, has become a negotiation with banners, overlays and autoplaying video. The words are in there somewhere.</p>
+<pre><code class="language-toml">[server]
+port = 8080
+log_requests = true
+
+[cache]
+size = "256MB"   # a very long comment that goes on and on past the width of any reasonable reading column, to check wrapping
+</code></pre>
+<p>Restart the server after changing it. A reader view strips a page down to the text its author wrote, then sets it in a column narrow enough that the eye can find the next line without effort.</p>
+<h2 id="from-code">From code</h2>
+<p>The same settings can be given from JavaScript when the server is embedded:</p>
+<pre><code class="language-js">import { createServer } from "widgets";
+
+const server = createServer({
+	port: 8080,
+	cache: { size: 256 * 1024 * 1024 },
+});
+await server.listen();
+</code></pre>
+<table><thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody><tr><td><code>port</code></td><td>3000</td><td>Where it listens</td></tr>
+<tr><td><code>log_requests</code></td><td>false</td><td>Log every request</td></tr></tbody></table>
+<p>Typography in a grid of fixed cells is constrained, but the constraints are old friends: bold, italic, underline, and a handful of colours carry a long way. The terminal has outlived almost every interface that came after it. It is fast, it is scriptable, and it never asks you to wait for a spinner. See <a href="article-blog.html">the blog post</a> for background.</p>
+<h3>Troubleshooting</h3>
+<p>Reading on the web, by contrast, has become a negotiation with banners, overlays and autoplaying video. The words are in there somewhere. A reader view strips a page down to the text its author wrote, then sets it in a column narrow enough that the eye can find the next line without effort. Typography in a grid of fixed cells is constrained, but the constraints are old friends: bold, italic, underline, and a handful of colours carry a long way.</p>
+</div></div>
+<div class="footer">Widget docs · <a href="#">Edit this page</a></div>
+</body></html>

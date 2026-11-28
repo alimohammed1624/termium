@@ -44,6 +44,8 @@ ID is an element id from \`snapshot\`, like 3:142@2):
                                 wait until the page has loaded, or the element / text /
                                 address appears (--gone: disappears)
   dialog accept|dismiss [TEXT]  answer a JavaScript dialog (TEXT for a prompt)
+  reader [on|off|toggle] [TAB]  show the page's article as terminal text, or the page again
+                                (default: toggle)
 
 Options:
   -s, --session NAME   the session (default: "${DEFAULT_SESSION}")
@@ -260,6 +262,14 @@ export function parseCtl(argv: string[]): Parsed {
       maxArgs(0);
       break;
     }
+    case "reader": {
+      const mode = pos.length && !/^#?\d+$/.test(pos[0]!) ? pos.shift()! : "toggle";
+      if (!["on", "off", "toggle"].includes(mode)) fail(`reader on, off or toggle, not "${mode}"`);
+      req.reader = mode as CtlRequest["reader"];
+      tabArg();
+      maxArgs(0);
+      break;
+    }
     case "dialog": {
       const answer = pos.shift();
       if (answer !== "accept" && answer !== "dismiss") fail("dialog accept|dismiss [TEXT]");
@@ -416,6 +426,8 @@ function human(req: CtlRequest, r: any): string {
       return `${r.waited}${r.value !== undefined ? ` ${JSON.stringify(r.value)}` : ""}${r.gone ? " gone" : ""} after ${(r.ms / 1000).toFixed(1)}s`;
     case "dialog":
       return `${r.accepted ? "accepted" : "dismissed"} the ${r.type} dialog: ${r.message}`;
+    case "reader":
+      return `tab ${r.tab}: reader mode ${r.on ? "on" : "off"}${!r.on && req.reader !== "off" ? (r.readable ? "" : " (no article found)") : ""}`;
     default:
       return JSON.stringify(r);
   }

@@ -19,7 +19,8 @@
 #
 # Assets match scripts/release.sh (the local fallback) and install.sh
 # exactly: termium-<target>.tar.gz, each containing a top-level
-# termium-<target>/ dir with termium (mode 755), README.md, LICENSE and
+# termium-<target>/ dir with termium (mode 755), README.md, LICENSE,
+# THIRD-PARTY-LICENSES and
 # CHANGELOG.md, owned by 0:0; plus SHA256SUMS ("<hash>  termium-<target>.tar.gz"
 # lines). The names are deliberately version-independent so that
 # https://github.com/alimohammed1624/termium/releases/latest/download/<asset>
@@ -136,7 +137,7 @@ jobs:
           targets=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
                    x86_64-unknown-linux-musl aarch64-unknown-linux-musl
                    x86_64-apple-darwin aarch64-apple-darwin)
-          payload=(README.md LICENSE CHANGELOG.md)
+          payload=(README.md LICENSE THIRD-PARTY-LICENSES CHANGELOG.md)
           mkdir -p dist pkg
           for t in "${targets[@]}"; do
             name="termium-$t"

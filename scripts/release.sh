@@ -20,6 +20,7 @@
 # with --version, and runs the aarch64-apple-darwin one on the Mac too if it
 # is reachable (a warning, not a failure, if not). Then packages
 # dist/termium-<target>.tar.gz (termium-<target>/{termium,README.md,LICENSE,
+# THIRD-PARTY-LICENSES,
 # CHANGELOG.md}) plus dist/SHA256SUMS, exactly as the release workflow does
 # and install.sh expects. A real release then tags (git tag -a), pushes the
 # tag and runs `gh release create` with the notes and all assets. --dry-run

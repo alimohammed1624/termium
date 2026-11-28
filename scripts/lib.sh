@@ -34,7 +34,7 @@ TERMIUM_TARGETS=(
 
 # Files shipped next to the binary in every archive.
 # shellcheck disable=SC2034 # used by scripts/release.sh
-TERMIUM_PAYLOAD=(README.md LICENSE CHANGELOG.md)
+TERMIUM_PAYLOAD=(README.md LICENSE THIRD-PARTY-LICENSES CHANGELOG.md)
 
 # Directory holding CI logs/status for this clone (shared by its worktrees).
 ci_dir() {
