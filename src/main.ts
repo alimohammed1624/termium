@@ -318,7 +318,7 @@ async function openSplit(args: Args): Promise<never> {
   }
   try {
     const id = split!.make();
-    console.log(`session "${args.session}" is in a new ${split!.host} split (pane ${id})`);
+    console.log(`opened a new ${split!.host} split (pane ${id}) for session "${args.session}"`);
   } catch (e: any) {
     cannot(e?.message ?? String(e));
   }

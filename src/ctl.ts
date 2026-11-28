@@ -415,7 +415,7 @@ async function ctlSplit(p: Parsed, self: string[]): Promise<never> {
     cannot(e?.message ?? String(e));
   }
   if (p.json) console.log(JSON.stringify({ host: split!.host, pane }));
-  else console.log(`session "${p.session}" is in a new ${split!.host} split (pane ${pane})${p.req.url ? `, opening ${p.req.url} in a new tab there` : ""}`);
+  else console.log(`opened a new ${split!.host} split (pane ${pane}) for session "${p.session}"${p.req.url ? `, opening ${p.req.url} in a new tab there` : ""}`);
   process.exit(0);
 }
 

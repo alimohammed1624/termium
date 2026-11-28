@@ -126,6 +126,7 @@ try:
     check("tmux: ...in a new tab, the focused one", any(l.startswith("*") and "229944" in l for l in tabs.splitlines()), tabs)
 
     # allow-passthrough off: termium couldn't show anything in the pane; said here, nothing started.
+    sessions.append("pr4-tmux-off")
     tmux("set", "-g", "allow-passthrough", "off")
     tmux("send-keys", "-t", "main.0", f"clear; bun src/main.ts open -s pr4-tmux-off '{PAGE}' --split right; echo OFF_EXIT=$?", "Enter")
     ok = t.wait_for(lambda: re.search(r"OFF_EXIT=\d", tmux("capture-pane", "-p", "-t", "main.0").stdout), 60)
@@ -148,6 +149,7 @@ try:
     narrow = tmux("display-message", "-p", "-t", "main:1", "#{pane_id}").stdout.strip()
     tmux("send-keys", "-t", narrow, EXPORTS, "Enter")
     nospace = os.path.join(tmp, "nospace")
+    sessions.append("pr4-tmux-full")  # (ended at the end, should one start)
     tmux("send-keys", "-t", narrow, f"bun src/main.ts open -s pr4-tmux-full '{PAGE}' --split right 2>{nospace}.err; echo $? > {nospace}", "Enter")
     t.wait_for(lambda: os.path.exists(nospace) and open(nospace).read().strip() != "", 60)
     err = open(nospace + ".err").read() if os.path.exists(nospace + ".err") else ""

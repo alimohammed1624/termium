@@ -22,14 +22,14 @@ describe("detectHost", () => {
 
 describe("splitPlan", () => {
   const cmd = ["/usr/bin/termium", "attach", "agent"];
-  const env = { XDG_RUNTIME_DIR: "/run/user/1", TERMIUM_BROWSER: "/opt/h b", HOME: "/home/x" };
+  const env = { XDG_RUNTIME_DIR: "/run/user/1", TERMIUM_BROWSER: "/opt/h b", HOME: "/home/x", PATH: "/p" };
   const o = { cwd: "/w", focus: true, env };
   const sh = ["/bin/sh", "-c", holdOnFailure(cmd)];
   test("tmux: split-window next to this pane, with the session's environment", () => {
     const p = splitPlan({ kind: "tmux", pane: "%3" }, "right", cmd, o);
     expect(p).toEqual({
       argv: ["tmux", "split-window", "-h", "-t", "%3", "-c", "/w", "-P", "-F", "#{pane_id}",
-        "-e", "TERMIUM_BROWSER=/opt/h b", "-e", "XDG_RUNTIME_DIR=/run/user/1", "--", ...sh],
+        "-e", "PATH=/p", "-e", "TERMIUM_BROWSER=/opt/h b", "-e", "XDG_RUNTIME_DIR=/run/user/1", "--", ...sh],
     });
     expect(splitPlan({ kind: "tmux", pane: "%3" }, "down", cmd, { ...o, focus: false }).argv.slice(0, 4)).toEqual(["tmux", "split-window", "-v", "-d"]);
   });
@@ -38,7 +38,7 @@ describe("splitPlan", () => {
     const p = splitPlan({ kind: "herdr", pane: "w1:p1" }, "down", odd, { ...o, focus: false, bin: "/bin/herdr" });
     expect(p).toEqual({
       argv: ["/bin/herdr", "pane", "split", "--pane", "w1:p1", "--direction", "down", "--cwd", "/w", "--no-focus",
-        "--env", "TERMIUM_BROWSER=/opt/h b", "--env", "XDG_RUNTIME_DIR=/run/user/1", "--env", `TERMIUM_SPLIT_RUN=${holdOnFailure(odd)}`],
+        "--env", "PATH=/p", "--env", "TERMIUM_BROWSER=/opt/h b", "--env", "XDG_RUNTIME_DIR=/run/user/1", "--env", `TERMIUM_SPLIT_RUN=${holdOnFailure(odd)}`],
       run: 'exec /bin/sh -c "$TERMIUM_SPLIT_RUN"',
     });
   });

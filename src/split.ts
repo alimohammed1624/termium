@@ -14,8 +14,11 @@ export interface Host {
   pane: string;
 }
 
-/** What the new pane needs from this one's environment to find the session. */
-const PASSED_ENV = /^(XDG_RUNTIME_DIR|XDG_STATE_HOME|XDG_DATA_HOME|TMPDIR|TERMIUM_[A-Z0-9_]+)$/;
+/**
+ * What the new pane needs from this one's environment to find the session,
+ * and to start it as it would start here (PATH: a browser given by name).
+ */
+const PASSED_ENV = /^(PATH|XDG_RUNTIME_DIR|XDG_STATE_HOME|XDG_DATA_HOME|TMPDIR|TERMIUM_[A-Z0-9_]+)$/;
 
 /**
  * The host to ask for a split, from the environment; or why there's none.
