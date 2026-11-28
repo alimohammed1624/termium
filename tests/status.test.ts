@@ -10,6 +10,9 @@ describe("splitLink", () => {
   test("other schemes keep theirs; ports stay with the host", () => {
     expect(splitLink("http://127.0.0.1:8080/page.html")).toEqual({ lead: "http://", host: "127.0.0.1:8080", rest: "/page.html" });
   });
+  test("a user name and password are left out", () => {
+    expect(splitLink("http://example.org:pw@example.org/p?q#h")).toEqual({ lead: "http://", host: "example.org", rest: "/p?q#h" });
+  });
   test("no host: the scheme dim, the rest bright", () => {
     expect(splitLink("mailto:a@b.c")).toEqual({ lead: "mailto:", host: "a@b.c", rest: "" });
   });

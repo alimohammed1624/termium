@@ -85,6 +85,8 @@ try:
     check("long link: host shown", f"{HOST}/a/very/long/path" in line, line)
     check("long link: cut with an ellipsis", "…" in line, line)
     t.shot(f"{OUT}/2-link-long.png")
+    time.sleep(2.5)  # its href changes (nothing repaints): the new one shows
+    check("href changed under a still pointer", f"{HOST}/changed-href" in t.line(2), t.line(2))
 
     # A link inside an out-of-process (cross-site) iframe, then a same-site one.
     move(t, col, band(0.7), 0.8)

@@ -403,9 +403,11 @@ export class App {
   /** The point to look for a link at once the lookup in flight is done (latest wins). */
   private linkQuery: { page: Page; x: number; y: number } | null = null;
   private linkBusy = false;
-  /** Where the pointer is on the page it's over (CSS pixels), to look again when the page changes under it. */
-  private pointerOnPage: { page: Page; x: number; y: number } | null = null;
+  /** Where the pointer is over the page it's over (terminal pixels), to look again when things change under it. */
+  private pointerOnPage: { page: Page; px: number; py: number } | null = null;
   private linkRecheck: ReturnType<typeof setTimeout> | null = null;
+  /** A slow look again while the pointer rests on a page (a link can change without a repaint). */
+  private linkIdle: ReturnType<typeof setTimeout> | null = null;
   /** termium's own isolated worlds in frames with no session of their own, by session and frame. */
   private frameWorlds = new Map<string, number>();
   /** Out-of-process frames' sessions, by frame id (for links inside them). */
@@ -2304,6 +2306,11 @@ export class App {
   /** Finds the link under the pointer at (x, y) of `page`, for the address row. */
   private lookForLink(page: Page, x: number, y: number): void {
     this.linkQuery = { page, x, y };
+    if (this.linkIdle) clearTimeout(this.linkIdle);
+    this.linkIdle = setTimeout(() => {
+      this.linkIdle = null;
+      this.recheckLink();
+    }, 1000);
     if (this.linkBusy) return;
     this.linkBusy = true;
     void (async () => {
@@ -2321,14 +2328,34 @@ export class App {
     })();
   }
 
-  /** The page painted under a still pointer (it scrolled, say): what's under the pointer may have changed. */
+  /**
+   * The page painted under a still pointer (it scrolled, its pane moved, …):
+   * what's under the pointer may have changed.
+   */
   private recheckLink(): void {
     if (this.linkRecheck) return;
     this.linkRecheck = setTimeout(() => {
       this.linkRecheck = null;
       const p = this.pointerOnPage;
-      if (p && p.page === this.hoverPage && !this.mouseButtons) this.lookForLink(p.page, p.x, p.y);
+      if (!p || p.page !== this.hoverPage || this.mouseButtons) return;
+      const at = this.pagePoint(p.page, p.px, p.py);
+      if (at) this.lookForLink(p.page, at.x, at.y);
+      else this.leaveHover(); // (its pane moved from under the pointer)
     }, 200);
+  }
+
+  /** A terminal pixel as a point on `page` (CSS pixels, kept inside it); null when it isn't over the page's pane. */
+  private pagePoint(page: Page, px: number, py: number, clamp = false): { x: number; y: number } | null {
+    const g = this.geom.get(page);
+    if (!g || !page.css) return null;
+    if (!clamp && !inRect(g.content, Math.floor(px / this.cellW) + 1, Math.floor(py / this.cellH) + 1)) return null;
+    const devW = g.content.cols * this.cellW;
+    const devH = g.content.rows * this.cellH;
+    // The page's real size: another DevTools client may hold it at its own (see onFrame).
+    const size = page.actual ?? page.css;
+    const x = Math.max(0, Math.min(size.w - 1, ((px - (g.content.col - 1) * this.cellW) * size.w) / devW));
+    const y = Math.max(0, Math.min(size.h - 1, ((py - (g.content.row - 1) * this.cellH) * size.h) / devH));
+    return { x, y };
   }
 
   /**
@@ -2610,7 +2637,7 @@ export class App {
       const textW = fieldW - 1 - 2;
       // A hint goes on the right, the address keeping at least 20 columns of what it had.
       const hintW = page && !prompt && this.chromeHint
-        ? Math.min(width(this.chromeHint) + 2, Math.max(0, textW - Math.min(width(shown), width(this.chromeHint) + 2 + 20 <= textW ? 20 : 8)))
+        ? Math.min(width(this.chromeHint) + 2, Math.max(0, textW - Math.min(width(shown), 20)))
         : 0;
       const hinted = hintW > 4 ? fg(C.text) + "  " + hintText(this.chromeHint!, hintW - 2, fg(C.text), fg(C.accent)) : " ".repeat(hintW);
       const field =
@@ -3924,7 +3951,12 @@ export class App {
         this.hover.move(col, row);
         // Let go off the page: it's no longer under the pointer.
         const g = this.hoverPage ? this.geom.get(this.hoverPage) : undefined;
-        if (this.hoverPage && !(g && inRect(g.content, col, row))) this.leaveHover();
+        if (this.hoverPage && !(g && inRect(g.content, col, row))) {
+          this.leaveHover();
+          // Let go over another page: the pointer is over that one now.
+          const other = [...this.geom.values()].find((p) => inRect(p.content, col, row));
+          if (other) this.pageMouse(other.item, { ...ev, action: "move" }, px, py);
+        }
       }
       return;
     }
@@ -4032,14 +4064,9 @@ export class App {
   }
 
   private pageMouse(page: Page, ev: MouseEvent, px: number, py: number): void {
-    const g = this.geom.get(page);
-    if (!g || !page.css) return;
-    const devW = g.content.cols * this.cellW;
-    const devH = g.content.rows * this.cellH;
-    // The page's real size: another DevTools client may hold it at its own (see onFrame).
-    const size = page.actual ?? page.css;
-    const x = Math.max(0, Math.min(size.w - 1, ((px - (g.content.col - 1) * this.cellW) * size.w) / devW));
-    const y = Math.max(0, Math.min(size.h - 1, ((py - (g.content.row - 1) * this.cellH) * size.h) / devH));
+    const at = this.pagePoint(page, px, py, true);
+    if (!at) return;
+    const { x, y } = at;
     const modifiers = modBits(ev.mods);
     const sid = page.sessionId;
     const send = (params: object) => this.cdp.send("Input.dispatchMouseEvent", params, sid).catch(() => {});
@@ -4054,7 +4081,7 @@ export class App {
       if (ev.mods.shift && dx === 0) [dx, dy] = [dy, 0];
       void send({ type: "mouseWheel", x, y, deltaX: dx, deltaY: dy, modifiers });
       // (What scrolls under the pointer is looked at once the page paints: recheckLink.)
-      if (this.hoverPage === page) this.pointerOnPage = { page, x, y };
+      if (this.hoverPage === page) this.pointerOnPage = { page, px, py };
       return;
     }
     if (ev.action === "move") {
@@ -4064,7 +4091,7 @@ export class App {
       // ends hover on the first, as a mouse leaving a window does.
       if (this.hoverPage && this.hoverPage !== page) this.leaveHover();
       this.hoverPage = page;
-      this.pointerOnPage = { page, x, y };
+      this.pointerOnPage = { page, px, py };
       if (!this.mouseButtons) this.lookForLink(page, x, y);
       return;
     }
@@ -4101,7 +4128,7 @@ export class App {
         this.mouseCapture = null;
         // A drag (selecting text, say) ends: the link under the pointer now.
         if (this.hoverPage === page) {
-          this.pointerOnPage = { page, x, y };
+          this.pointerOnPage = { page, px, py };
           this.lookForLink(page, x, y);
         }
       }
@@ -4113,6 +4140,8 @@ export class App {
     const page = this.hoverPage;
     this.hoverPage = null;
     this.pointerOnPage = null;
+    if (this.linkIdle) clearTimeout(this.linkIdle);
+    this.linkIdle = null;
     if (page) this.setLink(page, "");
     if (!page || !this.pages.has(page.sessionId)) return;
     this.cdp

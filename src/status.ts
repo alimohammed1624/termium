@@ -62,9 +62,8 @@ export function splitLink(url: string): { lead: string; host: string; rest: stri
   }
   // https:// is left out, as in the address itself.
   const lead = u.protocol === "https:" ? "" : `${u.protocol}//`;
-  const at = url.indexOf(u.host, u.protocol.length);
-  const rest = at >= 0 ? url.slice(at + u.host.length) : u.pathname + u.search + u.hash;
-  return { lead, host: u.host, rest };
+  // (A user name and password in it aren't shown.)
+  return { lead, host: u.host, rest: u.pathname + u.search + u.hash };
 }
 
 /**
