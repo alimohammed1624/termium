@@ -29,6 +29,7 @@ URL = f"http://127.0.0.1:{PORT}/page.html"
 
 # Catppuccin Mocha (the palette when the terminal doesn't report its colors).
 BACKGROUND, BACKDROP, SURFACE, HOVER, ACCENT = "1e1e2e", "11111b", "313244", "45475a", "cba6f7"
+TEXT = "cdd6f4"
 HOVER_SGR = b"48;2;69;71;90"
 PRESS_SGR = b"48;2;203;166;247"
 
@@ -70,6 +71,9 @@ try:
     # Over the "+": it lights up, the hand pointer comes on, and the write is small.
     w = move(t, plus + 1, 1)
     check("+ lit on hover", bg(t, plus + 1, 1) == HOVER, bg(t, plus + 1, 1))
+    with t.lock:
+        plus_fg = t.screen.buffer[0][plus].fg
+    check("hovered text brightens", plus_fg == TEXT, plus_fg)
     check("hand pointer on", b"\x1b]22;pointer\x1b\\" in w, w[-80:])
     check("hover write is small", 0 < len(w) < 200, f"{len(w)} bytes")
     print(f"  bytes for entering a span: {len(w)}")
@@ -90,7 +94,7 @@ try:
     # Over the page: the tab goes back, the pointer too.
     w = move(t, 70, 20)
     check("tab back to normal off the chrome", bg(t, tab + 3, 1) == BACKGROUND, bg(t, tab + 3, 1))
-    check("hand pointer off", b"\x1b]22;default\x1b\\" in w, w[-80:])
+    check("hand pointer off", b"\x1b]22;default\x1b\\\x1b]22;\x1b\\" in w, w[-80:])
     w = move(t, 72, 22)
     check("moves over the page write no chrome", HOVER_SGR not in w and b"\x1b]22;" not in w, w[:80])
 
@@ -144,6 +148,16 @@ try:
     t.mouse(plus * t.cell_w, 10, action="release")
     time.sleep(0.25)
     check("+ lit after the drag's release", bg(t, plus + 1, 1) == HOVER, bg(t, plus + 1, 1))
+
+    # A page drag whose button comes up under the help overlay: the page lets go, hover comes back.
+    move(t, 70, 20)
+    t.mouse(700, 400, action="press")
+    t.mouse(640, 380, action="drag"); time.sleep(0.1)
+    t.key("ctrl+b"); t.key("question"); time.sleep(0.5)
+    t.mouse(640, 380, action="release"); time.sleep(0.1)
+    t.key("escape"); time.sleep(0.5)
+    move(t, plus + 1, 1)
+    check("hover works after a release under an overlay", bg(t, plus + 1, 1) == HOVER, bg(t, plus + 1, 1))
 
     # A second tab; closing the tab that is flashing doesn't pass the flash on.
     move(t, 70, 20)

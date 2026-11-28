@@ -18,7 +18,11 @@ export interface Zone {
   col: number;
   /** Columns it covers. */
   width: number;
-  /** What it shows: text, with only foreground/bold SGR inside (no backgrounds). */
+  /**
+   * What it shows: text, with only foreground/bold SGR inside (no backgrounds).
+   * A color inside stays when hovered; the style's own text color gives way to
+   * the hover's.
+   */
   text: string;
   /** The SGR it is normally drawn with, background included. */
   style: string;
@@ -32,7 +36,7 @@ export type ZoneState = "hover" | "press";
 
 /** SGR prefixes for the two states. */
 export interface HoverStyles {
-  /** Background over a hovered span. */
+  /** Background (and text color) over a hovered span. */
   hover: string;
   /** Background over a hovered span whose background is the hover color already. */
   hoverLit: string;
@@ -44,8 +48,12 @@ const SGR = /\x1b\[[0-9;:]*m/g;
 const RESET = "\x1b[0m";
 /** OSC 22: a hand over clickable chrome (kitty, Ghostty, foot; ignored elsewhere). */
 export const POINTER_HAND = "\x1b]22;pointer\x1b\\";
-/** Back to the usual pointer ("default" is a name kitty, Ghostty and foot all know). */
-export const POINTER_RESET = "\x1b]22;default\x1b\\";
+/**
+ * Back to the usual pointer: "default" (Ghostty takes names only), then the
+ * empty reset, which in kitty and foot also brings back a pointer shape the
+ * user configured.
+ */
+export const POINTER_RESET = "\x1b]22;default\x1b\\\x1b]22;\x1b\\";
 /** How long a click's flash lasts. */
 export const PRESS_MS = 120;
 

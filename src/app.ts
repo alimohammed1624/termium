@@ -364,8 +364,9 @@ export class App {
       return true;
     },
     () => ({
-      hover: bg(C.hover),
-      hoverLit: bg(mix(C.hover, C.text, 0.25)),
+      // The text brightens too: dim labels would hardly read on the hover color.
+      hover: bg(C.hover) + fg(C.text),
+      hoverLit: bg(mix(C.hover, C.text, 0.25)) + fg(C.text),
       press: bg(C.accent) + fg(C.onAccent),
     }),
   );
@@ -2331,7 +2332,8 @@ export class App {
     }
     if (badge && bw) {
       s += RESET + at(1, col + w) + badge.style + truncate(badge.text, bw);
-      this.zone("badge", 1, col + w, truncate(badge.text, bw), badge.style, C.backdrop);
+      // Its color goes in the text, so it keeps it when hovered.
+      this.zone("badge", 1, col + w, badge.style.replace(bg(C.backdrop), "") + truncate(badge.text, bw), bg(C.backdrop), C.backdrop);
     }
     return s + RESET;
   }
@@ -2436,7 +2438,7 @@ export class App {
     if (rightW > 0) s += barBg + (notice.text ? notice.style : fg(C.orange)) + fit(right, rightW);
     if (this.noticeHit) {
       const nw = this.noticeHit[1] - this.noticeHit[0];
-      this.zone("notice", 2, rightCol, fit(notice.text, nw), barBg + notice.style, C.background, nw);
+      this.zone("notice", 2, rightCol, notice.style + fit(notice.text, nw), barBg, C.background, nw);
     }
     if (modeW) s += bg(C.accent) + fg(C.onAccent) + BOLD + mode;
     const used = (urlStart - col) + fieldW + 1 + rightW + modeW;
@@ -3690,6 +3692,12 @@ export class App {
       else this.hover.move(col, row);
     }
 
+    // A button let go under an overlay still ends its drag, or the page's hold on the pointer.
+    if (ev.action === "release" && this.covered()) {
+      if (this.drag) this.drag = null;
+      else if (this.mouseCapture) this.pageMouse(this.mouseCapture, ev, px, py);
+    }
+
     if (this.mode === "help") {
       if (ev.action === "press") {
         this.mode = "normal";
@@ -3730,7 +3738,8 @@ export class App {
       // Looked up first: the click may redraw the chrome.
       const zone = ev.button === 0 ? this.hover.at(col, row) : undefined;
       if (this.chromeClick(ev, col, row)) {
-        this.hover.press(zone);
+        // (Not a divider about to be dragged: its flash would move with it.)
+        if (!this.drag) this.hover.press(zone);
         return;
       }
     }
