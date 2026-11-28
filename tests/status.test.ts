@@ -38,6 +38,10 @@ describe("hintText", () => {
   test("short of room, the action is cut and the keybind stays", () => {
     expect(strip(hintText("Reload page  ^R", 10, "<b>", "<k>"))).toBe("Reloa…  ^R");
   });
+  test("a keybind that doesn't fit whole is left out, never cut", () => {
+    expect(strip(hintText("Update termium  ^B U", 5, "", ""))).toBe("^B U ");
+    expect(strip(hintText("Update termium  ^B U", 3, "", ""))).toBe("Up…");
+  });
   test("no keybind", () => {
     expect(strip(hintText("Stop loading", 14, "", ""))).toBe("Stop loading  ");
   });

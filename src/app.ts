@@ -403,6 +403,11 @@ export class App {
   /** The point to look for a link at once the lookup in flight is done (latest wins). */
   private linkQuery: { page: Page; x: number; y: number } | null = null;
   private linkBusy = false;
+  /** Where the pointer is on the page it's over (CSS pixels), to look again when the page changes under it. */
+  private pointerOnPage: { page: Page; x: number; y: number } | null = null;
+  private linkRecheck: ReturnType<typeof setTimeout> | null = null;
+  /** termium's own isolated worlds in frames with no session of their own, by session and frame. */
+  private frameWorlds = new Map<string, number>();
   /** Out-of-process frames' sessions, by frame id (for links inside them). */
   private frameSessions = new Map<string, string>();
   private chromeQueued = false;
@@ -428,6 +433,7 @@ export class App {
       this.cdp.failSession(p.sessionId);
       this.frameOwner.delete(p.sessionId);
       if (p.targetId && this.frameSessions.get(p.targetId) === p.sessionId) this.frameSessions.delete(p.targetId);
+      for (const key of this.frameWorlds.keys()) if (key.startsWith(`${p.sessionId} `)) this.frameWorlds.delete(key);
       this.themeScripts.delete(p.sessionId);
       this.onGone(this.pages.get(p.sessionId));
     });
@@ -1620,6 +1626,7 @@ export class App {
     this.drag = null;
     this.hoverPage = null;
     this.linkHover = null;
+    this.pointerOnPage = null;
     this.pageKeysDown.clear();
     this.syntheticDown.clear();
   }
@@ -2031,6 +2038,7 @@ export class App {
   private onFrame(p: any, sid: string | undefined): void {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page) return;
+    if (page === this.hoverPage) this.recheckLink();
     const m = p.metadata;
     // Just after a resize or a restarted screencast (until a frame of the new
     // shape comes, for 2 s at most), a frame of the viewport as it was can
@@ -2313,25 +2321,59 @@ export class App {
     })();
   }
 
-  /** The link at (x, y) of a document session, following the point into out-of-process frames. */
-  private async linkIn(sid: string, x: number, y: number, depth: number): Promise<string | null> {
+  /** The page painted under a still pointer (it scrolled, say): what's under the pointer may have changed. */
+  private recheckLink(): void {
+    if (this.linkRecheck) return;
+    this.linkRecheck = setTimeout(() => {
+      this.linkRecheck = null;
+      const p = this.pointerOnPage;
+      if (p && p.page === this.hoverPage && !this.mouseButtons) this.lookForLink(p.page, p.x, p.y);
+    }, 200);
+  }
+
+  /**
+   * The link at (x, y) of a document session (in `contextId`, else its main
+   * world), following the point into frames of other origins. null: no answer.
+   */
+  private async linkIn(sid: string, x: number, y: number, depth: number, contextId?: number): Promise<string | null> {
     const ask = (element: boolean) =>
-      this.cdp.send("Runtime.evaluate", { expression: linkAt(x, y, element), returnByValue: !element, ...(element ? { objectGroup: "termium-link" } : {}) }, sid);
+      this.cdp.send("Runtime.evaluate", {
+        expression: linkAt(x, y, element),
+        returnByValue: !element,
+        ...(element ? { objectGroup: "termium-link" } : {}),
+        ...(contextId !== undefined ? { contextId } : {}),
+      }, sid);
     try {
       const { result } = await ask(false);
       if (typeof result?.value === "string") return result.value;
       if (!Array.isArray(result?.value) || depth > 8) return "";
-      // Over a frame in another process: on into its session.
+      // Over a frame of another origin: on into its own session (another
+      // process), else into termium's isolated world in it (same process).
       const [fx, fy] = result.value as number[];
-      let child: string | undefined;
+      let frameId: string | undefined;
       try {
         const objectId = (await ask(true)).result?.objectId;
-        const node = objectId ? (await this.cdp.send("DOM.describeNode", { objectId }, sid)).node : null;
-        child = node?.frameId ? this.frameSessions.get(node.frameId) : undefined;
+        if (objectId) frameId = (await this.cdp.send("DOM.describeNode", { objectId }, sid)).node?.frameId;
       } finally {
         this.cdp.send("Runtime.releaseObjectGroup", { objectGroup: "termium-link" }, sid).catch(() => {});
       }
-      return child ? await this.linkIn(child, fx!, fy!, depth + 1) : "";
+      if (!frameId) return "";
+      const child = this.frameSessions.get(frameId);
+      if (child) return await this.linkIn(child, fx!, fy!, depth + 1);
+      const key = `${sid} ${frameId}`;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let world = this.frameWorlds.get(key);
+        if (world === undefined) {
+          world = (await this.cdp.send("Page.createIsolatedWorld", { frameId, worldName: "termium-link" }, sid)).executionContextId as number;
+          if (this.frameWorlds.size >= 256) this.frameWorlds.clear();
+          this.frameWorlds.set(key, world);
+        }
+        const url = await this.linkIn(sid, fx!, fy!, depth + 1, world);
+        if (url !== null) return url;
+        // That world went with the frame's last document: a new one.
+        this.frameWorlds.delete(key);
+      }
+      return null;
     } catch {
       return null;
     }
@@ -2564,11 +2606,11 @@ export class App {
       const shown = url.replace(/^https:\/\//, "");
       const icon = page?.crashed ? fg(C.red) + "✖ " : secure ? fg(C.green) + "🔒" : fg(C.dim) + "  ";
       // The status line, when there's one: a control's hint, or where the hovered link goes.
-      const link = this.linkHover && this.geom.has(this.linkHover.page) ? this.linkHover.url : null;
+      const link = this.linkHover && !this.covered() && this.geom.has(this.linkHover.page) ? this.linkHover.url : null;
       const textW = fieldW - 1 - 2;
       // A hint goes on the right, the address keeping at least 20 columns of what it had.
       const hintW = page && !prompt && this.chromeHint
-        ? Math.min(width(this.chromeHint) + 2, Math.max(0, textW - Math.min(width(shown), 20)))
+        ? Math.min(width(this.chromeHint) + 2, Math.max(0, textW - Math.min(width(shown), width(this.chromeHint) + 2 + 20 <= textW ? 20 : 8)))
         : 0;
       const hinted = hintW > 4 ? fg(C.text) + "  " + hintText(this.chromeHint!, hintW - 2, fg(C.text), fg(C.accent)) : " ".repeat(hintW);
       const field =
@@ -3835,6 +3877,8 @@ export class App {
     if (ev.action === "move") {
       if (this.drag || this.mouseCapture) this.hover.leave();
       else this.hover.move(col, row);
+      // Under an overlay the pointer isn't over a page (its link is no longer under it).
+      if (this.covered() && this.hoverPage && !this.mouseCapture) this.leaveHover();
     }
 
     // A button let go under an overlay still ends its drag, or the page's hold on the pointer.
@@ -3876,7 +3920,12 @@ export class App {
     const captured = this.mouseCapture;
     if (captured && (ev.action === "move" || ev.action === "release")) {
       this.pageMouse(captured, ev, px, py);
-      if (!this.mouseCapture) this.hover.move(col, row);
+      if (!this.mouseCapture) {
+        this.hover.move(col, row);
+        // Let go off the page: it's no longer under the pointer.
+        const g = this.hoverPage ? this.geom.get(this.hoverPage) : undefined;
+        if (this.hoverPage && !(g && inRect(g.content, col, row))) this.leaveHover();
+      }
       return;
     }
 
@@ -4004,8 +4053,8 @@ export class App {
       let dy = ev.wheel === "up" ? -step : ev.wheel === "down" ? step : 0;
       if (ev.mods.shift && dx === 0) [dx, dy] = [dy, 0];
       void send({ type: "mouseWheel", x, y, deltaX: dx, deltaY: dy, modifiers });
-      // What's under the pointer scrolls by.
-      if (this.hoverPage === page) setTimeout(() => this.lookForLink(page, x, y), 150);
+      // (What scrolls under the pointer is looked at once the page paints: recheckLink.)
+      if (this.hoverPage === page) this.pointerOnPage = { page, x, y };
       return;
     }
     if (ev.action === "move") {
@@ -4015,6 +4064,7 @@ export class App {
       // ends hover on the first, as a mouse leaving a window does.
       if (this.hoverPage && this.hoverPage !== page) this.leaveHover();
       this.hoverPage = page;
+      this.pointerOnPage = { page, x, y };
       if (!this.mouseButtons) this.lookForLink(page, x, y);
       return;
     }
@@ -4047,7 +4097,14 @@ export class App {
       void send({ type: "mousePressed", x, y, button: name, buttons: this.mouseButtons, clickCount: lc.count, modifiers });
     } else {
       this.mouseButtons &= ~(bits[ev.button] ?? 0);
-      if (this.mouseButtons === 0) this.mouseCapture = null;
+      if (this.mouseButtons === 0) {
+        this.mouseCapture = null;
+        // A drag (selecting text, say) ends: the link under the pointer now.
+        if (this.hoverPage === page) {
+          this.pointerOnPage = { page, x, y };
+          this.lookForLink(page, x, y);
+        }
+      }
       void send({ type: "mouseReleased", x, y, button: name, buttons: this.mouseButtons, clickCount: this.lastClick.count, modifiers });
     }
   }
@@ -4055,6 +4112,7 @@ export class App {
   private leaveHover(): void {
     const page = this.hoverPage;
     this.hoverPage = null;
+    this.pointerOnPage = null;
     if (page) this.setLink(page, "");
     if (!page || !this.pages.has(page.sessionId)) return;
     this.cdp

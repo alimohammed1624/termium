@@ -11,8 +11,15 @@
 <div id="none">Not a link</div>
 <iframe id="cross"></iframe>
 <iframe id="same" src="/links-frame.html"></iframe>
+<!-- Below the fold (End scrolls to them): -->
+<iframe id="port"></iframe>
+<div id="scaled"><iframe src="/links-two.html" style="height: 40vh; width: 200%; transform: scale(.5); transform-origin: 0 0"></iframe></div>
+<a id="vanish" href="/vanish-target" onmouseover="setTimeout(() => this.replaceWith(Object.assign(document.createElement('div'), { textContent: 'gone' })), 800)">Link that goes away</a>
 <script>
  // localhost vs 127.0.0.1: another site, so its own process (an out-of-process iframe).
  document.getElementById('cross').src = 'http://localhost:' + location.port + '/links-frame.html';
+ // Another port: same site (same process), another origin (out of reach of the page's script).
+ const alt = new URLSearchParams(location.search).get('alt');
+ if (alt) document.getElementById('port').src = 'http://127.0.0.1:' + alt + '/links-frame.html?port';
 </script>
 </body></html>

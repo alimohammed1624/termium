@@ -26,8 +26,14 @@ PY = shutil.which("python3") or sys.executable
 srv = subprocess.Popen([PY, "-m", "http.server", str(PORT), "--bind", "127.0.0.1",
                         "--directory", os.path.join(ROOT, "tests", "fixtures")],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+# A second port: a same-site frame of another origin (same process, out of the page's reach).
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0)); ALT = sock.getsockname()[1]
+srv2 = subprocess.Popen([PY, "-m", "http.server", str(ALT), "--bind", "127.0.0.1",
+                         "--directory", os.path.join(ROOT, "tests", "fixtures")],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(0.5)
-URL = f"http://127.0.0.1:{PORT}/links.html"
+URL = f"http://127.0.0.1:{PORT}/links.html?alt={ALT}"
 HOST = f"127.0.0.1:{PORT}"
 TEXT = "cdd6f4"  # Catppuccin Mocha text (bright)
 
@@ -94,6 +100,42 @@ try:
     move(t, 120, 1, 0.6)
     check("restored when the pointer leaves the page", f"{HOST}/links.html" in t.line(2), t.line(2))
 
+    # A drag over the page that ends over a link: shown once the button is up.
+    move(t, col, band(0.5), 0.4)
+    y0, y1 = (band(0.5) - 1) * t.cell_h + 5, (band(0.1) - 1) * t.cell_h + 5
+    t.mouse((col - 1) * t.cell_w, y0, action="press")
+    for y in range(y0, y1, -40):
+        t.mouse((col - 1) * t.cell_w, y, action="drag"); time.sleep(0.01)
+    t.mouse((col - 1) * t.cell_w, y1, action="drag"); time.sleep(0.4)
+    check("no lookup while a button is held", "from=links" not in t.line(2), t.line(2))
+    t.mouse((col - 1) * t.cell_w, y1, action="release"); time.sleep(0.6)
+    check("link under the pointer after the release", "page.html?from=links" in t.line(2), t.line(2))
+
+    # Help opens over a hovered link; the pointer moves under it: no link once it closes.
+    t.key("ctrl+b"); t.key("question"); time.sleep(0.5)
+    check("no link under help", "from=links" not in t.line(2), t.line(2))
+    move(t, col, band(0.5), 0.4)
+    t.key("escape"); time.sleep(0.6)
+    check("no stale link after help", "from=links" not in t.line(2) and f"{HOST}/links.html" in t.line(2), t.line(2))
+
+    # The page scrolls under a still pointer (End): what's under it now is shown.
+    move(t, col, band(0.1), 0.6)
+    check("plain link before scrolling", "page.html?from=links" in t.line(2), t.line(2))
+    t.key("end"); time.sleep(1.0)
+    check("scrolled under a still pointer: the new link", "example.org/inside/a/frame?x=1" in t.line(2), t.line(2))
+    # (Now, top to bottom: cross-site frame, same-site frame, other-port frame, scaled frame, vanishing link.)
+    move(t, col, band(0.5), 0.8)
+    check("link in a same-site frame of another origin", "example.org/inside/a/frame?x=1" in t.line(2), t.line(2))
+    move(t, col, band(0.62), 0.8)
+    check("scaled frame: its top link", "example.org/top" in t.line(2), t.line(2))
+    move(t, col, band(0.77), 0.8)
+    check("scaled frame: its bottom link", "example.org/bottom" in t.line(2), t.line(2))
+    move(t, col, band(0.9), 0.5)
+    check("link that will go away", "/vanish-target" in t.line(2), t.line(2))
+    time.sleep(1.2)
+    check("gone from under a still pointer: address back", "vanish" not in t.line(2) and f"{HOST}/links.html" in t.line(2), t.line(2))
+    t.key("home"); time.sleep(0.8)
+
     # Chrome controls: nothing at first, the action and keybind after the pause.
     def hint_after(col_, row_, want, name):
         move(t, 120, 1, 0.8)  # over nothing; the hint goes and the warm-up ends
@@ -144,7 +186,7 @@ try:
     t.shot(f"{OUT}/5-hint-narrow.png")
     t.close()
 finally:
-    srv.terminate()
+    srv.terminate(); srv2.terminate()
     subprocess.run(MAIN + ["kill", SESSION], env={**os.environ, **ENV}, capture_output=True)
     shutil.rmtree(root, ignore_errors=True)
 

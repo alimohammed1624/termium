@@ -10,7 +10,7 @@ export const HINT_WARM_MS = 500;
 /**
  * JS that finds the link at (x, y) (CSS pixels) of the document it runs in,
  * through shadow roots and same-process frames: its URL ("" for none). Over
- * a frame it can't reach into (another process), the point inside that
+ * a frame it can't reach into (another origin), the point inside that
  * frame as [x, y], or, with `element`, the frame's element itself.
  */
 export function linkAt(x: number, y: number, element = false): string {
@@ -25,9 +25,11 @@ export function linkAt(x: number, y: number, element = false): string {
     }
     if (!e) return "";
     if (e.localName === "iframe" || e.localName === "frame") {
-      const r = e.getBoundingClientRect();
-      x -= r.left + e.clientLeft;
-      y -= r.top + e.clientTop;
+      // Into the frame's own coordinates: past its border and padding, undoing a scale.
+      const r = e.getBoundingClientRect(), cs = getComputedStyle(e);
+      const sx = e.offsetWidth ? r.width / e.offsetWidth : 1, sy = e.offsetHeight ? r.height / e.offsetHeight : 1;
+      x = (x - r.left) / (sx || 1) - e.clientLeft - (parseFloat(cs.paddingLeft) || 0);
+      y = (y - r.top) / (sy || 1) - e.clientTop - (parseFloat(cs.paddingTop) || 0);
       let inner = null;
       try { inner = e.contentDocument; } catch {}
       if (inner) { d = inner; continue; }
@@ -83,9 +85,10 @@ export function hintText(hint: string, w: number, bright: string, key: string): 
   const cut = hint.lastIndexOf("  ");
   const label = cut >= 0 ? hint.slice(0, cut) : hint;
   const keys = cut >= 0 ? hint.slice(cut) : "";
-  // Short of room, the keybind stays and the action is cut.
-  const keysT = truncate(keys, w);
-  const labelT = truncate(label, w - width(keysT));
+  // Short of room, the keybind stays and the action is cut (a keybind that doesn't fit whole is left out).
+  const keysT = width(keys) <= w ? keys : width(keys.trimStart()) <= w ? keys.trimStart() : "";
+  const room = w - width(keysT);
+  const labelT = room >= 3 || !keysT ? truncate(label, room) : "";
   return bright + labelT + key + keysT + " ".repeat(Math.max(0, w - width(labelT) - width(keysT)));
 }
 
