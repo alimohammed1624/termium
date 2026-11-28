@@ -168,6 +168,89 @@ try:
     print("viewports after Equalize panes:", vp)
     check("Equalize panes evens out every row and column", max(vp[k][1] for k in "ADC") - min(vp[k][1] for k in "ADC") <= 22
           and max(vp[k][0] for k in "EBF") - min(vp[k][0] for k in "EBF") <= 12, vp)
+
+    hA_h = viewports()["A"][1]
+    # Not double-clicks: a click on a page in between, or a click and then a drag.
+    root_col = lambda: header("E")[0] - 1
+    w0 = viewports()["A"][0]
+    t.click_cell(root_col(), 30); t.click_cell(root_col() + 10, 30); t.click_cell(root_col(), 30); time.sleep(1.2)
+    check("divider, page, divider is not a double-click", viewports()["A"][0] == w0, (w0, viewports()["A"][0]))
+    c = root_col()
+    t.click_cell(c, 30); time.sleep(0.05)
+    t.mouse(*px(c, 30), 0, "press")
+    for x in range(c, c + 20, 4):
+        t.mouse(*px(x, 30), 0, "drag"); time.sleep(0.03)
+    t.mouse(*px(c + 20, 30), 0, "release"); time.sleep(1.2)
+    w1 = viewports()["A"][0]
+    check("a click and then a quick drag drags (no reset)", w1 > w0 + 150, (w0, w1))
+    c = root_col()
+    t.mouse(*px(c, 30), 0, "press"); t.mouse(*px(c, 34), 0, "drag"); t.mouse(*px(c, 34), 0, "release"); time.sleep(0.1)
+    t.click_cell(c, 34); time.sleep(1.2)
+    check("a drag along the divider and then a click is not a double-click", viewports()["A"][0] == w1, (w1, viewports()["A"][0]))
+
+    # Right-click on the = of a stacked divider (a header) still opens that pane's menu.
+    c, r = header("D")
+    move(c + 3, r); time.sleep(0.5)
+    g = t.line(r).find(" = ")
+    t.click_cell(g + 2, r, 2); time.sleep(0.6)
+    check("right-click on a header grip's = opens the pane menu (doesn't equalize)",
+          t.wait_text("↓ Split down", 3) and viewports()["A"][1] == hA_h, (g, t.line(r)))
+    t.key("escape"); time.sleep(0.6)
+
+    # A stacked divider's grip never covers the header's arrows.
+    c, r = split_button("D")
+    move(c, r); time.sleep(0.6)
+    line = t.line(r)
+    check("on a stacked divider's header, the arrows and the grip's = both show", "← ↑ ↓ →" in line and " = " in line, line)
+    a = line.find("←") + 1
+    t.click_cell(a, r)
+    check("clicking ← there splits (not equalize)", open_url("G"))
+    move(2, 30); time.sleep(0.4)
+
+    # A zoomed pane: no preview (the split unzooms; the divider wouldn't be there).
+    c, r = header("C")
+    t.click_cell(c + 3, r, 2); time.sleep(0.6)
+    q = find("Zoom pane"); t.click_cell(q[0] + 2, q[1]); time.sleep(1.2)
+    c, r = split_button("C")
+    move(c, r); time.sleep(0.4)
+    a = t.line(r).find("→") + 1
+    move(a, r); time.sleep(0.8)
+    check("zoomed: arrows show, but no preview", "← ↑ ↓ →" in t.line(r) and find("┊") is None)
+    t.key("ctrl+b"); t.key("z"); time.sleep(1)
+    move(2, 30); time.sleep(0.4)
+
+    # A menu's preview goes with the menu, however it closes (here: the terminal is resized).
+    c, r = split_button("C")
+    t.click_cell(c, r); time.sleep(0.6)
+    q = find("→ Split right"); move(q[0] + 2, q[1]); time.sleep(0.8)
+    check("the ⊞ menu previews the highlighted split", find("┊") is not None)
+    t.resize(150, 45); time.sleep(1.5)
+    check("a resize closes the menu and its preview", find("→ Split right") is None and find("┊") is None)
+    t.resize(160, 45); time.sleep(1)
+finally:
+    t.close()
+
+# Unicode placeholders (tmux): a vertical preview hides one column of the picture, not the rest of the row.
+shutil.rmtree(profile, ignore_errors=True); os.makedirs(profile)
+t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "-s", SESSION + "-ph", "--profile", profile, f"{BASE}/pane.html?A"],
+         cols=160, rows=45, cwd=ROOT, env={"TERMIUM_GRAPHICS": "placeholders"})
+def ph_cells():
+    with t.lock:
+        return len(t._placeholder_cells())
+try:
+    t.wait_text("pane A", 25); t.wait_idle(0.8, 10); time.sleep(1)
+    t.key("ctrl+b"); t.key("v")
+    open_url("B"); time.sleep(2)
+    before = ph_cells()
+    c, r = split_button("A")
+    move(c, r); time.sleep(0.4)
+    move(t.line(r).find("→") + 1, r); time.sleep(1.5)
+    rows = sum(1 for y in range(1, 46) if "┊" in t.line(y))
+    during = ph_cells()
+    check("placeholders: the preview hides exactly its own column", rows > 0 and before - during == rows, (before, during, rows))
+    t.shot(f"{OUT}/06-placeholder-preview.png")
+    move(2, 30); time.sleep(1.5)
+    check("placeholders: the picture is whole again after", ph_cells() == before, (before, ph_cells()))
 finally:
     t.close()
     srv.terminate()

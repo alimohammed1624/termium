@@ -252,6 +252,8 @@ const SIDES: [Side, string][] = [["left", "←"], ["up", "↑"], ["down", "↓"]
 const PAD_W = 1 + SIDES.length * 2;
 /** Two presses this close together are a double-click (as on pages). */
 const DOUBLE_CLICK_MS = 450;
+type SepPress = { split: Split<any> | null; time: number; col: number; row: number };
+const NO_SEP_PRESS: SepPress = { split: null, time: 0, col: 0, row: 0 };
 const at = (row: number, col: number) => `\x1b[${row};${col}H`;
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
@@ -428,17 +430,20 @@ export class App {
   private mouseCapture: Page | null = null;
   private mouseButtons = 0;
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
-  private drag: { sep: SepGeom<Page>; moved: boolean } | null = null;
-  /** The last press on a divider that didn't drag it (a second one soon after resets it to 50/50). */
-  private sepPress: { split: Split<Page> | null; time: number } = { split: null, time: 0 };
+  /** A divider being dragged: where it was pressed, whether the pointer left that cell, and whether it's a double-click's second press. */
+  private drag: { sep: SepGeom<Page>; moved: boolean; at: { col: number; row: number; time: number }; travelled: boolean; double: boolean } | null = null;
+  /** The last click (press and release in one cell) on a divider: a second one there soon after resets it to 50/50. */
+  private sepPress: SepPress = NO_SEP_PRESS;
   /** The divider under the pointer: it shows a grip and an equalize button. */
   private sepHover: Split<Page> | null = null;
   /** The pane whose header shows the four split arrows (the pointer went to its ⊞), and the arrow pointed at. */
   private splitPad: { page: Page; side: Side | null } | null = null;
+  /** Each header's title area (left of its buttons), from the last draw: where a divider's grip can go. */
+  private headerFree = new Map<Page, { row: number; col: number; cols: number }>();
   /** Where the ⊞ buttons and split arrows are, from the last draw. */
   private padHits: { page: Page; side: Side | null; row: number; col: number; cols: number }[] = [];
   /** The split being pointed at (an arrow or a menu item): its new divider is drawn over the pane. */
-  private preview: { page: Page; side: Side } | null = null;
+  private preview: { page: Page; side: Side; menu: boolean } | null = null;
   /** Menu items that split a pane, for the preview while one is highlighted. */
   private menuSplits = new WeakMap<MenuItem, { page: Page; side: Side }>();
   private hoverPage: Page | null = null;
@@ -1597,6 +1602,10 @@ export class App {
     this.menu = null;
     this.reorder = null;
     this.tabHover = -1;
+    this.splitPad = null;
+    this.sepHover = null;
+    this.preview = null;
+    this.sepPress = NO_SEP_PRESS;
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
     }
@@ -2182,7 +2191,7 @@ export class App {
     });
     this.phTiles.set(page, tiles.map((t, i) => ({ row: t.row, col: t.col, cols: t.cols, rows: t.rows, index: indexes[i]! })));
     // Cells written just now over an open menu or a preview: they go back on top.
-    if (moved && this.preview) s += this.drawPreview();
+    if (moved) s += this.drawPreview();
     if (moved && this.menu) s += this.drawMenu();
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;
@@ -2523,6 +2532,7 @@ export class App {
 
   private drawPaneChrome(): string {
     let s = "";
+    this.headerFree.clear();
     const tab = this.tab;
     for (const [page, g] of this.geom) {
       if (!g.header) continue;
@@ -2542,6 +2552,7 @@ export class App {
       const splitBtn = cols >= 14;
       const pad = splitBtn && this.splitPad?.page === page && cols >= 14 + PAD_W;
       const textW = cols - 3 - (splitBtn ? 3 : 0) - (pad ? PAD_W : 0);
+      this.headerFree.set(page, { row, col, cols: textW });
       s += at(row, col) + style + fit(text, textW);
       if (pad) {
         const start = col + textW;
@@ -2564,8 +2575,9 @@ export class App {
     for (const sep of this.seps) {
       const hover = sep.split === this.sepHover;
       const { row, col, cols, rows } = sep.rect;
+      // (Other buttons do what they do on the header or divider under it.)
       const equal = (r: number, c: number, w: number) =>
-        this.clicks.add(r, c, w, (b) => b === 0 && this.equalizeSplit(sep.split));
+        this.clicks.add(r, c, w, (b) => (b === 0 ? this.equalizeSplit(sep) : this.headerButton(c, r, b)));
       if (sep.split.dir === "h") {
         // A thick line while pointed at, with an equalize button half way down.
         const mid = row + Math.floor(rows / 2);
@@ -2574,11 +2586,18 @@ export class App {
           s += at(row + r, col) + (button ? bg(C.mauve) + fg(C.crust) + BOLD + "=" + RESET : hover ? bg(C.crust) + fg(C.mauve) + "┃" : bg(C.crust) + fg(C.surface1) + "│");
           if (button) equal(mid, col, 1);
         }
-      } else if (hover && cols >= 24) {
-        // Stacked panes: the lower pane's header is the divider; a grip in its middle.
-        const c = col + Math.floor((cols - 9) / 2);
-        s += at(row, c) + fg(C.mauve) + bg(C.surface0) + "━━━" + bg(C.mauve) + fg(C.crust) + BOLD + " = " + RESET + fg(C.mauve) + bg(C.surface0) + "━━━";
-        equal(row, c + 3, 3);
+      } else if (hover) {
+        // Stacked panes: the lower pane's header is the divider; a grip in the
+        // middle of its title (clear of the header's buttons and arrows).
+        const mid = col + Math.floor(cols / 2);
+        const frees = [...this.headerFree.values()].filter((f) => f.row === row && f.col >= col && f.col < col + cols);
+        const free = frees.find((f) => mid >= f.col && mid < f.col + f.cols) ?? frees[0];
+        if (!free) continue;
+        const grip = free.cols >= 13 ? "━━━" : "";
+        if (free.cols < 5) continue;
+        const c = free.col + Math.floor((free.cols - 3 - grip.length * 2) / 2);
+        s += at(row, c) + fg(C.mauve) + bg(C.surface0) + grip + bg(C.mauve) + fg(C.crust) + BOLD + " = " + RESET + fg(C.mauve) + bg(C.surface0) + grip;
+        equal(row, c + grip.length, 3);
       }
     }
     return s + RESET;
@@ -2587,8 +2606,11 @@ export class App {
   /** The new divider of the split being pointed at, drawn over the pane (the picture goes around it). */
   private previewRect(): Rect | null {
     const p = this.preview;
-    const g = p ? this.geom.get(p.page) : undefined;
-    return p && g ? splitPreview(g.rect, g.content, sideDir(p.side).dir) : null;
+    // (A zoomed pane isn't where the split will put it: the split unzooms the tab.
+    // A menu's preview goes with the menu, however it went away.)
+    if (!p || this.tab?.zoomed || (p.menu && !this.menu)) return null;
+    const g = this.geom.get(p.page);
+    return g ? splitPreview(g.rect, g.content, sideDir(p.side).dir) : null;
   }
 
   private drawPreview(): string {
@@ -2601,7 +2623,7 @@ export class App {
     } else {
       s += at(r.row, r.col) + style + "┄".repeat(r.cols);
     }
-    return s + RESET;
+    return s + RESET + this.placeholdersRightOf(r);
   }
 
   /** Cells the pages' pictures leave uncovered: an open menu, a split preview. */
@@ -3859,9 +3881,16 @@ export class App {
     }
 
     if (this.drag) {
-      if (ev.action === "move") return this.dragTo(col, row);
+      const d = this.drag;
+      if (ev.action === "move") {
+        if (col !== d.at.col || row !== d.at.row) d.travelled = true;
+        return this.dragTo(col, row);
+      }
       if (ev.action === "release") {
         this.drag = null;
+        if (!d.travelled && d.double) d.sep.split.ratio = 0.5;
+        // Only a click that stayed put can be the first half of a double-click.
+        else if (!d.travelled) this.sepPress = { split: d.sep.split, ...d.at };
         this.relayoutAndRedraw();
       }
       return;
@@ -3890,7 +3919,10 @@ export class App {
     if (ev.action === "wheel" && row === 1 && col >= this.mainCol()) {
       return this.scrollTabs(ev.wheel === "up" || ev.wheel === "left" ? -1 : 1);
     }
-    if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
+    // Any other press in between: the next divider press isn't a double-click.
+    const sepPress = this.sepPress;
+    if (ev.action === "press") this.sepPress = NO_SEP_PRESS;
+    if (ev.action === "press" && this.chromeClick(ev, col, row, sepPress)) return;
 
     const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
     if (!g) return;
@@ -3906,7 +3938,7 @@ export class App {
   }
 
   /** Handles clicks on the sidebar, tab bar, URL bar, pane headers and separators. */
-  private chromeClick(ev: MouseEvent, col: number, row: number): boolean {
+  private chromeClick(ev: MouseEvent, col: number, row: number, sepPress: SepPress = NO_SEP_PRESS): boolean {
     if (this.clicks.click(col, row, ev.button)) return true;
     const mainCol = this.mainCol();
     if (col < mainCol) {
@@ -3960,29 +3992,27 @@ export class App {
     }
     const sep = this.seps.find((s) => inRect(s.rect, col, row));
     if (sep && ev.button === 0) {
-      // A double-click resets the divider to half way.
+      // A double-click (in the same cell, without moving) resets the divider to half way, on its release.
       const now = Date.now();
-      if (this.sepPress.split === sep.split && now - this.sepPress.time < DOUBLE_CLICK_MS) {
-        this.sepPress = { split: null, time: 0 };
-        sep.split.ratio = 0.5;
-        this.relayoutAndRedraw();
-        return true;
-      }
-      this.sepPress = { split: sep.split, time: now };
+      const double = sepPress.split === sep.split && now - sepPress.time < DOUBLE_CLICK_MS &&
+        sepPress.col === col && sepPress.row === row;
       // Stacked panes share the lower pane's header as their divider.
       const pane = [...this.geom.values()].find((p) => p.header && inRect(p.header, col, row));
       if (pane) this.focusPage(pane.item);
-      this.drag = { sep, moved: false };
+      this.drag = { sep, moved: false, at: { col, row, time: now }, travelled: false, double };
       return true;
     }
+    return this.headerButton(col, row, ev.button);
+  }
+
+  /** A click on a pane header: middle closes the pane, right opens its menu, left focuses it. */
+  private headerButton(col: number, row: number, button: number): boolean {
     const header = [...this.geom.values()].find((p) => p.header && inRect(p.header, col, row));
-    if (header) {
-      if (ev.button === 1) this.closePage(header.item);
-      else if (ev.button === 2) this.paneMenu(header.item, col, row);
-      else this.focusPage(header.item);
-      return true;
-    }
-    return false;
+    if (!header) return false;
+    if (button === 1) this.closePage(header.item);
+    else if (button === 2) this.paneMenu(header.item, col, row);
+    else this.focusPage(header.item);
+    return true;
   }
 
   private dragTo(col: number, row: number): void {
@@ -3996,7 +4026,6 @@ export class App {
     if (Math.abs(next - split.ratio) < 0.005) return;
     split.ratio = next;
     d.moved = true;
-    this.sepPress.time = 0; // (a drag isn't the first click of a double-click)
     this.relayoutAndRedraw();
     // Keep dragging the same split after the relayout rebuilt the handles.
     const same = this.seps.find((s) => s.split === split);
@@ -4026,7 +4055,8 @@ export class App {
     const m = this.menu;
     const pad = this.splitPad;
     const entry = m ? m.entries[m.active] : undefined;
-    const next = m ? (entry && entry !== "-" && this.menuSplits.get(entry)) || null : pad?.side ? { page: pad.page, side: pad.side } : null;
+    const item = m && entry && entry !== "-" ? this.menuSplits.get(entry) : undefined;
+    const next = item ? { ...item, menu: true } : !m && pad?.side ? { page: pad.page, side: pad.side, menu: false } : null;
     if (next?.page === this.preview?.page && next?.side === this.preview?.side) return;
     this.preview = next;
     this.fullRedraw();
@@ -4045,8 +4075,8 @@ export class App {
   }
 
   /** Gives the panes the divider splits (side by side, or stacked) the same size. */
-  private equalizeSplit(split: Split<Page>): void {
-    equalize(split);
+  private equalizeSplit(sep: SepGeom<Page>): void {
+    equalize(sep.split, sep.parent);
     this.relayoutAndRedraw();
   }
 
@@ -4083,7 +4113,7 @@ export class App {
   private equalizeTab(): void {
     const tab = this.tab;
     if (!tab) return;
-    equalize(tab.root, true);
+    equalize(tab.root, this.paneArea(), true);
     this.relayoutAndRedraw();
   }
 
@@ -4132,14 +4162,23 @@ export class App {
    */
   private drawMenu(): string {
     const m = this.menu!;
-    let s = m.draw(MENU_STYLE);
-    if (!this.placeholders) return s;
-    const right = m.rect.col + m.rect.cols;
+    return m.draw(MENU_STYLE) + this.placeholdersRightOf(m.rect);
+  }
+
+  /**
+   * With placeholders, the cells right of text drawn over a picture (on its
+   * rows), written again from an explicit column: a placeholder cell carries
+   * on from the one to its left, which the text replaced.
+   */
+  private placeholdersRightOf(r: Rect): string {
+    if (!this.placeholders) return "";
+    let s = "";
+    const right = r.col + r.cols;
     for (const page of this.geom.keys()) {
       for (const t of this.phTiles.get(page) ?? []) {
         if (right <= t.col || right >= t.col + t.cols) continue;
         const colour = this.phColour(t.index);
-        for (let row = Math.max(t.row, m.rect.row); row < Math.min(t.row + t.rows, m.rect.row + m.rect.rows); row++) {
+        for (let row = Math.max(t.row, r.row); row < Math.min(t.row + t.rows, r.row + r.rows); row++) {
           s += placeholderSpan(this.phHigh, colour, this.phRgb, row, right, row - t.row, right - t.col, t.col + t.cols - right);
         }
       }

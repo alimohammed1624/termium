@@ -74,19 +74,37 @@ function span<T>(node: Node<T>, dir: Dir): number {
 }
 
 /**
- * Gives the panes in a row (or column) under `node` the same share of it,
- * tmux's even layout: three panes side by side get a third each, not a
- * half and two quarters. Splits the other way inside are left as they
- * are, unless `deep` (then every row and column is evened out). Changes
- * the ratios in place.
+ * Gives the panes in a row (or column) under `node`, laid out in `area`,
+ * the same share of it, tmux's even layout: three panes side by side get
+ * a third each, not a half and two quarters. Whole cells: the separators
+ * between them are counted, and what doesn't divide evenly is at most one
+ * cell. Splits the other way inside are left as they are, unless `deep`
+ * (then every row and column is evened out). Changes the ratios in place.
  */
-export function equalize<T>(node: Node<T>, deep = false): void {
+export function equalize<T>(node: Node<T>, area: Rect, deep = false): void {
   if (node.kind === "leaf") return;
-  const a = span(node.a, node.dir);
-  node.ratio = a / (a + span(node.b, node.dir));
-  for (const child of [node.a, node.b]) {
-    if (child.kind === "split" && (deep || child.dir === node.dir)) equalize(child, deep);
+  const na = span(node.a, node.dir);
+  const n = na + span(node.b, node.dir);
+  let ra: Rect;
+  let rb: Rect;
+  if (node.dir === "h") {
+    // n panes and n-1 one-column separators: the first child gets na panes' share and its own separators.
+    const avail = area.cols - 1;
+    if (avail < 2) return;
+    const aw = clamp(Math.round(((area.cols - (n - 1)) * na) / n + (na - 1)), 1, avail - 1);
+    node.ratio = aw / avail;
+    ra = { ...area, cols: aw };
+    rb = { ...area, col: area.col + aw + 1, cols: avail - aw };
+  } else {
+    // Stacked panes have no separator (each pane's header divides it from the one above).
+    if (area.rows < 2) return;
+    const ah = clamp(Math.round((area.rows * na) / n), 1, area.rows - 1);
+    node.ratio = ah / area.rows;
+    ra = { ...area, rows: ah };
+    rb = { ...area, row: area.row + ah, rows: area.rows - ah };
   }
+  if (node.a.kind === "split" && (deep || node.a.dir === node.dir)) equalize(node.a, ra, deep);
+  if (node.b.kind === "split" && (deep || node.b.dir === node.dir)) equalize(node.b, rb, deep);
 }
 
 /**
