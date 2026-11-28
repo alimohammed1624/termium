@@ -255,6 +255,10 @@ class Agent {
         return this.wait(req, timeoutMs);
       case "dialog":
         return this.dialog(req);
+      case "picked":
+        return req.wait ? this.waitPick(this.app.pickSeq) : this.lastPick();
+      case "pick":
+        return this.pick();
       default:
         throw new CtlError(`unknown command "${req.cmd}"`, EXIT.usage);
     }
@@ -417,6 +421,61 @@ class Agent {
     this.app.agentDialog(page, !!req.accept, req.text ?? d.defaultPrompt);
     this.note(`${req.accept ? "accepted" : "dismissed"} a ${d.type} dialog`);
     return { tab: page.num, type: d.type, message: d.message, accepted: !!req.accept };
+  }
+
+  // ------------------------------------------------------------ picking
+
+  /** The element the person last picked; `stale` once its page has a new document (or is gone). */
+  private lastPick(p = this.app.picked): unknown {
+    if (!p) throw new CtlError("nothing picked yet: the person picks with Ctrl+B g, then a click (termium ctl pick asks them to)");
+    const page = this.app.pageByNum(p.tab);
+    const stale = !page || `@${page.docGen ?? 0}` !== p.ref.slice(p.ref.indexOf("@"));
+    return stale ? { ...p, stale: true } : p;
+  }
+
+  /** Waits for the next pick (after `seq`), whenever it's made. */
+  private async waitPick(seq: number): Promise<unknown> {
+    while (this.app.pickSeq === seq) {
+      if (Date.now() >= this.deadline - 100) throw new CtlError("timed out waiting for a pick", EXIT.timeout);
+      await Bun.sleep(50);
+    }
+    return this.lastPick();
+  }
+
+  /** Turns pick mode on in the attached terminal and waits for the person's pick. */
+  private async pick(): Promise<unknown> {
+    if (!this.app.attached) throw new CtlError("no terminal is attached to this session: nobody to pick an element");
+    // While the person is busy, wait; but pick mode they turn on meanwhile is joined.
+    while (!this.app.picking() && this.app.humanBusy()) {
+      if (Date.now() >= this.deadline - 100) {
+        throw new CtlError("the person at the terminal is busy (typing, or editing the address, a prompt or help); pick mode not turned on. Try again", EXIT.timeout);
+      }
+      await Bun.sleep(100);
+    }
+    if (!this.app.picking()) {
+      if (!this.app.startPick(true)) throw new CtlError("couldn't turn pick mode on (is a page open?)");
+      this.note("pick an element (Esc cancels)");
+    }
+    // Answered only by a pick made in this pick mode: once it has ended
+    // unanswered (Esc...), a pick in a later one isn't the answer.
+    const run = this.app.pickRun;
+    this.app.pickWaiters++;
+    try {
+      for (;;) {
+        const p = this.app.picksByRun.get(run);
+        if (p) return this.lastPick(p);
+        if (this.app.pickRun !== run) throw new CtlError("the person cancelled the pick (Esc, or a click outside the page)");
+        if (Date.now() >= this.deadline - 100) {
+          // The last of these to give up turns off pick mode an agent turned on (never the person's own).
+          const off = this.app.pickWaiters === 1 && this.app.pickByAgent;
+          if (off) this.app.cancelPick(false);
+          throw new CtlError(`timed out waiting for a pick${off ? "; pick mode turned off" : ""}`, EXIT.timeout);
+        }
+        await Bun.sleep(50);
+      }
+    } finally {
+      this.app.pickWaiters--;
+    }
   }
 
   // ------------------------------------------------------------ reading

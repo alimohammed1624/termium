@@ -64,12 +64,48 @@ it) loads a new document they're stale (exit 1): take a new snapshot.
 | `eval JS [TAB]` | run JavaScript in the page (promises awaited); prints JSON |
 | `wait load\|selector CSS\|text TEXT\|url PART [--gone]` | wait until it's there (or gone) |
 | `dialog accept\|dismiss [TEXT]` | answer an alert/confirm/prompt/"Leave page?" |
+| `picked [--wait]` | the element the person last picked (see below); `--wait`: the next one |
+| `pick` | ask the person to pick an element in their terminal, and wait for it |
 
 Options: `--tab N` (`-t N`) for commands that act on a tab, `--json` for
 machine-readable output, `--timeout SEC` (default 30). Exit status: 0 done,
 1 failed (stale id, no such tab, page error, dialog in the way), 2 usage,
 3 no such session, 4 timed out, 5 partly done (a `shot --full` of a page
 over 40 megapixels: the top part saved). Errors go to stderr in one line.
+
+## Elements the person points at: pick, picked
+
+The person can hand you an element: `Ctrl+B g` in their terminal turns on
+pick mode (the element under the mouse is outlined; Esc cancels), and a
+click picks it. That click never reaches the page. Its description goes to
+their clipboard, to paste to you, and to `picked`:
+
+```sh
+termium ctl -s agent picked              # the last pick; --json for every field
+termium ctl -s agent picked --wait       # wait for the next pick (--timeout SEC)
+termium ctl -s agent pick --timeout 120  # turn pick mode on for them, wait for their click
+termium ctl -s agent click 3:142@2       # its id works like a snapshot's
+```
+
+```text
+Picked in termium: button "Sign in" [3:142@2]
+page: https://example.com/login
+selector: #login > button:nth-of-type(2)
+text: Sign in
+html: <button class="primary" type="submit">Sign in</button>
+act on it: termium ctl -s agent click 3:142@2 (or type 3:142@2 TEXT)
+```
+
+The id works with `click`, `type` and `scroll` as a snapshot's does, until
+the page loads a new document (then `picked` adds `stale`: take a
+snapshot). `--json` gives `tab`, `ref`, `url`, `title`, `role`, `name`,
+`tag`, `selector`, `text`, `html` (both trimmed; a field's value is never
+included) and `at`, plus `frame` (the frame's address) for an element in
+an iframe and `shadow` when the selector is inside a shadow root. `pick`
+needs an attached terminal; the person pressing Esc is exit 1, and its
+`--timeout` turns pick mode off again (exit 4). Nothing picked yet is exit 1.
+Elements in a cross-site frame can't be picked (as in a snapshot). While
+the person is picking they count as busy (see Limits).
 
 ## The DevTools endpoint (Puppeteer, Playwright, chrome-devtools-mcp)
 
@@ -126,7 +162,8 @@ The port changes each time the session starts: ask `termium devtools`.
   devicePixelRatio]"` rather than assuming. When a person attaches, pages
   take their pane sizes.
 - The person at the terminal comes first. While they're busy (editing
-  the address, answering a prompt or dialog, reading help, or typing: for
+  the address, answering a prompt or dialog, reading help, picking an
+  element, or typing: for
   a moment after each key), `select` waits, and `open` (navigating),
   `click`, `type`, `key`, `scroll`, `close` and `dialog` wait if they'd
   act on the tab they're on; past `--timeout` that's exit 4 and nothing

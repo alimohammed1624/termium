@@ -37,6 +37,7 @@ import {
   transmitVirtual,
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
+import { Picker, pickedLine, pickedText, type Picked } from "./pick";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
@@ -170,7 +171,7 @@ type Prompt =
   | { kind: "dialog"; edit: LineEdit; page: Page }
   | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
 
-type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
+type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update" | "pick";
 
 /**
  * The update box: the offer (update now, later, skip), the update's
@@ -213,6 +214,8 @@ export interface AppOptions {
   /** The version this session runs. */
   version: string;
   update?: UpdateHooks;
+  /** The session's name (for the `termium ctl -s NAME` a picked element's description gives). */
+  session?: string;
 }
 
 // ---------------------------------------------------------------- style
@@ -300,6 +303,7 @@ const HELP: [string, string][] = [
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
+  ["g", "pick an element for an agent (Esc cancels)"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
@@ -1531,6 +1535,8 @@ export class App {
    */
   private resetInput(): void {
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
+    if (this.mode === "pick") this.cancelPick(false);
+    this.pickRelease = null;
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
     }
@@ -2279,6 +2285,7 @@ export class App {
       case "spaces": return " SPACES ";
       case "help": return " HELP ";
       case "update": return " UPDATE ";
+      case "pick": return " PICK · Esc cancels ";
       default: return "";
     }
   }
@@ -3021,6 +3028,11 @@ export class App {
     }
     if (this.mode === "resize") return this.resizeKey(combo);
     if (this.mode === "spaces") return this.spacesKey(combo);
+    if (this.mode === "pick") {
+      // Only Esc (and Ctrl+Q, above): keys never reach the page while picking.
+      if (combo === "escape") this.cancelPick(true);
+      return;
+    }
     if (combo === "ctrl+b") {
       this.mode = "prefix";
       this.queueChrome();
@@ -3116,6 +3128,7 @@ export class App {
         }
         return;
       case "c": return this.newTab();
+      case "g": return void this.startPick();
       case "n": return this.selectTab((space?.active ?? 0) + 1, true);
       case "p": return this.selectTab((space?.active ?? 0) - 1, true);
       case "shift+x": if (tab) this.closeTab(tab); return;
@@ -3621,6 +3634,15 @@ export class App {
       return;
     }
 
+    // The release of the click that picked an element (or cancelled picking): the page never saw its press.
+    if (this.pickRelease === ev.button && ev.action === "release") {
+      this.pickRelease = null;
+      return;
+    }
+    // (A button held since before pick mode, on a page or a divider: its release still goes there.)
+    const heldRelease = ev.action === "release" && (this.drag || (this.mouseCapture && this.mouseButtons));
+    if (this.mode === "pick" && !heldRelease) return this.pickMouse(ev, col, row, px, py);
+
     if (this.drag) {
       if (ev.action === "move") return this.dragTo(col, row);
       if (ev.action === "release") {
@@ -3736,15 +3758,23 @@ export class App {
     if (same) d.sep = same;
   }
 
-  private pageMouse(page: Page, ev: MouseEvent, px: number, py: number): void {
+  /** A pointer position on the grid (pixels) in CSS px of the page's viewport; null if it isn't shown. */
+  private pageXY(page: Page, px: number, py: number): { x: number; y: number } | null {
     const g = this.geom.get(page);
-    if (!g || !page.css) return;
+    if (!g || !page.css) return null;
     const devW = g.content.cols * this.cellW;
     const devH = g.content.rows * this.cellH;
     // The page's real size: another DevTools client may hold it at its own (see onFrame).
     const size = page.actual ?? page.css;
     const x = Math.max(0, Math.min(size.w - 1, ((px - (g.content.col - 1) * this.cellW) * size.w) / devW));
     const y = Math.max(0, Math.min(size.h - 1, ((py - (g.content.row - 1) * this.cellH) * size.h) / devH));
+    return { x, y };
+  }
+
+  private pageMouse(page: Page, ev: MouseEvent, px: number, py: number): void {
+    const pos = this.pageXY(page, px, py);
+    if (!pos) return;
+    const { x, y } = pos;
     const modifiers = modBits(ev.mods);
     const sid = page.sessionId;
     const send = (params: object) => this.cdp.send("Input.dispatchMouseEvent", params, sid).catch(() => {});
@@ -3833,6 +3863,132 @@ export class App {
 
   private movesInFlight = new Set<Page>();
   private pendingMoves = new Map<Page, () => Promise<unknown>>();
+
+  // ---------------------------------------------------------- the element picker
+  //
+  // Ctrl+B g (or `termium ctl pick`): what's under the pointer is outlined,
+  // and a click hands that element to an agent (see src/pick.ts), on the
+  // clipboard and to `termium ctl picked`. Esc, or a click outside the
+  // pages, cancels. Keys and clicks never reach the page meanwhile.
+
+  private pickerOf?: Picker;
+  private get picker(): Picker {
+    return (this.pickerOf ??= new Picker(this.cdp));
+  }
+  /** The button of the click that picked (or cancelled): its release is swallowed, as its press was. */
+  private pickRelease: number | null = null;
+  /** A pick being read from the page (further clicks wait for it). */
+  private pickBusy = false;
+  /** Bumped whenever pick mode starts or ends: a pick still being read from an earlier one is dropped. */
+  pickRun = 0;
+  /** The last few picks, by the pick mode (pickRun) they were made in. */
+  picksByRun = new Map<number, Picked>();
+  /** Pick mode was turned on by an agent (`termium ctl pick`): its timeout may turn it off. */
+  pickByAgent = false;
+  /** `termium ctl pick` commands waiting on pick mode now. */
+  pickWaiters = 0;
+  /** The element last picked, and how many picks there have been (an agent waits for this to change). */
+  picked: Picked | null = null;
+  pickSeq = 0;
+
+  /** Whether pick mode is on. */
+  picking(): boolean {
+    return this.mode === "pick";
+  }
+
+  /** Turns pick mode on (a terminal must be attached): false if it can't be now. */
+  startPick(byAgent = false): boolean {
+    if (!this.attached || this.pages.size === 0) return false;
+    if (this.mode === "pick") return true;
+    const p = this.prompt;
+    if (p?.kind === "url" || p?.kind === "rename") this.prompt = null;
+    else if (p) {
+      this.showToast("Answer the question first, then pick (Ctrl+B g)");
+      return false;
+    }
+    if (this.mode !== "normal") this.setMode("normal");
+    this.pickRun++;
+    this.pickBusy = false;
+    this.pickByAgent = byAgent;
+    this.setMode("pick");
+    this.showToast("Click an element to hand it to your agent", 4000);
+    return true;
+  }
+
+  /** Turns pick mode off, unanswered. */
+  cancelPick(say: boolean): void {
+    if (this.mode !== "pick") return;
+    this.pickRun++;
+    this.pickBusy = false;
+    this.picker.stop();
+    this.setMode("normal");
+    if (say) this.showToast("Pick cancelled", 1500);
+  }
+
+  private pickMouse(ev: MouseEvent, col: number, row: number, px: number, py: number): void {
+    const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
+    // The wheel still scrolls the page (to bring an element into view).
+    if (ev.action === "wheel") {
+      if (g) this.pageMouse(g.item, ev, px, py);
+      return;
+    }
+    const pos = g && this.pageXY(g.item, px, py);
+    if (ev.action === "move") {
+      if (g && pos) this.picker.hover(g.item.sessionId, pos.x, pos.y);
+      else this.picker.hover(null);
+      return;
+    }
+    if (ev.action !== "press" || this.pickBusy) return;
+    this.pickRelease = ev.button;
+    if (!g || !pos || ev.button !== 0) return this.cancelPick(true);
+    void this.pickAt(g.item, pos.x, pos.y);
+  }
+
+  private async pickAt(page: Page, x: number, y: number): Promise<void> {
+    this.pickBusy = true;
+    const run = this.pickRun;
+    const gen = page.docGen ?? 0;
+    const found = await this.picker.pick(page.sessionId, x, y).catch(() => null);
+    // Pick mode ended meanwhile (Esc, the terminal went), even if it's on again since.
+    if (run !== this.pickRun || this.mode !== "pick") return;
+    this.pickBusy = false;
+    if (found === "cross-site") {
+      this.showToast("That's in a cross-site frame: termium can't pick inside it. Pick something else, or Esc", 4000);
+      return;
+    }
+    this.pickRun++;
+    this.picker.stop();
+    this.setMode("normal");
+    if (!found || !this.pages.has(page.sessionId) || (page.docGen ?? 0) !== gen) {
+      this.showToast(found ? "The page changed; pick again (Ctrl+B g)" : "Nothing to pick there", 3000);
+      return;
+    }
+    // Its id works with `termium ctl click` / `type`, as a snapshot's would.
+    if (page.agentIds?.gen === gen) page.agentIds.nodes.add(found.node);
+    else page.agentIds = { gen, nodes: new Set([found.node]) };
+    const { info } = found;
+    const picked: Picked = {
+      tab: page.num,
+      ref: `${page.num}:${found.node}@${gen}`,
+      url: page.url,
+      title: page.title,
+      role: found.role,
+      name: found.name,
+      tag: String(info.tag ?? ""),
+      selector: String(info.selector ?? ""),
+      ...(info.frame ? { frame: String(info.frame) } : {}),
+      ...(info.shadow ? { shadow: true } : {}),
+      text: String(info.text ?? ""),
+      html: String(info.html ?? ""),
+      at: Date.now(),
+    };
+    this.picked = picked;
+    this.pickSeq++;
+    this.picksByRun.set(run, picked);
+    for (const r of this.picksByRun.keys()) if (this.picksByRun.size > 8) this.picksByRun.delete(r);
+    if (this.attached) out(setClipboard(pickedText(picked, this.opts.session)));
+    this.showToast(`Picked ${pickedLine(picked)}: copied for your agent`, 5000);
+  }
 
   // ---------------------------------------------------------- agents
   //
