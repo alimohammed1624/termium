@@ -44,7 +44,7 @@ describe("splitPlan", () => {
   });
   test("kitty: launch a window in a split next to this one", () => {
     const p = splitPlan({ kind: "kitty", pane: "7" } as Host, "right", cmd, { ...o, focus: false });
-    expect(p.argv.slice(0, 7)).toEqual(["kitten", "@", "launch", "--type=window", "--location=vsplit", "--next-to=id:7", "--cwd=/w"]);
+    expect(p.argv.slice(0, 8)).toEqual(["kitten", "@", "launch", "--type=window", "--location=vsplit", "--match=window_id:7", "--next-to=id:7", "--cwd=/w"]);
     expect(p.argv).toContain("--keep-focus");
     expect(p.argv.slice(-4)).toEqual(["--", ...sh]);
   });

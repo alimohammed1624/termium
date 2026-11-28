@@ -92,7 +92,7 @@ try:
     check("tmux: open --split right exits 0 and names the new pane", ok and "OPEN_EXIT=0" in out0 and "tmux split (pane %" in out0, out0[-500:])
     panes = tmux("list-panes", "-t", "main", "-F", "#{pane_index} #{pane_left} #{pane_top} #{pane_active} #{pane_start_command}").stdout.splitlines()
     check("tmux: a real split right of the calling pane", len(panes) == 2 and panes[1].split()[1] != "0" and panes[1].split()[2] == "0", panes)
-    check("tmux: the new pane runs termium attach, and has the focus", len(panes) == 2 and "attach pr4-tmux" in panes[1] and panes[1].split()[3] == "1", panes)
+    check("tmux: the new pane runs termium for the session, and has the focus", len(panes) == 2 and "--session pr4-tmux" in panes[1] and panes[1].split()[3] == "1", panes)
     check("tmux: it shows the page, in the new pane", t.wait_for(lambda: shows_page(t, f"{OUT}/tmux-open-split.png", 80)[0], 30),
           shows_page(t, f"{OUT}/tmux-open-split.png", 80)[1])
     check("tmux: the session runs (in the private runtime dir the pane was given)", "pr4-tmux" in cli("ls").stdout)
@@ -133,6 +133,27 @@ try:
     check("tmux: passthrough off: --split fails clearly (exit 1)", ok and "OFF_EXIT=1" in out0 and "allow-passthrough" in out0, out0[-500:])
     check("tmux: ...and starts no session", "pr4-tmux-off" not in cli("ls").stdout)
     tmux("set", "-g", "allow-passthrough", "on")
+    # What counts is what a new pane gets, not the calling pane's own setting.
+    tmux("set", "-g", "allow-passthrough", "off"); tmux("set", "-p", "-t", "main.0", "allow-passthrough", "on")
+    tmux("send-keys", "-t", "main.0", f"clear; bun src/main.ts ctl -s pr4-tmux split right; echo POFF_EXIT=$?", "Enter")
+    ok = t.wait_for(lambda: re.search(r"POFF_EXIT=\d", tmux("capture-pane", "-p", "-t", "main.0").stdout), 60)
+    out0 = tmux("capture-pane", "-p", "-t", "main.0").stdout
+    check("tmux: passthrough off for new panes (on in this one) is refused", ok and "POFF_EXIT=1" in out0 and "allow-passthrough" in out0, out0[-500:])
+    tmux("set", "-g", "allow-passthrough", "on"); tmux("set", "-pu", "-t", "main.0", "allow-passthrough")
+
+    # No room for another pane: tmux refuses, and no session is left behind.
+    tmux("new-window", "-t", "main")
+    while tmux("split-window", "-h", "-t", "main:1").returncode == 0:  # (each split is of the newest, narrowest pane)
+        pass
+    narrow = tmux("display-message", "-p", "-t", "main:1", "#{pane_id}").stdout.strip()
+    tmux("send-keys", "-t", narrow, EXPORTS, "Enter")
+    nospace = os.path.join(tmp, "nospace")
+    tmux("send-keys", "-t", narrow, f"bun src/main.ts open -s pr4-tmux-full '{PAGE}' --split right 2>{nospace}.err; echo $? > {nospace}", "Enter")
+    t.wait_for(lambda: os.path.exists(nospace) and open(nospace).read().strip() != "", 60)
+    err = open(nospace + ".err").read() if os.path.exists(nospace + ".err") else ""
+    check("tmux: no room for a split: exit 1, said clearly", os.path.exists(nospace) and open(nospace).read().strip() == "1" and "couldn't make the split" in err, err)
+    check("tmux: ...and no session left running", "pr4-tmux-full" not in cli("ls").stdout)
+    tmux("kill-window", "-t", "main:1")
 
     r = cli("ctl", "-s", "pr4-nosuch", "split", "right", env=dict(CLI_ENV, TMUX="x", TMUX_PANE="%0"))
     check("ctl split without the session: exit 3", r.returncode == 3, r.stderr)

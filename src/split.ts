@@ -5,8 +5,6 @@
 // kitty (through its remote control). Hosts with no command to ask for a
 // split (Ghostty, WezTerm for now) fail with a message saying what to do.
 
-import { tmuxPassthroughSetting } from "./client";
-
 export type SplitDir = "right" | "down";
 export type HostKind = "tmux" | "herdr" | "kitty";
 
@@ -136,6 +134,8 @@ export function splitPlan(
           "launch",
           "--type=window",
           `--location=${dir === "right" ? "vsplit" : "hsplit"}`,
+          // In the tab holding this window, which needn't be the active one.
+          `--match=window_id:${host.pane}`,
           `--next-to=id:${host.pane}`,
           `--cwd=${o.cwd}`,
           ...(o.focus ? [] : ["--keep-focus"]),
@@ -182,9 +182,13 @@ export function prepareSplit(dir: SplitDir, cmd: string[], focus: boolean, env =
   const bin = host.kind === "herdr" ? env.HERDR_BIN_PATH || undefined : host.kind === "kitty" && !Bun.which("kitten") ? "kitty" : undefined;
   const plan = splitPlan(host, dir, cmd, { cwd: process.cwd(), focus, env, bin });
   const exe = plan.argv[0]!;
-  if (host.kind === "tmux" && tmuxPassthroughSetting() === "off") {
-    // termium in the new pane would stop at once: say so here.
-    throw new Error("tmux has allow-passthrough off, so termium can't show pages in a tmux pane (tmux set -g allow-passthrough on)");
+  if (host.kind === "tmux") {
+    // What a new pane in this window gets (not this pane's own setting):
+    // with it off, termium there would stop at once.
+    const v = run([exe, "show-options", "-Awqv", "-t", host.pane, "allow-passthrough"]);
+    if (v.ok && v.out.split("\n").pop()!.trim() === "off") {
+      throw new Error("tmux has allow-passthrough off for new panes here, so termium couldn't show pages in one (tmux set -g allow-passthrough on)");
+    }
   }
   if (host.kind === "kitty") {
     // Remote control on, and a layout that splits (the others place windows their own way).

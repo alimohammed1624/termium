@@ -10,7 +10,7 @@ import { resolve } from "node:path";
 import { killSession, listSessions, runClient, runningSessions, sessionInfo } from "./client";
 import { runCtl, runDevtools, startSession } from "./ctl";
 import { SKILL } from "./skill";
-import { prepareSplit, splitArgv, type PreparedSplit, type SplitDir } from "./split";
+import { prepareSplit, type PreparedSplit, type SplitDir } from "./split";
 import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
@@ -296,24 +296,26 @@ async function openSplit(args: Args): Promise<never> {
     console.error(`termium: ${why}. Use termium's own splits instead (Ctrl+B v or -), or run termium attach${args.session === DEFAULT_SESSION ? "" : ` ${args.session}`} in a split of your own.`);
     process.exit(1);
   };
-  // A new session starts on the URL; a running one gets it from the new
-  // pane, as from a plain `termium URL` (a new tab, shown there).
-  const running = args.url ? await sessionInfo(args.session).catch(() => null) : null;
-  const pane = splitArgv(selfArgv(), args.session, running ? args.url : null);
+  // The new pane runs this same termium without --split: it attaches to the
+  // session, starting it if needed, and a URL opens in a new tab shown there
+  // (as when a person runs it). Whatever goes wrong there stays on screen.
+  const pane = serverArgv({ ...args, url: null });
+  pane.splice(pane.indexOf("__server"), 1);
+  // Given, if only to be refused by a running session (serverArgv leaves the default out).
+  if (args.launchFlags.includes("--search") && !pane.includes("--search")) pane.push("--search", args.search);
   if (args.noUpdateCheck) pane.push("--no-update-check");
-  // Before a session is started for nothing.
+  if (args.url) pane.push(args.url);
+  // Nothing is done unless the host can make the split.
   let split: PreparedSplit;
   try {
     split = prepareSplit(args.split!, pane, true);
   } catch (e: any) {
     cannot(e?.message ?? String(e));
   }
-  const start = serverArgv({ ...args, url: running ? null : args.url });
-  start[start.indexOf("__server")] = "start";
-  // Given, if only to be refused by a running session (serverArgv leaves the default out).
-  if (args.launchFlags.includes("--search") && !start.includes("--search")) start.push("--search", args.search);
-  const r = Bun.spawnSync(start, { stdin: "ignore", stdout: "pipe", stderr: "inherit" });
-  if (r.exitCode !== 0) process.exit(r.exitCode ?? 1);
+  if (args.launchFlags.length && (await sessionInfo(args.session).catch(() => null))) {
+    console.error(`termium: session "${args.session}" is already running, and ${args.launchFlags.join(", ")} only apply when starting one`);
+    process.exit(1);
+  }
   try {
     const id = split!.make();
     console.log(`session "${args.session}" is in a new ${split!.host} split (pane ${id})`);
