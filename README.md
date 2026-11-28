@@ -156,7 +156,8 @@ termium --skill                # a SKILL.md that teaches an agent all this
 - **`termium ctl`** speaks to the session over its socket (no terminal
   needed) and acts through the session's own DevTools connection:
   `tabs`, `open`, `select`, `close`, `snapshot`, `text`, `click`, `type`,
-  `key`, `scroll`, `shot`, `eval`, `wait`, `dialog` (`termium ctl --help`).
+  `key`, `scroll`, `shot`, `eval`, `wait`, `dialog`, `pick`, `picked`
+  (`termium ctl --help`).
   Tabs are numbered (one per pane); element ids are `TAB:NODE@DOC`, good
   while the element exists in that document (a new document makes them
   stale). `--json` for machine-readable output; exit status 0 done, 1
@@ -211,6 +212,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
 | `N` / `W` / `D` | new / rename / close space |
 | `b` | show or hide the sidebar |
+| `g` | pick an element for an agent: hover outlines it, a click copies its description (Esc cancels) |
 | `Ctrl+B` | send Ctrl+B to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |

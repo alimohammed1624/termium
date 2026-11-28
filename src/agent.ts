@@ -255,6 +255,10 @@ class Agent {
         return this.wait(req, timeoutMs);
       case "dialog":
         return this.dialog(req);
+      case "picked":
+        return req.wait ? this.waitPick(this.app.pickSeq, null) : this.lastPick();
+      case "pick":
+        return this.pick(timeoutMs);
       default:
         throw new CtlError(`unknown command "${req.cmd}"`, EXIT.usage);
     }
@@ -417,6 +421,48 @@ class Agent {
     this.app.agentDialog(page, !!req.accept, req.text ?? d.defaultPrompt);
     this.note(`${req.accept ? "accepted" : "dismissed"} a ${d.type} dialog`);
     return { tab: page.num, type: d.type, message: d.message, accepted: !!req.accept };
+  }
+
+  // ------------------------------------------------------------ picking
+
+  /** The element the person last picked; `stale` once its page has a new document (or is gone). */
+  private lastPick(): unknown {
+    const p = this.app.picked;
+    if (!p) throw new CtlError("nothing picked yet: the person picks with Ctrl+B g, then a click (termium ctl pick asks them to)");
+    const page = this.app.pageByNum(p.tab);
+    const stale = !page || `@${page.docGen ?? 0}` !== p.ref.slice(p.ref.indexOf("@"));
+    return stale ? { ...p, stale: true } : p;
+  }
+
+  /**
+   * Waits for the next pick (after `seq`). With `cancels` (pick mode this
+   * command asked for), the person cancelling it ends the wait.
+   */
+  private async waitPick(seq: number, cancels: number | null, started = false): Promise<unknown> {
+    while (this.app.pickSeq === seq) {
+      if (cancels !== null && (this.app.pickCancels !== cancels || !this.app.picking())) {
+        throw new CtlError("the person cancelled the pick (Esc, or a click outside the page)");
+      }
+      if (Date.now() >= this.deadline - 100) {
+        if (started) this.app.cancelPick(false);
+        throw new CtlError(`timed out waiting for a pick${started ? "; pick mode turned off" : ""}`, EXIT.timeout);
+      }
+      await Bun.sleep(50);
+    }
+    return this.lastPick();
+  }
+
+  /** Turns pick mode on in the attached terminal and waits for the person's pick. */
+  private async pick(timeoutMs: number): Promise<unknown> {
+    if (!this.app.attached) throw new CtlError("no terminal is attached to this session: nobody to pick an element");
+    const already = this.app.picking();
+    if (!already) await this.personFree(null, timeoutMs, "pick mode not turned on");
+    const seq = this.app.pickSeq;
+    const cancels = this.app.pickCancels;
+    const started = !already && !this.app.picking();
+    if (!this.app.picking() && !this.app.startPick()) throw new CtlError("couldn't turn pick mode on (is a page open?)");
+    if (started) this.note("pick an element (Esc cancels)");
+    return this.waitPick(seq, cancels, started);
   }
 
   // ------------------------------------------------------------ reading

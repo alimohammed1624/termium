@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { EXIT, type CtlRequest } from "./agent";
 import { lockHolder } from "./browser";
+import { pickedText } from "./pick";
 import { sessionInfo } from "./client";
 import type { Hello } from "./server";
 import { DEFAULT_SESSION, FrameReader, PROTOCOL, dial, jsonFrame, sessionPaths, sweepErrFiles, validSessionName } from "./session";
@@ -44,6 +45,10 @@ ID is an element id from \`snapshot\`, like 3:142@2):
                                 wait until the page has loaded, or the element / text /
                                 address appears (--gone: disappears)
   dialog accept|dismiss [TEXT]  answer a JavaScript dialog (TEXT for a prompt)
+  picked [--wait]               the element the person last picked (Ctrl+B g, then a click):
+                                its ID, selector, text, HTML and page; --wait: the next one
+  pick                          ask the person to pick one: turns pick mode on in their
+                                terminal and waits for the click (Esc there: exit 1)
 
 Options:
   -s, --session NAME   the session (default: "${DEFAULT_SESSION}")
@@ -145,6 +150,7 @@ export function parseCtl(argv: string[]): Parsed {
       case "--middle":
       case "--gone":
       case "--full":
+      case "--wait":
         flags.add(a);
         break;
       default:
@@ -164,6 +170,7 @@ export function parseCtl(argv: string[]): Parsed {
     click: ["--double", "--right", "--middle"],
     wait: ["--gone"],
     shot: ["--full"],
+    picked: ["--wait"],
   };
   for (const f of flags) if (!allowed[cmd]?.includes(f)) fail(`${f} doesn't apply to ${cmd}`);
   if (xy && cmd !== "click") fail(`--xy only applies to click`);
@@ -260,6 +267,13 @@ export function parseCtl(argv: string[]): Parsed {
       maxArgs(0);
       break;
     }
+    case "picked":
+      maxArgs(0);
+      req.wait = flags.has("--wait");
+      break;
+    case "pick":
+      maxArgs(0);
+      break;
     case "dialog": {
       const answer = pos.shift();
       if (answer !== "accept" && answer !== "dismiss") fail("dialog accept|dismiss [TEXT]");
@@ -370,6 +384,10 @@ export async function runCtl(argv: string[]): Promise<never> {
   }
   if (p.json) {
     console.log(JSON.stringify(r));
+    process.exit(0);
+  }
+  if (p.req.cmd === "pick" || p.req.cmd === "picked") {
+    console.log(pickedText(r, p.session) + (r.stale ? "\n(stale: the page has changed since; take a snapshot for a fresh id)" : ""));
     process.exit(0);
   }
   console.log(human(p.req, r));

@@ -497,6 +497,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         detach: () => detachClient("detached"),
         log,
         version,
+        session: name,
         update: {
           blocker: () => selfUpdateBlocker(),
           start: (tag) => void runSelfUpdate(tag),
