@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { DEFAULT_LEADER, leaderLabel as labelOf } from "./leader";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -278,7 +279,8 @@ const TOP_ROWS = 2;
 /** URL fragment that marks pages termium created; random so real URLs never match. */
 const MARKER = `#termium-${crypto.randomUUID().slice(0, 8)}-`;
 
-const HELP: [string, string][] = [
+/** The key reference, for the leader shown as `leader` ("Ctrl+B", "Ctrl+Space"). */
+const helpTable = (leader: string): [string, string][] => [
   ["Ctrl+L / F6 / Alt+D", "edit address"],
   ["Ctrl+T", "new tab"],
   ["Ctrl+W", "close pane"],
@@ -288,7 +290,7 @@ const HELP: [string, string][] = [
   ["Ctrl+C", "copy selection to clipboard"],
   ["Ctrl+Q", "quit"],
   ["", ""],
-  ["Ctrl+B then…", ""],
+  [`${leader} then…`, ""],
   ["c", "new tab"],
   ["n / p / 1-9", "next / previous / go to tab"],
   ["X", "close tab"],
@@ -300,7 +302,7 @@ const HELP: [string, string][] = [
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
-  ["Ctrl+B", "send Ctrl+B to the page"],
+  [leader, `send ${leader} to the page`],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
   ["q", "quit"],
@@ -326,6 +328,8 @@ export class App {
   cwd = process.cwd();
   /** Draw pages with unicode placeholders (inside tmux) rather than placing images at cells. */
   placeholders = false;
+  /** The key that starts key commands, for the attached terminal (a combo, "ctrl+b"; see src/leader.ts). */
+  leader = DEFAULT_LEADER;
   /** Whether a terminal is attached; detached, nothing is drawn and screencasts stop. */
   attached = false;
   private phInUse = new Set<number>();
@@ -1444,10 +1448,11 @@ export class App {
    * A terminal attached: draw everything for it from scratch, at its size.
    * Image ids and positions from an earlier terminal mean nothing to it.
    */
-  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string }): void {
+  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string; leader?: string }): void {
     if (t.cwd) this.cwd = t.cwd;
+    this.leader = t.leader ?? DEFAULT_LEADER;
     // Nothing half-typed on the previous terminal carries over (a pending
-    // Ctrl+B prefix would turn this one's first key into a command), nor
+    // leader key would turn this one's first key into a command), nor
     // anything it had open that takes keys (the update box, help, address
     // editing, a yes/no question): this terminal starts typing into the
     // page. (A page's own dialog or file chooser stays: the page waits on it.)
@@ -2198,7 +2203,7 @@ export class App {
     this.newSpaceRow = row <= this.rows - 1 ? row : -1;
     if (this.newSpaceRow > 0) line(row++, " + new space", base + fg(C.overlay));
     for (; row < this.rows; row++) line(row, "", base);
-    const hint = this.mode === "spaces" ? " j/k Enter Esc" : " ^B ? for keys";
+    const hint = this.mode === "spaces" ? " j/k Enter Esc" : ` ${this.leaderLabel(true)} ? for keys`;
     line(this.rows, hint, base + fg(C.overlay));
     return s;
   }
@@ -2272,9 +2277,18 @@ export class App {
     return s + RESET;
   }
 
+  /**
+   * The attached terminal's leader as shown: "Ctrl+B" / "Ctrl+Space", or
+   * `short`, "^B" / "^Space". Text naming the leader uses this, never a
+   * fixed "Ctrl+B": inside tmux or herdr it may be another key.
+   */
+  leaderLabel(short = false): string {
+    return labelOf(this.leader, short);
+  }
+
   private modeLabel(): string {
     switch (this.mode) {
-      case "prefix": return " ^B ";
+      case "prefix": return ` ${this.leaderLabel(true)} `;
       case "resize": return " RESIZE ";
       case "spaces": return " SPACES ";
       case "help": return " HELP ";
@@ -2450,6 +2464,7 @@ export class App {
   /** The key reference, drawn over the (blanked) pane area; two columns if it's short. */
   private helpOverlay(): string {
     const area = this.paneArea();
+    const HELP = helpTable(this.leaderLabel());
     const keyW = Math.max(...HELP.map(([k]) => width(k)));
     const descW = Math.max(...HELP.map(([, d]) => width(d)));
     const colW = keyW + descW + 6;
@@ -2460,10 +2475,10 @@ export class App {
       // This terminal opted out of update news.
     } else if (this.updateInstalled) {
       news.push([fg(C.yellow) + BOLD, `  restart to update  termium ${cur} → ${displayVersion(this.updateInstalled)}`]);
-      news.push([fg(C.text), "  installed; this session runs the old one until it restarts: Ctrl+B U"]);
+      news.push([fg(C.text), `  installed; this session runs the old one until it restarts: ${this.leaderLabel()} U`]);
     } else if (this.updateLatest) {
       news.push([fg(C.green) + BOLD, `  update available  termium ${cur} → ${displayVersion(this.updateLatest)}`]);
-      news.push([fg(C.text), "  Ctrl+B U updates, or run:"]);
+      news.push([fg(C.text), `  ${this.leaderLabel()} U updates, or run:`]);
     }
     const cmd = news.length && !this.updateInstalled;
     const wantW = Math.max(colW, cmd ? width(UPGRADE_CMD) + 4 : 0, ...news.map(([, t]) => width(t) + 2));
@@ -2743,7 +2758,7 @@ export class App {
           void this.requestRestart();
         } else if (combo === "l") {
           this.closeUpdate(true);
-          this.showToast(`This session runs termium ${this.opts.version} until it restarts (Ctrl+B U restarts it)`, 5000);
+          this.showToast(`This session runs termium ${this.opts.version} until it restarts (${this.leaderLabel()} U restarts it)`, 5000);
         } else pass();
         return;
       case "failed":
@@ -2802,18 +2817,20 @@ export class App {
     if (!box || !this.updatesShown || this.mode !== "normal" || this.prompt) return { text: "", style: "" };
     const nv = displayVersion(box.tag);
     const cur = this.opts.version;
+    const L = this.leaderLabel();
+    const S = this.leaderLabel(true);
     const [style, options] =
       box.state === "offer" ? [fg(C.green) + BOLD, [
-        `↑ termium ${nv} is available (you have ${cur}) · Ctrl+B U`,
-        `↑ termium ${nv} is available · Ctrl+B U`,
-        `↑ ${nv} · ^B U`,
+        `↑ termium ${nv} is available (you have ${cur}) · ${L} U`,
+        `↑ termium ${nv} is available · ${L} U`,
+        `↑ ${nv} · ${S} U`,
       ]] :
       box.state === "working" ? [fg(C.yellow), [`updating to termium ${nv}: ${stepLabel(box.step ?? "downloading")}`, `updating…`]] :
-      box.state === "failed" ? [fg(C.red) + BOLD, [`✗ update to termium ${nv} failed · Ctrl+B U`, `✗ update failed · ^B U`, `✗ ^B U`]] :
+      box.state === "failed" ? [fg(C.red) + BOLD, [`✗ update to termium ${nv} failed · ${L} U`, `✗ update failed · ${S} U`, `✗ ${S} U`]] :
       [fg(C.yellow) + BOLD, [
-        `↻ termium ${nv} is installed; this session runs ${cur} · Ctrl+B U restarts`,
-        `↻ termium ${nv} installed · Ctrl+B U restarts`,
-        `↻ ${nv} · ^B U`,
+        `↻ termium ${nv} is installed; this session runs ${cur} · ${L} U restarts`,
+        `↻ termium ${nv} installed · ${L} U restarts`,
+        `↻ ${nv} · ${S} U`,
       ]];
     const text = (options as string[]).map((t) => ` ${t} `).find((t) => width(t) <= room) ?? "";
     return { text, style: style as string };
@@ -2900,7 +2917,7 @@ export class App {
         blank();
         choice("r", "restart now: reopens your spaces, tabs and splits");
         add([txt, "       (pages reload; text typed into them is lost)"]);
-        choice("l", "later: Ctrl+B U restarts it any time");
+        choice("l", `later: ${this.leaderLabel()} U restarts it any time`);
         footer = "r restart · l later · Esc close";
         break;
       case "failed":
@@ -3021,7 +3038,7 @@ export class App {
     }
     if (this.mode === "resize") return this.resizeKey(combo);
     if (this.mode === "spaces") return this.spacesKey(combo);
-    if (combo === "ctrl+b") {
+    if (combo === this.leader) {
       this.mode = "prefix";
       this.queueChrome();
       return;
@@ -3107,14 +3124,16 @@ export class App {
     const page = this.focused;
     const space = this.space;
     if (/^[1-9]$/.test(combo)) return this.selectTab(Number(combo) - 1);
+    if (combo === this.leader) {
+      // The leader twice: the page gets it.
+      if (page) {
+        this.sendKey(page, ev);
+        this.pageKeysDown.delete(ev.code || ev.key); // its release is sent right here
+        this.sendKey(page, { ...ev, event: "release" });
+      }
+      return;
+    }
     switch (combo) {
-      case "ctrl+b":
-        if (page) {
-          this.sendKey(page, ev);
-          this.pageKeysDown.delete(ev.code || ev.key); // its release is sent right here
-          this.sendKey(page, { ...ev, event: "release" });
-        }
-        return;
       case "c": return this.newTab();
       case "n": return this.selectTab((space?.active ?? 0) + 1, true);
       case "p": return this.selectTab((space?.active ?? 0) - 1, true);

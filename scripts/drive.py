@@ -126,7 +126,11 @@ class Term:
             if cwd:
                 os.chdir(cwd)
             e = dict(os.environ, TERM="xterm-ghostty", **env)
-            e.pop("TMUX", None)  # we are the terminal here, not whatever tmux runs this script
+            # We are the terminal here, not whatever tmux or herdr runs this
+            # script (termium would take their prefix, and pick another leader).
+            for k in ("TMUX", "TMUX_PANE", "HERDR_ENV", "HERDR_PANE_ID", "TERMIUM_LEADER"):
+                if k not in env:
+                    e.pop(k, None)
             os.execvpe(argv[0], argv, e)
         self._set_size()
         self.alive = True

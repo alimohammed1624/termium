@@ -8,8 +8,9 @@ config) and then a private, uniquely named herdr session; termium runs in
 their panes. Neither touches any tmux server or herdr session of the user's.
 
 Checks: the tmux allow-passthrough hint, pictures in a tmux split (through
-placeholders, at the pane's position), keyboard input, detach with the
-multiplexer's prefix pressed twice, re-attach from another pane of another
+placeholders, at the pane's position), keyboard input, the leader that
+doesn't collide with the multiplexer's Ctrl+B (Ctrl+Space; Ctrl+B still
+reaches the multiplexer), detach with it, re-attach from another pane of another
 size, pane zoom, and the same in herdr (which re-renders images itself).
 
 Usage: python3 tests/multiplexers.py [outdir]   (screenshots land in outdir)
@@ -152,7 +153,7 @@ try:
     t.write("\x14"); time.sleep(1); t.write(f"{PAGE}\r")  # Ctrl+T, a second tab
     t.wait_for(lambda: len(t.virtual) >= 2, 20); time.sleep(2)
     mark = len(t.raw)
-    t.write("\x02"); time.sleep(0.2); t.write("\x02"); time.sleep(0.2); t.write("p")  # previous tab
+    t.write("\x00"); time.sleep(0.2); t.write("p")  # Ctrl+Space (the leader in tmux), previous tab
     time.sleep(3)
     import re as _re
     seg = bytes(t.raw[mark:])
@@ -163,10 +164,24 @@ try:
     check("tmux: on a tab switch the old picture goes after the new one and a finished redraw", bool(sends) and bool(dels) and synced,
           (sends[:3], dels[:3]))
 
-    # detach with tmux's prefix pressed twice (tmux sends one Ctrl+B through)
+    # tmux's prefix is Ctrl+B: termium's leader is Ctrl+Space, and says so
+    check("tmux: the sidebar hint shows the Ctrl+Space leader", t.wait_text("^Space ? for keys", 5),
+          tmux("capture-pane", "-p", "-t", "main.0").stdout[-400:])
+    t.write("\x00"); time.sleep(0.3); t.write("?")
+    check("tmux: Ctrl+Space ? shows the keys, under the Ctrl+Space leader", t.wait_text("Ctrl+Space then", 5),
+          tmux("capture-pane", "-p", "-t", "main.0").stdout[-600:])
+    t.write("\x1b"); time.sleep(0.5)
+    # ...while Ctrl+B is tmux's again: Ctrl+B o goes to the other pane, and back
+    pane_now = lambda: tmux("display-message", "-p", "-t", "main", "#{pane_index}").stdout.strip()
+    t.write("\x02"); time.sleep(0.2); t.write("o")
+    check("tmux: Ctrl+B still reaches tmux (Ctrl+B o)", t.wait_for(lambda: pane_now() == "1", 5), pane_now())
+    t.write("\x02"); time.sleep(0.2); t.write("o")
+    t.wait_for(lambda: pane_now() == "0", 5); time.sleep(1)
+
+    # detach with the leader
     spid = server_pid()
-    t.write("\x02"); time.sleep(0.2); t.write("\x02"); time.sleep(0.2); t.write("d")
-    check("tmux: Ctrl+B Ctrl+B d detaches termium", t.wait_text("[detached (from session default)]", 10),
+    t.write("\x00"); time.sleep(0.2); t.write("d")
+    check("tmux: Ctrl+Space d detaches termium", t.wait_text("[detached (from session default)]", 10),
           tmux("capture-pane", "-p", "-t", "main.0").stdout[-300:])
     check("tmux: the session survives", server_pid() == spid and "detached" in cli("ls").stdout)
 
@@ -236,7 +251,7 @@ try:
     tmux("send-keys", "-t", "main.0", "clear", "Enter")
     tmux("send-keys", "-t", "main.0", f"bun src/main.ts -s other --incognito '{PAGE}'", "Enter")
     t.wait_for(lambda: len(t.placeholder_images()) >= 2, 30)
-    tmux("send-keys", "-t", "main.0", "C-b", "d"); time.sleep(2)
+    tmux("send-keys", "-t", "main.0", "C-Space", "d"); time.sleep(2)
     tmux("send-keys", "-t", "main.0", "bun src/main.ts attach other", "Enter"); time.sleep(5)
     tmux("send-keys", "-t", "main.0", "C-q"); time.sleep(4)
     check("tmux: another session's attach, detach and quit leave this pane's picture",
@@ -264,9 +279,9 @@ try:
     # synchronized update must reach tmux whole, not held open across the pacing waits.
     tmux("select-pane", "-t", "main.1")
     for keys in ("b", "b", "b", "b"):
-        t.write("\x02"); time.sleep(0.15); t.write("\x02"); time.sleep(0.15); t.write(keys); time.sleep(2.5)
+        t.write("\x00"); time.sleep(0.15); t.write(keys); time.sleep(2.5)
     t.write("\x14"); time.sleep(1.5); t.write(f"{BASE}/noise.html?two=1\r"); time.sleep(5)
-    t.write("\x02"); time.sleep(0.15); t.write("\x02"); time.sleep(0.15); t.write("p"); time.sleep(4)
+    t.write("\x00"); time.sleep(0.15); t.write("p"); time.sleep(4)
     def sync_spans(path):
         """How long each synchronized update stayed open in what termium wrote (seconds)."""
         import struct as _st, bisect as _bi
@@ -361,8 +376,9 @@ try:
         ok, px = shows_page(h, pl, f"{OUT}/herdr.png") if pl else (False, None)
         check("herdr: the page's picture is placed in the pane", ok, (pl, px))
         spid = server_pid()
-        h.write("\x02"); time.sleep(0.3); h.write("\x02"); time.sleep(0.3); h.write("d")
-        check("herdr: Ctrl+B Ctrl+B d detaches termium", h.wait_text("[detached (from session default)]", 10), h.text()[:600])
+        # herdr's prefix is Ctrl+B (its default config): termium's leader is Ctrl+Space
+        h.write("\x00"); time.sleep(0.3); h.write("d")
+        check("herdr: Ctrl+Space d detaches termium", h.wait_text("[detached (from session default)]", 10), h.text()[:600])
         check("herdr: the session survives", server_pid() == spid and "detached" in cli("ls").stdout)
         import re as _re
         r = hc("pane", "split", first, "--direction", "down", "--cwd", ROOT)

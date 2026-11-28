@@ -16,7 +16,8 @@ not character art, so text is sharp and video, canvas and WebGL work.
 ## Features
 
 - **Detachable sessions**, like tmux: the browser runs in a background
-  session; detach with `Ctrl+B d` and attach again from any terminal, at
+  session; detach with `Ctrl+B d` (the [leader](#tmux-and-herdr), then
+  `d`) and attach again from any terminal, at
   any size, with every page as you left it.
 - **Works inside tmux and herdr** (see [tmux and herdr](#tmux-and-herdr)).
 - **Agents can drive it while you watch** (see [Agents](#agents)):
@@ -65,7 +66,8 @@ Options: `--browser <path>` (default: Helium on `PATH`, or
 `~/.local/share/termium/profile`, or `.../profiles/NAME` for a session
 started with `-s NAME`), `--incognito`, `--scale <n>` (device
 pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
-They apply when a session starts. `--no-update-check` turns off the
+They apply when a session starts. `--leader <key>` (or `$TERMIUM_LEADER`)
+sets [the leader key](#tmux-and-herdr) for this terminal. `--no-update-check` turns off the
 [update check](#updates).
 
 ### Sessions
@@ -83,7 +85,7 @@ termium ls               # list sessions (attached or detached, pages, profile)
 termium kill [name]      # end a session and its browser
 ```
 
-- `Ctrl+B d` detaches: the terminal gets its shell back, the browser and
+- `Ctrl+B d` (the [leader](#tmux-and-herdr), then `d`) detaches: the terminal gets its shell back, the browser and
   every page keep running. Attaching again, from
   this terminal or another of any size, redraws everything at the new
   size.
@@ -125,9 +127,15 @@ changes again.
 time herdr runs it shows an introduction that takes the keyboard until you
 dismiss it: Enter, then Esc.)
 
-tmux and herdr both use `Ctrl+B` as their prefix too: press it twice to
-reach termium (`Ctrl+B Ctrl+B d` detaches termium), or change one of the
-prefixes.
+**The leader key.** termium's key commands start with `Ctrl+B`. tmux and
+herdr use `Ctrl+B` as their prefix too, so inside them (when their prefix
+is `Ctrl+B`: tmux's `prefix`/`prefix2`, herdr's `keys.prefix`) termium
+uses `Ctrl+Space` instead (`Ctrl+A` if that's taken too), and `Ctrl+B`
+stays the multiplexer's. The sidebar's hint (`^Space ? for keys`) and the
+key help show the leader in use. `--leader ctrl-a` (or
+`TERMIUM_LEADER=ctrl-a`) picks one yourself and always wins; it's the
+terminal's, so each terminal attached to a session has its own, and a
+restart keeps it.
 
 ### Agents
 
@@ -190,7 +198,8 @@ termium --skill                # a SKILL.md that teaches an agent all this
 
 ### Keys
 
-Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
+Browser keys work directly; layout keys follow the leader, `Ctrl+B`
+(`Ctrl+Space` inside tmux or herdr; see [the leader key](#tmux-and-herdr)).
 
 | Key | Action |
 | --- | --- |
@@ -201,7 +210,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | Alt+= / Alt+- / Alt+0 | zoom in / out / reset |
 | Ctrl+C | copy the selection to the clipboard |
 | Ctrl+Q | quit (works everywhere, even mid-prompt) |
-| **Ctrl+B then** | |
+| **the leader (Ctrl+B) then** | |
 | `c`, `n` / `p`, `1`-`9`, `X` | new / next / previous / go to / close tab |
 | `v` / `-` | split right / down |
 | `h` `j` `k` `l` (or arrows) | focus the pane in that direction |
@@ -211,13 +220,13 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
 | `N` / `W` / `D` | new / rename / close space |
 | `b` | show or hide the sidebar |
-| `Ctrl+B` | send Ctrl+B to the page |
+| the leader again | send it to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |
 | `q` / `?` | quit / show keys |
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
-`Ctrl+B` prefix still work, and Ctrl+W closes the tab as in Chrome; its own
+leader still work, and Ctrl+W closes the tab as in Chrome; its own
 editing keys are Ctrl+A/E (start/end), Ctrl+U/K (delete to start/end),
 Ctrl+Backspace (delete word) and Alt/Ctrl+←/→.
 
@@ -251,12 +260,12 @@ termium update           # update to it (a release binary only)
   terminal stays attached, never while detached, and offers each release
   once in a session's life.
 - **What you see.** A newer release shows `↑ vX.Y.Z` at the right end of
-  the tab bar (just `↑` in a narrow terminal), and `Ctrl+B ?` shows the
+  the tab bar (just `↑` in a narrow terminal), and `Ctrl+B ?` (the [leader](#tmux-and-herdr), then `?`) shows the
   upgrade command. It's offered once, as a notice at the right of the
   address line, "termium X is available (you have Y) · Ctrl+B U", shown
   while nothing else is open there (no dialog, address editing, help).
   The notice never takes the keyboard: everything you type or paste goes
-  to the page as usual. To answer it, press `Ctrl+B U` or click the notice
+  to the page as usual. To answer it, press the leader then `U` (`Ctrl+B U`) or click the notice
   or the badge: a box opens with `u` update now, `l` later (not offered
   again in this session unless a newer release comes out; asked again when
   the session restarts) and `s` skip this version (never offered again;
@@ -286,7 +295,7 @@ termium update           # update to it (a release binary only)
   their addresses, logins survive in the profile (not with
   `--incognito`), anything typed into a page and not saved is lost, so if
   a page may have unsaved changes (or a download is running) termium asks
-  first, as `Ctrl+Q` does. `l` leaves it for later (`Ctrl+B U` offers it
+  first, as `Ctrl+Q` does. `l` leaves it for later (the leader then `U` offers it
   again; the badge shows `↻ vX.Y.Z`). After `termium update` from a shell, the next attach
   (from the new binary) offers the same restart, as a notice, and the
   restart runs that newer binary whichever terminal presses `r` (once it's

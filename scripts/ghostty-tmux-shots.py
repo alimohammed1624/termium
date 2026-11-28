@@ -5,7 +5,7 @@
 
 Runs inside the Ghostty window: starts a private tmux server (its own -L
 socket and config, allow-passthrough on) with termium in a split next to a
-shell, takes tmux-split.png, detaches termium (Ctrl+B Ctrl+B d), re-attaches
+shell, takes tmux-split.png, detaches termium (Ctrl+Space d: its leader in tmux), re-attaches
 it from a second tmux window of another size and takes tmux-reattach.png.
 The tmux server, the session and the profile are removed afterwards.
 """
@@ -91,8 +91,8 @@ try:
     time.sleep(2)
     shot("tmux-split.png")
 
-    # detach termium (C-b goes to the pane, as Ctrl+B Ctrl+B does from the keyboard)
-    tmux("send-keys", "-t", "shots:browse.0", "C-b", "d")
+    # detach termium (inside tmux its leader is Ctrl+Space; Ctrl+B is tmux's)
+    tmux("send-keys", "-t", "shots:browse.0", "C-Space", "d")
     time.sleep(2)
     tmux("new-window", "-t", "shots", "-n", "reattached", "-c", ROOT)
     time.sleep(1.5)

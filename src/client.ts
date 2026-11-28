@@ -32,6 +32,7 @@ import {
   graphicsDir,
   sweepGraphicsFiles,
 } from "./session";
+import { DEFAULT_LEADER, chooseLeader, hostPrefixes } from "./leader";
 import { drained, enterTerminal, out, queryCapabilities, querySizes, restoreTerminal, setTmuxPassthrough } from "./terminal";
 
 export interface ClientOptions {
@@ -51,6 +52,8 @@ export interface ClientOptions {
   restartArgv: string[];
   /** argv that runs this termium (the binary, or bun and the script). */
   selfArgv: string[];
+  /** The leader asked for (--leader, TERMIUM_LEADER) as a combo; else it's picked for the terminal (see src/leader.ts). */
+  leader?: string;
 }
 
 function fail(msg: string, code = 2): never {
@@ -168,6 +171,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
   setTmuxPassthrough(inTmux);
   const forced = process.env.TERMIUM_GRAPHICS;
   const placeholders = forced === "placeholders" ? true : forced === "direct" ? false : inTmux;
+  // Inside tmux or herdr, whose prefix is usually Ctrl+B too, termium's leader is another key.
+  const leader = chooseLeader(o.leader, hostPrefixes());
 
   // Already running? Then this terminal just attaches.
   let sock: Socket | null = null;
@@ -311,6 +316,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
           if (info.profile === "(incognito)") argv.push("--incognito");
           else if (typeof info.profile === "string" && info.profile.startsWith("/")) argv.push("--profile", info.profile);
           if (!o.updateCheck) argv.push("--no-update-check");
+          if (o.leader) argv.push("--leader", o.leader);
           if (o.url) argv.push(o.url);
           try {
             process.execve!(argv[0]!, argv, process.env);
@@ -410,9 +416,12 @@ export async function runClient(o: ClientOptions): Promise<void> {
   });
 
   // A session that stopped answering (hung, or stopped with SIGSTOP) must
-  // not trap the terminal: the keys that leave (Ctrl+B d, Ctrl+Q, Ctrl+C)
-  // ask it for a sign of life, and without one the terminal is let go.
-  let afterCtrlB = false;
+  // not trap the terminal: the keys that leave (the leader then d, Ctrl+Q,
+  // Ctrl+C) ask it for a sign of life, and without one the terminal is let go.
+  let afterLeader = false;
+  const keyOf = (combo: string) => (combo === "ctrl+space" ? " " : combo.slice("ctrl+".length));
+  // The session's word for it once it answers (one older than leaders keeps Ctrl+B).
+  let leaderKey = keyOf(leader);
   let pingTimer: ReturnType<typeof setTimeout> | null = null;
   const unresponsive = () =>
     `termium: session "${o.name}" isn't responding${serverPid ? ` (pid ${serverPid})` : ""}; detached. ` +
@@ -421,8 +430,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
     if (ev.type !== "key" || ev.event === "release") return;
     const plain = !ev.mods.alt && !ev.mods.meta;
     const ctrlKey = (k: string) => ev.mods.ctrl && plain && ev.key.toLowerCase() === k;
-    const leaving = (afterCtrlB && ev.key === "d" && !ev.mods.ctrl && plain) || ctrlKey("q") || ctrlKey("c");
-    afterCtrlB = ctrlKey("b");
+    const leaving = (afterLeader && ev.key === "d" && !ev.mods.ctrl && plain) || ctrlKey("q") || ctrlKey("c");
+    afterLeader = ctrlKey(leaderKey);
     if (!leaving || pingTimer) return;
     send({ t: "ping" });
     pingTimer = setTimeout(() => void leave(1, unresponsive()), 3000);
@@ -843,6 +852,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     if (m?.t === "welcome") {
       welcomed = true;
       serverPid = Number(m.pid) || 0;
+      leaderKey = keyOf(typeof m.leader === "string" ? m.leader : DEFAULT_LEADER);
       // This terminal's termium is older than the session's (another copy was updated): say so on leaving.
       if (o.updateCheck && typeof m.version === "string" && isNewer(m.version, o.version)) {
         legacyNote =
@@ -922,6 +932,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     placeholders,
     rgbIds: pane0.rgb,
     cwd: process.cwd(),
+    leader,
     via: !inTmux ? "direct" : fileTransport ? "tmux-files" : "tmux-paced",
     // A session we just started opens the URL itself.
     url: o.url,

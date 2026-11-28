@@ -43,6 +43,7 @@ import {
   type Restore,
 } from "./session";
 import { setSink } from "./terminal";
+import { DEFAULT_LEADER, parseLeader } from "./leader";
 import {
   MAX_AGE_MS,
   cachePath,
@@ -98,6 +99,8 @@ export interface Hello {
   rgbIds?: boolean;
   /** How pictures reach the terminal (for the log): "direct", "tmux-files" or "tmux-paced". */
   via?: string;
+  /** The key that starts key commands in this terminal ("ctrl+space"; Ctrl+B if not said, as older clients don't). */
+  leader?: string;
   /** Open this in a new tab (attaching to a session that's already running). */
   url?: string | null;
   /** This terminal wants update news: the session checks for a newer termium while it's attached. */
@@ -820,9 +823,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       client = c;
       everAttached = true;
       lastHello = h;
-      c.send({ t: "welcome", pid: process.pid, version });
+      c.send({ t: "welcome", pid: process.pid, version, leader: terminalOf(h).leader ?? DEFAULT_LEADER });
       setSink((data, done) => c.output(data, done));
-      log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders} via=${h.via}`);
+      log(`client attached ${h.cols}x${h.rows} cell ${h.cellW}x${h.cellH} pixelMouse=${h.pixelMouse} placeholders=${h.placeholders} via=${h.via} leader=${h.leader ?? "-"}`);
       // Its own server (it opened the URL at start) or another one (a client
       // whose server lost the race to start this session): then open it here.
       if (h.starter === process.pid) h.url = null;
@@ -1012,6 +1015,13 @@ function readPidSafe(path: string): number | null {
 /** Largest terminal drawn for, in device pixels each way: beyond it, pictures stall the terminal. */
 const MAX_PIXELS = 16384;
 
+/** The leader a client asked for, if it's one termium takes (else Ctrl+B). */
+function leaderOf(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const p = parseLeader(v);
+  return "combo" in p ? p.combo : undefined;
+}
+
 function terminalOf(h: Partial<Hello>) {
   const num = (v: unknown, dflt: number, max: number) => {
     const n = Math.floor(Number(v));
@@ -1028,5 +1038,6 @@ function terminalOf(h: Partial<Hello>) {
     placeholders: !!h.placeholders,
     rgbIds: !!h.rgbIds,
     cwd: typeof h.cwd === "string" && h.cwd.startsWith("/") ? h.cwd : undefined,
+    leader: leaderOf(h.leader),
   };
 }

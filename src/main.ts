@@ -12,6 +12,7 @@ import { runCtl, runDevtools, startSession } from "./ctl";
 import { SKILL } from "./skill";
 import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
+import { parseLeader } from "./leader";
 import { restoreTerminal } from "./terminal";
 import { DEFAULT_SEARCH } from "./text";
 import {
@@ -58,6 +59,9 @@ Options:
   --incognito           use a throwaway profile that is deleted when the session ends
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)
+  --leader <key>        the key that starts termium's key commands: ctrl-space, ctrl-a...
+                        (default: Ctrl+B; Ctrl+Space inside tmux or herdr when they use
+                        Ctrl+B; or $TERMIUM_LEADER). It's this terminal's, not the session's
   --no-update-check     don't check GitHub for a newer termium, nor offer to update
                         (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help
@@ -65,9 +69,9 @@ Options:
   --skill               print a SKILL.md that teaches an agent to use termium
 
 --browser, --profile, --incognito, --scale and --search apply when a session starts.
-Ctrl+B d detaches (the browser keeps running); Ctrl+Q ends the session.
+The leader then d detaches (the browser keeps running); Ctrl+Q ends the session.
 Needs a terminal with the kitty graphics protocol, such as Ghostty, kitty or WezTerm
-(inside tmux: set -g allow-passthrough on). Press Ctrl+B then ? inside termium for keys.`;
+(inside tmux: set -g allow-passthrough on). Press the leader then ? inside termium for keys.`;
 
 type Command = "open" | "attach" | "ls" | "kill" | "server" | "check-update" | "update" | "start";
 
@@ -77,6 +81,10 @@ interface Args extends LaunchOptions {
   /** The launch options given, by flag, for the "already running" message. */
   launchFlags: string[];
   noUpdateCheck: boolean;
+  /** The leader asked for (--leader, else TERMIUM_LEADER), as a combo. */
+  leader?: string;
+  /** Whether it came from --leader (a restart passes it on). */
+  leaderFlag: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -85,6 +93,7 @@ function parseArgs(argv: string[]): Args {
     session: DEFAULT_SESSION,
     launchFlags: [],
     noUpdateCheck: false,
+    leaderFlag: false,
     url: null,
     incognito: false,
     scale: null,
@@ -132,6 +141,13 @@ function parseArgs(argv: string[]): Args {
         sessionGiven = true;
         break;
       case "--no-update-check": args.noUpdateCheck = true; break;
+      case "--leader": {
+        const p = parseLeader(value());
+        if ("error" in p) fail(p.error);
+        args.leader = p.combo;
+        args.leaderFlag = true;
+        break;
+      }
       // Older termiums (0.3.0 pre-releases) restarted with --restore; a
       // restart snapshot is reopened whenever one is waiting, so it means nothing now.
       case "--restore": break;
@@ -176,6 +192,13 @@ function parseArgs(argv: string[]): Args {
   }
   if (!validSessionName(args.session)) fail(`bad session name "${args.session}" (letters, digits, . _ -; up to 64)`);
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
+  const terminal = args.command === "open" || args.command === "attach";
+  if (terminal && !args.leaderFlag && process.env.TERMIUM_LEADER) {
+    const p = parseLeader(process.env.TERMIUM_LEADER);
+    if ("error" in p) fail(`TERMIUM_LEADER: ${p.error}`);
+    args.leader = p.combo;
+  }
+  if (args.leaderFlag && args.command !== "open" && args.command !== "attach") fail("--leader only applies to a terminal that attaches");
   if (args.incognito && args.profile) fail("--incognito and --profile can't be used together");
   if (args.command !== "open" && args.command !== "server" && args.command !== "start" && args.launchFlags.length) {
     fail(`${args.launchFlags.join(", ")} only apply when starting a session`);
@@ -262,7 +285,7 @@ async function update(): Promise<never> {
     const names = old.map((s) => s.name).join(", ");
     console.log(
       `Running session${old.length === 1 ? "" : "s"} (${names}) keep${old.length === 1 ? "s" : ""} running the old termium until restarted: ` +
-        `attach (termium attach NAME) and press Ctrl+B U, then r (offered even with update checks off), which reopens its spaces and tabs; ` +
+        `attach (termium attach NAME) and press U after the leader key its sidebar shows (^B, or ^Space in tmux or herdr), then r (offered even with update checks off), which reopens its spaces and tabs; ` +
         `or end it with termium kill NAME.`,
     );
   }
@@ -306,6 +329,8 @@ async function main(): Promise<void> {
       }
       const restartArgv = [...selfArgv(), "--session", args.session];
       if (args.noUpdateCheck) restartArgv.push("--no-update-check");
+      // (A leader from TERMIUM_LEADER carries over in the environment.)
+      if (args.leaderFlag && args.leader) restartArgv.push("--leader", args.leader);
       return runClient({
         name: args.session,
         mode: args.command === "attach" ? "attach" : "auto",
@@ -316,6 +341,7 @@ async function main(): Promise<void> {
         updateCheck: checkEnabled(args.noUpdateCheck),
         restartArgv,
         selfArgv: selfArgv(),
+        leader: args.leader,
       });
     }
   }
