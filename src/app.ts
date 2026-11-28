@@ -1536,7 +1536,7 @@ export class App {
   private resetInput(): void {
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
     if (this.mode === "pick") this.cancelPick(false);
-    this.pickRelease = false;
+    this.pickRelease = null;
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
     }
@@ -3634,13 +3634,14 @@ export class App {
       return;
     }
 
-    // The release of the click that picked an element: the page never saw its press.
-    if (this.pickRelease && ev.action === "release") {
-      this.pickRelease = false;
+    // The release of the click that picked an element (or cancelled picking): the page never saw its press.
+    if (this.pickRelease === ev.button && ev.action === "release") {
+      this.pickRelease = null;
       return;
     }
-    // (A button held down on a page since before pick mode: its release still goes to that page.)
-    if (this.mode === "pick" && !(this.mouseCapture && ev.action === "release")) return this.pickMouse(ev, col, row, px, py);
+    // (A button held since before pick mode, on a page or a divider: its release still goes there.)
+    const heldRelease = ev.action === "release" && (this.drag || (this.mouseCapture && this.mouseButtons));
+    if (this.mode === "pick" && !heldRelease) return this.pickMouse(ev, col, row, px, py);
 
     if (this.drag) {
       if (ev.action === "move") return this.dragTo(col, row);
@@ -3874,12 +3875,14 @@ export class App {
   private get picker(): Picker {
     return (this.pickerOf ??= new Picker(this.cdp));
   }
-  /** The release of the click that picked: swallowed, as its press was. */
-  private pickRelease = false;
+  /** The button of the click that picked (or cancelled): its release is swallowed, as its press was. */
+  private pickRelease: number | null = null;
   /** A pick being read from the page (further clicks wait for it). */
   private pickBusy = false;
   /** Bumped whenever pick mode starts or ends: a pick still being read from an earlier one is dropped. */
-  private pickRun = 0;
+  pickRun = 0;
+  /** The last few picks, by the pick mode (pickRun) they were made in. */
+  picksByRun = new Map<number, Picked>();
   /** Pick mode was turned on by an agent (`termium ctl pick`): its timeout may turn it off. */
   pickByAgent = false;
   /** `termium ctl pick` commands waiting on pick mode now. */
@@ -3887,8 +3890,6 @@ export class App {
   /** The element last picked, and how many picks there have been (an agent waits for this to change). */
   picked: Picked | null = null;
   pickSeq = 0;
-  /** How many times pick mode was cancelled. */
-  pickCancels = 0;
 
   /** Whether pick mode is on. */
   picking(): boolean {
@@ -3917,7 +3918,6 @@ export class App {
   /** Turns pick mode off, unanswered. */
   cancelPick(say: boolean): void {
     if (this.mode !== "pick") return;
-    this.pickCancels++;
     this.pickRun++;
     this.pickBusy = false;
     this.picker.stop();
@@ -3939,7 +3939,7 @@ export class App {
       return;
     }
     if (ev.action !== "press" || this.pickBusy) return;
-    this.pickRelease = true;
+    this.pickRelease = ev.button;
     if (!g || !pos || ev.button !== 0) return this.cancelPick(true);
     void this.pickAt(g.item, pos.x, pos.y);
   }
@@ -3960,7 +3960,6 @@ export class App {
     this.picker.stop();
     this.setMode("normal");
     if (!found || !this.pages.has(page.sessionId) || (page.docGen ?? 0) !== gen) {
-      this.pickCancels++;
       this.showToast(found ? "The page changed; pick again (Ctrl+B g)" : "Nothing to pick there", 3000);
       return;
     }
@@ -3985,6 +3984,8 @@ export class App {
     };
     this.picked = picked;
     this.pickSeq++;
+    this.picksByRun.set(run, picked);
+    for (const r of this.picksByRun.keys()) if (this.picksByRun.size > 8) this.picksByRun.delete(r);
     if (this.attached) out(setClipboard(pickedText(picked, this.opts.session)));
     this.showToast(`Picked ${pickedLine(picked)}: copied for your agent`, 5000);
   }

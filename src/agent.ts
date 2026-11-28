@@ -256,7 +256,7 @@ class Agent {
       case "dialog":
         return this.dialog(req);
       case "picked":
-        return req.wait ? this.waitPick(this.app.pickSeq, false) : this.lastPick();
+        return req.wait ? this.waitPick(this.app.pickSeq) : this.lastPick();
       case "pick":
         return this.pick(timeoutMs);
       default:
@@ -426,38 +426,20 @@ class Agent {
   // ------------------------------------------------------------ picking
 
   /** The element the person last picked; `stale` once its page has a new document (or is gone). */
-  private lastPick(): unknown {
-    const p = this.app.picked;
+  private lastPick(p = this.app.picked): unknown {
     if (!p) throw new CtlError("nothing picked yet: the person picks with Ctrl+B g, then a click (termium ctl pick asks them to)");
     const page = this.app.pageByNum(p.tab);
     const stale = !page || `@${page.docGen ?? 0}` !== p.ref.slice(p.ref.indexOf("@"));
     return stale ? { ...p, stale: true } : p;
   }
 
-  /**
-   * Waits for the next pick (after `seq`). For `pick` (`inMode`), pick mode
-   * ending unanswered ends the wait; and the last such command to time out
-   * turns off pick mode an agent turned on (never the person's own).
-   */
-  private async waitPick(seq: number, inMode: boolean): Promise<unknown> {
-    const cancels = this.app.pickCancels;
-    if (inMode) this.app.pickWaiters++;
-    try {
-      while (this.app.pickSeq === seq) {
-        if (inMode && (this.app.pickCancels !== cancels || !this.app.picking())) {
-          throw new CtlError("the person cancelled the pick (Esc, or a click outside the page)");
-        }
-        if (Date.now() >= this.deadline - 100) {
-          const off = inMode && this.app.pickWaiters === 1 && this.app.pickByAgent;
-          if (off) this.app.cancelPick(false);
-          throw new CtlError(`timed out waiting for a pick${off ? "; pick mode turned off" : ""}`, EXIT.timeout);
-        }
-        await Bun.sleep(50);
-      }
-      return this.lastPick();
-    } finally {
-      if (inMode) this.app.pickWaiters--;
+  /** Waits for the next pick (after `seq`), whenever it's made. */
+  private async waitPick(seq: number): Promise<unknown> {
+    while (this.app.pickSeq === seq) {
+      if (Date.now() >= this.deadline - 100) throw new CtlError("timed out waiting for a pick", EXIT.timeout);
+      await Bun.sleep(50);
     }
+    return this.lastPick();
   }
 
   /** Turns pick mode on in the attached terminal and waits for the person's pick. */
@@ -465,12 +447,30 @@ class Agent {
     if (!this.app.attached) throw new CtlError("no terminal is attached to this session: nobody to pick an element");
     const already = this.app.picking();
     if (!already) await this.personFree(null, timeoutMs, "pick mode not turned on");
-    const seq = this.app.pickSeq;
     if (!this.app.picking()) {
       if (!this.app.startPick(true)) throw new CtlError("couldn't turn pick mode on (is a page open?)");
       this.note("pick an element (Esc cancels)");
     }
-    return this.waitPick(seq, true);
+    // Answered only by a pick made in this pick mode: once it has ended
+    // unanswered (Esc...), a pick in a later one isn't the answer.
+    const run = this.app.pickRun;
+    this.app.pickWaiters++;
+    try {
+      for (;;) {
+        const p = this.app.picksByRun.get(run);
+        if (p) return this.lastPick(p);
+        if (this.app.pickRun !== run) throw new CtlError("the person cancelled the pick (Esc, or a click outside the page)");
+        if (Date.now() >= this.deadline - 100) {
+          // The last of these to give up turns off pick mode an agent turned on (never the person's own).
+          const off = this.app.pickWaiters === 1 && this.app.pickByAgent;
+          if (off) this.app.cancelPick(false);
+          throw new CtlError(`timed out waiting for a pick${off ? "; pick mode turned off" : ""}`, EXIT.timeout);
+        }
+        await Bun.sleep(50);
+      }
+    } finally {
+      this.app.pickWaiters--;
+    }
   }
 
   // ------------------------------------------------------------ reading

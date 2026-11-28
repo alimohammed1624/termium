@@ -205,13 +205,66 @@ try:
     out, err = b.communicate(timeout=30)
     check("...and the second gets the pick", b.returncode == 0 and '"Big button"' in out, (b.returncode, out, err))
 
-    # 12. A new document: picked says stale, and the id is refused.
+    # 12. Inside an editable, all is typed; a name made of field contents is left out.
+    js("document.getElementById('inner').textContent = 'inner-typed'")
+    def center(sel):
+        c = js(f"(() => {{ const b = document.querySelector({json.dumps(sel)}).getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; }})()")
+        return at(int(c[0]), int(c[1]))
+    since = len(t.raw)
+    pick_on(t); t.click(*center("#inner")); time.sleep(0.8)
+    r = ctl("picked", "--json")
+    check("element inside an editable: no content", "inner-typed" not in r.stdout and "Write" not in r.stdout and json.loads(r.stdout).get("tag") == "span", r.stdout)
+    pick_on(t); t.click(*center("#labelled")); time.sleep(0.8)
+    r = ctl("picked", "--json")
+    clip = "\n".join(clipboards(t, since))
+    check("name made of field contents left out", json.loads(r.stdout).get("selector") == "#labelled" and json.loads(r.stdout).get("name") == ""
+          and not [x for x in ("label-secret", "lbl-value", "inner-typed") if x in r.stdout or x in clip], (r.stdout, clip))
+
+    # 13. The selector names exactly the picked element (CSS escaping, not JSON).
+    pick_on(t); t.click(*center("#nl-target")); time.sleep(0.8)
+    q = json.loads(ctl("picked", "--json").stdout or "{}")
+    hit = js(f"(() => {{ const all = document.querySelectorAll({json.dumps(q.get('selector', ''))}); return all.length === 1 ? all[0].id : all.length; }})()")
+    check("selector with a newline in an attribute names the element", hit == "nl-target", (q.get("selector"), hit))
+
+    # 14. Releases of buttons held before pick mode, with another pressed in it, go where they belong.
+    js("window.downs = 0; window.ups = 0")
+    t.mouse(hx, hy, action="press"); time.sleep(0.3)  # left held on the page
+    pick_on(t)
+    t.mouse(*center("#big"), button=2, action="press"); time.sleep(0.3)  # right: cancels pick mode
+    t.mouse(hx, hy, action="release"); time.sleep(0.2)  # left released first
+    t.mouse(*center("#big"), button=2, action="release"); time.sleep(0.5)
+    check("held left released on the page, the right click swallowed", (js("window.downs"), js("window.ups")) == (1, 1) and "PICK" not in t.text(),
+          (js("window.downs"), js("window.ups")))
+
+    # 15. Esc, then pick mode again and a pick at once: ctl pick (of the first) says cancelled.
+    w = ctl_bg("pick", "--timeout", "20")
+    t.wait_text("PICK", 10)
+    t.key("escape"); t.key("ctrl+b"); t.key("g"); t.click(*center("#big"))
+    out, err = w.communicate(timeout=30)
+    check("cancelled ctl pick isn't answered by a later pick", w.returncode == 1 and "cancelled" in err, (w.returncode, out, err))
+
+    # 16. A new document: picked says stale, and the id is refused.
     ref = json.loads(ctl("picked", "--json").stdout)["ref"]
     ctl("open", URL)
     q = json.loads(ctl("picked", "--json").stdout or "{}")
     check("picked after a new document: stale", q.get("stale") is True, q)
     r = ctl("click", ref)
     check("stale picked id refused", r.returncode == 1 and "stale" in r.stderr, r.stderr)
+
+    # 17. A divider held before pick mode: its release ends the drag.
+    t.key("ctrl+b"); t.key("v"); time.sleep(1.5); t.key("escape"); time.sleep(1.0)
+    w0 = js("innerWidth")
+    sep = next((c for c in range(30, t.cols) if t.screen.display[20][c] in "│┃|"), None) if hasattr(t, "screen") else None
+    if sep is None:
+        check("found the divider", False, t.text()[:400])
+    else:
+        sx, sy = sep * 10 + 5, 20 * 20 + 10
+        t.mouse(sx, sy, action="press"); time.sleep(0.2)
+        pick_on(t)
+        t.mouse(sx, sy, action="release"); time.sleep(0.2)
+        t.key("escape"); time.sleep(0.3)
+        t.mouse(sx + 150, sy, action="move"); time.sleep(1.0)
+        check("divider let go after its release in pick mode", js("innerWidth") == w0, (w0, js("innerWidth")))
 finally:
     if t:
         t.close()

@@ -44,16 +44,19 @@ const DESCRIBE = `function () {
   if (!el) return null;
   const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
   const root = el.getRootNode();
-  const unique = (sel) => { try { return root.querySelectorAll(sel).length === 1; } catch { return false; } };
+  // Unique, and that one is the element itself.
+  const unique = (sel, e) => { try { const all = root.querySelectorAll(sel); return all.length === 1 && all[0] === e; } catch { return false; } };
   const esc = (s) => CSS.escape(s);
+  // A CSS string (not JSON: "\\n" means "n" in CSS).
+  const str = (v) => '"' + v.replace(/[\\\\"]/g, "\\\\$&").replace(/[\\n\\r\\f]/g, (c) => "\\\\" + c.charCodeAt(0).toString(16) + " ") + '"';
   const part = (e) => {
     const tag = e.localName;
-    if (e.id && unique("#" + esc(e.id))) return { sel: "#" + esc(e.id), done: true };
+    if (e.id && unique("#" + esc(e.id), e)) return { sel: "#" + esc(e.id), done: true };
     for (const a of ["data-testid", "data-test", "data-qa", "name", "aria-label"]) {
       const v = e.getAttribute(a);
       if (v && v.length < 80) {
-        const s = tag + "[" + a + "=" + JSON.stringify(v) + "]";
-        if (unique(s)) return { sel: s, done: true };
+        const s = tag + "[" + a + "=" + str(v) + "]";
+        if (unique(s, e)) return { sel: s, done: true };
       }
     }
     let s = tag;
@@ -68,14 +71,15 @@ const DESCRIBE = `function () {
   for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
     const p = part(e);
     parts.unshift(p.sel);
-    if (p.done || unique(parts.join(" > "))) break;
+    if (p.done || unique(parts.join(" > "), el)) break;
   }
   const doc = el.ownerDocument;
   // Nothing typed into a field (its value, an editable's content) ever leaves
   // the page: not in the HTML (inputs lose their value, textareas and
   // editables their content, also inside the element), nor in the text.
   const FIELDS = "input, textarea, [contenteditable]:not([contenteditable=false])";
-  const clean = el.cloneNode(true);
+  // (Inside an editable, all of it was typed: only the tag.)
+  const clean = el.cloneNode(!el.isContentEditable);
   for (const f of [clean, ...clean.querySelectorAll(FIELDS)]) {
     if (!f.matches || !f.matches(FIELDS)) continue;
     if (f.localName === "input") f.removeAttribute("value");
@@ -89,7 +93,14 @@ const DESCRIBE = `function () {
     text = clean.textContent ?? "";
   } else text = el.innerText ?? el.textContent ?? "";
   text = String(text).replace(/\\s+/g, " ").trim();
+  // Its accessible name may be made of field contents (its own, as inside an
+  // editable, or of what it's labelled by): then it's left out.
+  const hasField = (n) => !!n && (n !== el || !el.matches(FIELDS)) &&
+    (n.isContentEditable || n.matches(FIELDS) || [...n.querySelectorAll(FIELDS)].some((f) => f !== el));
+  const by = (el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map((id) => (root.getElementById ? root.getElementById(id) : doc.getElementById(id)));
+  const nameSafe = ![el, ...by, ...(el.labels || [])].some(hasField);
   return {
+    nameSafe,
     tag: el.localName,
     selector: parts.join(" > "),
     frame: doc.defaultView && doc.defaultView !== doc.defaultView.top ? String(doc.location.href) : undefined,
@@ -186,7 +197,7 @@ export class Picker {
         .catch(() => null);
       const a = ax?.nodes?.find((n: any) => n.backendDOMNodeId === node.backendNodeId) ?? ax?.nodes?.[0];
       const role = a && !a.ignored ? String(a.role?.value ?? "") : "";
-      const name = a && !a.ignored ? String(a.name?.value ?? "").replace(/\s+/g, " ").trim() : "";
+      const name = a && !a.ignored && info.nameSafe ? String(a.name?.value ?? "").replace(/\s+/g, " ").trim() : "";
       return { node: node.backendNodeId, role: role === "generic" || role === "none" ? "" : role, name, info };
     } finally {
       this.cdp.send("Runtime.releaseObjectGroup", { objectGroup: group }, sid).catch(() => {});
