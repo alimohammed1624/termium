@@ -1025,7 +1025,8 @@ export async function listSessions(): Promise<void> {
     else {
       // A session started by another termium (before an update, say) says which.
       const other = info.version && info.version !== VERSION ? `  (termium ${info.version})` : "";
-      rows.push([name, String(info.pid), info.attached ? "attached" : "detached", `${info.pages} page${info.pages === 1 ? "" : "s"}`, info.profile + other]);
+      const ssh = info.ssh ? `  via ssh ${info.ssh}${info.sshUp === false ? " (tunnel down)" : ""}` : "";
+      rows.push([name, String(info.pid), info.attached ? "attached" : "detached", `${info.pages} page${info.pages === 1 ? "" : "s"}`, info.profile + ssh + other]);
     }
   }
   if (rows.length === 0) {
