@@ -195,6 +195,40 @@ describe("ReaderView", () => {
     expect(w.layoutFor(rect.cols)!.lines[w.top]!.cells.map((c) => c.t).join("")).toBe("para 42");
   });
 
+  test("resizing back and forth never moves the reading position", () => {
+    const words: Article = {
+      title: "",
+      byline: "",
+      site: "",
+      blocks: [{ k: "p", c: [{ t: Array.from({ length: 400 }, (_, i) => `word${String(i).padStart(3, "0")}`).join(" ") }], ind: 0, q: 0 }],
+    };
+    const v = new ReaderView();
+    v.setArticle(words, "u");
+    v.draw({ ...rect, cols: 140 }, "h", false);
+    v.scroll(15);
+    const first = () => v.layoutFor(140)!.lines[v.top]!.cells.map((c) => c.t).join("").split(" ")[0];
+    const was = first();
+    for (let i = 0; i < 5; i++) {
+      v.draw({ ...rect, cols: 88 }, "h", false);
+      v.draw({ ...rect, cols: 140 }, "h", false);
+    }
+    expect(first()).toBe(was);
+  });
+
+  test("# and #top go to the top; an unknown id stays put", () => {
+    const v = new ReaderView();
+    v.setArticle(long, "u");
+    v.draw(rect, "h", false);
+    v.scroll(30);
+    expect(v.scrollToId("missing")).toBe(false);
+    expect(v.top).toBe(30);
+    expect(v.scrollToId("")).toBe(true);
+    expect(v.top).toBe(0);
+    v.scroll(30);
+    expect(v.scrollToId("top")).toBe(true);
+    expect(v.top).toBe(0);
+  });
+
   test("the status line hides the row under it from clicks", () => {
     const v = new ReaderView();
     v.setArticle(long, "u");

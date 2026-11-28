@@ -128,6 +128,8 @@ const WALKER = String.raw`
         for (let li = n.firstChild; li; li = li.nextSibling) {
           if (li.nodeType !== 1 || String(li.tagName).toUpperCase() !== "LI") { walk(li, s, h); continue; }
           flush();
+          const liId = li.getAttribute("id");
+          if (liId && ids.length < 50) ids.push(String(liId));
           mark = tag === "OL" ? (i++) + "." : "*";
           ind++; kids(li, s, h); flush(); ind--;
           mark = null;
@@ -601,8 +603,17 @@ export class ReaderView {
     this.anchor = at;
   }
 
-  /** Where the top of the pane is in the article (remembered as the reading position). */
+  /**
+   * Where the top of the pane is in the article (remembered as the reading
+   * position). It only moves when the reader scrolls or jumps: reflowing
+   * for another width keeps it (rounding to lines never makes it creep).
+   */
   position(): Position | null {
+    return this.anchor ?? this.here();
+  }
+
+  /** The position of the line now at the top. */
+  private here(): Position | null {
     const lines = this.lay?.lines;
     const block = lines?.[this.top]?.block;
     if (!lines || block === undefined) return this.anchor;
@@ -628,7 +639,7 @@ export class ReaderView {
     if (!this.article) return null;
     const w = columnWidth(cols);
     if (!this.lay || this.lay.width !== w) {
-      const keep = this.lay ? this.position() : this.anchor;
+      const keep = this.anchor;
       this.lay = layout(this.article, w);
       this.top = keep ? this.lineOf(keep) : 0;
     }
@@ -638,12 +649,19 @@ export class ReaderView {
   /** Scrolls to the block holding element id `id` (a #fragment); false if there's none. */
   scrollToId(id: string): boolean {
     const block = this.article?.blocks.findIndex((b) => b.a?.includes(id)) ?? -1;
+    if (block < 0 && this.article && (id === "" || id.toLowerCase() === "top")) {
+      // "#" and "#top" mean the top, as in a browser (unless an element has that id).
+      this.focus = -1;
+      this.anchor = null;
+      this.top = 0;
+      return true;
+    }
     if (block < 0) return false;
     this.focus = -1;
     this.anchor = { block, frac: 0 };
     if (this.lay) {
       this.top = Math.min(this.lineOf(this.anchor), this.maxTop());
-      this.anchor = this.position();
+      this.anchor = this.here();
     }
     return true;
   }
@@ -656,7 +674,7 @@ export class ReaderView {
     const top = Math.max(0, Math.min(this.maxTop(), this.top + by));
     if (top === this.top) return false;
     this.top = top;
-    this.anchor = this.position();
+    this.anchor = this.here();
     return true;
   }
 
@@ -812,7 +830,12 @@ interface PageState {
   hash: string;
   /** set() is reading the article (newDocument leaves it to it). */
   asking?: boolean;
+  /** When the current document came (pages may fill their article in a while after). */
+  since: number;
 }
+
+/** How long after a document comes reader mode keeps looking for an article filled in late. */
+const LATE_MS = 7000;
 
 /** Mouse reporting as enterTerminal turns it on (see terminal.ts). */
 const MOUSE_ON = `${CSI}?1003h`;
@@ -850,7 +873,8 @@ export class ReaderMode<P extends ReaderPage> {
     };
     cdp.on("Page.frameNavigated", (p, sid) => {
       const page = main(sid, p.frame?.parentId ? null : p.frame?.id);
-      if (page) this.newDocument(page, String(p.frame?.url ?? page.url), 0);
+      // (The #fragment comes apart from the address, in urlFragment.)
+      if (page) this.newDocument(page, String(p.frame?.url ?? page.url) + String(p.frame?.urlFragment ?? ""), 0);
     });
     cdp.on("Page.navigatedWithinDocument", (p, sid) => {
       const page = main(sid, p.frameId);
@@ -870,7 +894,7 @@ export class ReaderMode<P extends ReaderPage> {
 
   private st(page: P): PageState {
     let s = this.state.get(page);
-    if (!s) this.state.set(page, (s = { readable: false, seq: 0, view: null, doc: "", hash: "" }));
+    if (!s) this.state.set(page, (s = { readable: false, seq: 0, view: null, doc: "", hash: "", since: 0 }));
     return s;
   }
 
@@ -910,6 +934,7 @@ export class ReaderMode<P extends ReaderPage> {
     const seq = ++s.seq;
     s.doc = noHash(url);
     s.hash = hashOf(url);
+    s.since = Date.now();
     const wasReadable = s.readable;
     s.readable = false;
     if (s.view) {
@@ -939,9 +964,9 @@ export class ReaderMode<P extends ReaderPage> {
   }
 
   /** Waits for the document to finish loading (15 s at most); false if another came meanwhile. */
-  private async settled(page: P, seq: number): Promise<boolean> {
+  private async settled(page: P, seq: number, until = Infinity): Promise<boolean> {
     const s = this.st(page);
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 60 && Date.now() < until; i++) {
       if (s.seq !== seq || !this.host.isOpen(page)) return false;
       const state = await this.evaluate(page, "document.readyState", 2000, true).catch(() => null);
       if (state === "complete" || (state === "interactive" && i >= 12)) return s.seq === seq;
@@ -972,14 +997,18 @@ export class ReaderMode<P extends ReaderPage> {
     };
     const run = async () => {
       if (main) return once(undefined);
+      // Never the page's own world: its scripts could change what's read.
       const id = await world();
+      if (!id) throw new Error("no isolated world");
       try {
         return await once(id);
       } catch (e) {
         // The world went with its document: once more in a new one.
-        if (!id || !/context/i.test(String(e))) throw e;
+        if (!/context/i.test(String(e))) throw e;
         s.world = undefined;
-        return once(await world());
+        const again = await world();
+        if (!again) throw new Error("no isolated world");
+        return once(again);
       }
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -987,16 +1016,30 @@ export class ReaderMode<P extends ReaderPage> {
     return Promise.race([run(), late]).finally(() => clearTimeout(timer));
   }
 
-  /** Extracts the article into the page's view; turns reader mode off if there's none. */
-  private async read(page: P, seq: number, asked: boolean): Promise<boolean> {
+  /**
+   * Extracts the article into the page's view; turns reader mode off if
+   * there's none. A document younger than LATE_MS is looked at again until
+   * then (pages that fill their article in after loading). Gives up (null)
+   * at `until`.
+   */
+  private async read(page: P, seq: number, asked: boolean, until = Infinity): Promise<boolean | null> {
     const s = this.st(page);
     let article: Article | null = null;
-    try {
-      article = parseArticle(await this.evaluate(page, EXTRACT_JS, 15_000));
-    } catch (e) {
-      this.host.log(`reader: ${e}`);
+    for (;;) {
+      const left = until - Date.now();
+      if (left <= 0) return null;
+      try {
+        article = parseArticle(await this.evaluate(page, EXTRACT_JS, Math.min(15_000, left)));
+      } catch (e) {
+        if (until - Date.now() <= 0) return null;
+        this.host.log(`reader: ${e}`);
+      }
+      if (s.seq !== seq || !s.view || !this.host.isOpen(page)) return false;
+      const late = s.since + LATE_MS - Date.now();
+      if (article || late <= 0) break;
+      await Bun.sleep(Math.min(1500, late));
+      if (s.seq !== seq || !s.view || !this.host.isOpen(page)) return false;
     }
-    if (s.seq !== seq || !s.view || !this.host.isOpen(page)) return false;
     if (!article) {
       this.off(page);
       this.host.toast(asked ? "No article found on this page" : "Not an article: showing the page");
@@ -1011,8 +1054,11 @@ export class ReaderMode<P extends ReaderPage> {
     return true;
   }
 
-  /** Turns reader mode on (reading the article) or off; resolves to whether it's on. */
-  async set(page: P, on: boolean): Promise<boolean> {
+  /**
+   * Turns reader mode on (reading the article) or off; resolves to whether
+   * it's on, or null if `until` came first (then it's left off).
+   */
+  async set(page: P, on: boolean, until = Infinity): Promise<boolean | null> {
     const s = this.st(page);
     if (!on) {
       this.off(page);
@@ -1025,25 +1071,31 @@ export class ReaderMode<P extends ReaderPage> {
     try {
       // A page still on its way (a navigation not yet committed, or a
       // document still loading) is read once it's there (20 s at most).
-      const end = Date.now() + 20_000;
+      const end = Math.min(until, Date.now() + 20_000);
+      let r: boolean | null = null;
       for (;;) {
         if (s.view === null || !this.host.isOpen(page)) return false;
+        if (Date.now() >= until) break;
         if (this.host.navigating(page) && Date.now() < end) {
           await Bun.sleep(100);
           continue;
         }
         const seq = s.seq;
-        const same = await this.settled(page, seq);
+        const same = await this.settled(page, seq, until);
         if (s.view === null) return false;
+        if (Date.now() >= until) break;
         if (!same && s.seq !== seq && Date.now() < end) continue;
-        return await this.read(page, s.seq, true);
+        r = await this.read(page, s.seq, true, until);
+        break;
       }
+      if (r === null) this.off(page);
+      return r;
     } finally {
       s.asking = false;
     }
   }
 
-  toggle(page: P): Promise<boolean> {
+  toggle(page: P): Promise<boolean | null> {
     return this.set(page, !this.isOn(page));
   }
 

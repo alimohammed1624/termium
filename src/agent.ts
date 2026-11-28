@@ -263,7 +263,9 @@ class Agent {
         if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
         this.step("reader mode not changed");
         const was = this.app.agentReaderOn(page);
-        const r = await this.app.agentReader(page, req.reader ?? "toggle");
+        // (Its waits for the page stop at the command's deadline: then it's left off.)
+        const r = await this.app.agentReader(page, req.reader ?? "toggle", this.deadline);
+        if (!r) throw new CtlError("timed out waiting for the page; reader mode left off", EXIT.timeout);
         const asked = req.reader === "on" || (req.reader !== "off" && !was);
         this.note(asked && !r.on ? `no article found in tab ${page.num}` : `reader mode ${r.on ? "on" : "off"} in tab ${page.num}`);
         return { tab: page.num, ...r };

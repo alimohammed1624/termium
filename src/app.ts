@@ -4004,9 +4004,9 @@ export class App {
   }
 
   /** Turns reader mode on, off or over for a page: whether it's on now, and whether the page looks like an article. */
-  async agentReader(page: Page, want: "on" | "off" | "toggle"): Promise<{ on: boolean; readable: boolean }> {
-    const on = await this.reader.set(page, want === "toggle" ? !this.reader.isOn(page) : want === "on");
-    return { on, readable: this.reader.readable(page) };
+  async agentReader(page: Page, want: "on" | "off" | "toggle", until: number): Promise<{ on: boolean; readable: boolean } | null> {
+    const on = await this.reader.set(page, want === "toggle" ? !this.reader.isOn(page) : want === "on", until);
+    return on === null ? null : { on, readable: this.reader.readable(page) };
   }
 
   /** Answers a page's JavaScript dialog (alert, confirm, prompt, "Leave this page?"). */

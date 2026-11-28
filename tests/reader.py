@@ -191,6 +191,15 @@ try:
         check("a #fragment link scrolls to its target", t.wait_for(lambda: "Closing thoughts" in pane() and "100%" in t.line(t.rows), 5), pane())
         check("...and the address has the fragment", url().endswith("#closing"), url())
 
+    # A list item's id is a target too.
+    t.key("g"); time.sleep(0.3)
+    row = next((r for r in range(3, t.rows) if "the last step" in t.line(r)), None)
+    if row is not None:
+        t.click_cell(t.line(row).index("the last step") + 3, row)
+        check("a #fragment to a list item scrolls to it", t.wait_for(lambda: "3. Read." in t.line(3), 5), t.line(3))
+    else:
+        check("the last-step link is on screen", False, pane())
+
     # The reading position is kept inside a paragraph (not just the paragraph).
     t.key("g"); time.sleep(0.2)
     for _ in range(20):
@@ -238,11 +247,42 @@ try:
     check("a late article gets the reader button", t.wait_for(lambda: "≡ Reader" in t.line(2), 15), t.line(2))
 
     # Reader mode asked for while a slow page is still on its way reads that page.
-    ctl("open", "--no-wait", f"{BASE}/article-news.html?delay=3")
+    ctl("eval", f"location.href = '{BASE}/article-news.html?delay=3'")
     time.sleep(0.3)
     r = ctl("reader", "on")
     check("ctl reader on during a slow navigation reads the new page", r.get("on") is True, r)
     check("...its article", t.wait_text("A tram depot that stood empty", 10), pane()[:300])
+
+    # Following a link (here: ctl open) to an address with a #fragment opens there.
+    ctl("open", f"{BASE}/article-docs.html#from-code")
+    # (The docs article is short: the section comes as far up as the end allows.)
+    ok = t.wait_for(lambda: "From code" in pane() and "Configuring the widget" not in pane() and "100%" in t.line(t.rows), 15)
+    check("a new page's #fragment opens the reader there", ok, pane()[:600])
+
+    # Resizing back and forth keeps the same line on top.
+    t.key("j"); t.key("j"); time.sleep(0.3)
+    top = t.line(3)[22:].strip()
+    for _ in range(3):
+        t.resize(88, 40); time.sleep(0.6)
+        t.resize(140, 40); time.sleep(0.6)
+    check("resizing back and forth doesn't move the text", t.line(3)[22:].strip() == top, (t.line(3), top))
+
+    # In reader mode, a page whose article comes late is read once it's there.
+    ctl("open", f"{BASE}/article-late.html")
+    check("a late article is read (reader mode stays on)", t.wait_text("An article that arrives late", 15) and "^B R: page" in t.line(t.rows), pane()[:300])
+
+    # ctl reader keeps to its --timeout while the page is still on its way.
+    r = ctl("reader", "off")
+    check("ctl reader off (before the slow page)", r.get("on") is False, r)
+    # (Started from the page: `ctl open` itself returns only once the slow page answers.)
+    ctl("eval", f"location.href = '{BASE}/article-news.html?delay=4&x=2'")
+    time.sleep(0.3)
+    t0 = time.time()
+    r = ctl("--timeout", "0.5", "reader", "on")
+    took = time.time() - t0
+    check("ctl reader --timeout 0.5 gives up in time", r.get("code") == 4 and took < 3, (r, round(took, 2)))
+    time.sleep(4.5)
+    check("...and leaves reader mode off", "^B R: page" not in t.line(t.rows) and "≡ Page" not in t.line(2), t.line(2))
 finally:
     t.close()
     srv.terminate()
