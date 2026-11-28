@@ -76,6 +76,87 @@ export function fit(s: string, n: number): string {
   return t + " ".repeat(Math.max(0, n - width(t)));
 }
 
+/** Between a title and the part of its URL that tells it apart. */
+const TITLE_SEP = " · ";
+/** Columns of the title kept before a long distinguishing part is cut instead. */
+const MIN_TITLE = 8;
+
+/** Parts of a URL that can tell it apart: host, port, path segments, query, fragment. */
+function urlParts(url: string): { parts: string[]; whole: string } {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return { parts: [], whole: "" };
+  }
+  const clean = (s: string) => {
+    try {
+      s = decodeURIComponent(s);
+    } catch {}
+    return s.replace(CONTROLS, "");
+  };
+  const host = u.hostname.replace(/^www\./, "");
+  const parts: string[] = [];
+  if (host) parts.push(host);
+  if (u.port) parts.push(`:${u.port}`, `${host}:${u.port}`);
+  for (const seg of u.pathname.split("/")) if (seg) parts.push(clean(seg));
+  if (u.search) parts.push(clean(u.search));
+  if (u.hash) parts.push(clean(u.hash));
+  const whole = clean(u.host.replace(/^www\./, "") + u.pathname.replace(/\/$/, "") + u.search + u.hash);
+  return { parts: parts.filter(Boolean), whole };
+}
+
+/** `title · suffix` in at most `max` columns; the title gives way first, down to MIN_TITLE. */
+function withSuffix(title: string, suffix: string, max: number, keepEnd: boolean): string {
+  const tw = width(title.replace(CONTROLS, " "));
+  const titleRoom = Math.max(Math.min(tw, MIN_TITLE), max - width(TITLE_SEP) - width(suffix));
+  const suffixRoom = max - width(TITLE_SEP) - titleRoom;
+  if (suffixRoom < Math.min(2, width(suffix))) return truncate(title, max);
+  let tail = suffix;
+  if (width(suffix) > suffixRoom) {
+    if (!keepEnd) tail = truncate(suffix, suffixRoom);
+    else {
+      // The end of a URL is what differs most: keep it.
+      const segs = [...segmenter.segment(suffix)].map((s) => s.segment);
+      tail = "";
+      while (segs.length && width(segs[segs.length - 1]! + tail) <= suffixRoom - 1) tail = segs.pop()! + tail;
+      tail = "…" + tail;
+    }
+  }
+  return truncate(title, titleRoom).replace(/\s+…$/, "…") + TITLE_SEP + tail;
+}
+
+/**
+ * Labels for a row of tabs whose titles are cut to `max` columns. Tabs that
+ * would look the same get the shortest part of their URL that no other of
+ * them has (host, port, path segment, query or fragment), after a " · ",
+ * all within `max` columns. Every other title comes back unchanged.
+ */
+export function distinctTitles(tabs: readonly { title: string; url: string }[], max: number): string[] {
+  const out = tabs.map((t) => t.title);
+  const groups = new Map<string, number[]>();
+  tabs.forEach((t, i) => {
+    const key = truncate(t.title, max);
+    groups.set(key, [...(groups.get(key) ?? []), i]);
+  });
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const info = group.map((i) => urlParts(tabs[i]!.url));
+    group.forEach((i, k) => {
+      const mine = info[k]!;
+      // Tabs on the very same URL can't be told apart by it: compare with the rest.
+      const others = info.filter((o) => o.whole !== mine.whole);
+      if (!mine.whole || !others.length) return;
+      const taken = new Set(others.flatMap((o) => o.parts));
+      const unique = mine.parts.filter((p) => !taken.has(p));
+      const best = unique.reduce<string | null>((a, p) => (a === null || width(p) < width(a) ? p : a), null);
+      // No single part is its own (the same parts in another order): show the whole URL.
+      out[i] = best !== null ? withSuffix(tabs[i]!.title, best, max, false) : withSuffix(tabs[i]!.title, mine.whole, max, true);
+    });
+  }
+  return out;
+}
+
 export class LineEdit {
   cursor: number;
   selectAll: boolean;

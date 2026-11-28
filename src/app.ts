@@ -38,7 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
-import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
+import { DEFAULT_SEARCH, LineEdit, distinctTitles, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
 
@@ -2211,9 +2211,11 @@ export class App {
     this.badgeHit = badge && bw ? [col + w, col + full] : null;
     const space = this.space;
     const tabs = space?.tabs ?? [];
+    // Tabs with the same title get a bit of their URL to tell them apart.
+    const titles = distinctTitles(tabs.map((tab) => ({ title: pageTitle(tab.focused), url: displayUrl(tab.focused) })), 22);
     const items = tabs.map((tab, i) => {
       const pages = leaves(tab.root);
-      const title = pageTitle(tab.focused);
+      const title = titles[i]!;
       const extra = pages.length > 1 ? ` ⊞${pages.length}` : "";
       const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
       return ` ${i + 1} ${dot}${truncate(title, 22)}${extra} `;
