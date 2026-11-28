@@ -194,7 +194,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 
 | Key | Action |
 | --- | --- |
-| Ctrl+L, F6, Alt+D | edit the address (Enter goes, Esc cancels) |
+| Ctrl+L, F6, Alt+D | address bar and command palette (Enter goes, Esc cancels) |
 | Ctrl+T / Ctrl+W | new tab / close pane |
 | Alt+← / Alt+→, mouse back/forward | back / forward |
 | Ctrl+R, F5 (Ctrl+Shift+R hard) | reload |
@@ -215,6 +215,13 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |
 | `q` / `?` | quit / show keys |
+
+Ctrl+L opens a box over the page with the address selected: type an
+address or a search, or a few letters of an action (split, new space,
+zoom, sidebar…), a tab or a page seen earlier in the session. Every action
+shows its shortcut. ↑/↓ (or Ctrl+P/N, the wheel) pick a row, Enter or a
+click runs it; the first row (go to or search for what's typed) is picked
+until you move, so Enter always goes. Start with `>` to list only actions.
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
 `Ctrl+B` prefix still work, and Ctrl+W closes the tab as in Chrome; its own

@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { actionItem, paletteRows, type PaletteAction, type PaletteItem } from "./palette";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -164,11 +165,16 @@ type Placement =
   | { kind: "replace"; old: Page; url: string };
 
 type Prompt =
-  | { kind: "url"; edit: LineEdit; page: Page }
+  | UrlPrompt
   | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page }
   | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
+
+// The popup address bar and command palette (see paletteOverlay): `sel` is
+// the highlighted row (-1: none), chosen for the text in `selFor`; `first`
+// the first row shown.
+type UrlPrompt = { kind: "url"; edit: LineEdit; page: Page; sel: number; selFor: string | null; first: number };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
 
@@ -267,6 +273,14 @@ const BROWSER_SHORTCUTS = new Set([
   "alt+shift+p", "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9",
 ]);
 
+/** The key behind a palette action that wants one (none of them read it, except Ctrl+B's). */
+const PALETTE_KEY: KeyEvent = {
+  type: "key", key: "", code: "", vk: 0, text: "", event: "press", location: 0, legacy: false,
+  mods: { shift: false, alt: false, ctrl: false, meta: false },
+};
+/** "Send Ctrl+B to the page", from the palette. */
+const PALETTE_CTRL_B: KeyEvent = { ...PALETTE_KEY, key: "b", code: "KeyB", vk: 66, mods: { ...PALETTE_KEY.mods, ctrl: true } };
+
 /** While a page is blocked on a JavaScript dialog, only these make sense. */
 const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 
@@ -279,7 +293,7 @@ const TOP_ROWS = 2;
 const MARKER = `#termium-${crypto.randomUUID().slice(0, 8)}-`;
 
 const HELP: [string, string][] = [
-  ["Ctrl+L / F6 / Alt+D", "edit address"],
+  ["Ctrl+L / F6 / Alt+D", "address & commands"],
   ["Ctrl+T", "new tab"],
   ["Ctrl+W", "close pane"],
   ["Alt+← / Alt+→", "back / forward"],
@@ -413,6 +427,7 @@ export class App {
       if (!page) return;
       page.url = targetInfo.url;
       page.title = targetInfo.title;
+      this.remember(page);
       this.queueChrome();
     });
     cdp.on("Page.screencastFrame", (p, sid) => this.onFrame(p, sid));
@@ -1114,6 +1129,7 @@ export class App {
         if (!page || (page.title === info.title && page.url === info.url)) continue;
         page.title = info.title;
         page.url = info.url;
+        this.remember(page);
         changed = true;
       }
       if (changed) this.queueChrome();
@@ -1127,6 +1143,7 @@ export class App {
       const { targetInfo } = await this.cdp.send("Target.getTargetInfo", { targetId: page.targetId });
       page.url = targetInfo.url;
       page.title = targetInfo.title;
+      this.remember(page);
       this.queueChrome();
     } catch {}
   }
@@ -2136,10 +2153,13 @@ export class App {
     }
   }
 
-  /** The pane area shows an overlay (help, the update box), not the pages. */
+  /** The pane area shows an overlay (help, the update box, the popup address bar), not the pages. */
   private covered(): boolean {
-    return this.mode === "help" || this.mode === "update";
+    return this.mode === "help" || this.mode === "update" || this.prompt?.kind === "url";
   }
+
+  /** The popup address bar was drawn: once it's gone, the pages are drawn again. */
+  private paletteShown = false;
 
   private drawChrome(): void {
     if (!this.started || this.closingAll || !this.attached) return;
@@ -2151,12 +2171,23 @@ export class App {
     if (mainCol > 1) s += this.drawSidebar();
     s += this.drawTabBar(mainCol, mainW);
     s += this.drawUrlBar(mainCol, mainW);
+    const palette = this.prompt?.kind === "url" ? this.prompt : null;
+    if (!palette) this.paletteHits = null;
+    if (this.paletteShown && !palette) {
+      this.paletteShown = false;
+      if (!this.redrawing) return this.fullRedraw();
+    }
     if (this.mode === "help") {
       out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
       return;
     }
     if (this.mode === "update") {
       out(this.sync(s + RESET + this.updateOverlay() + this.cursorSeq()));
+      return;
+    }
+    if (palette) {
+      this.paletteShown = true;
+      out(this.sync(s + RESET + this.paletteOverlay(palette) + this.cursorSeq()));
       return;
     }
     s += this.drawPaneChrome();
@@ -2375,7 +2406,7 @@ export class App {
 
   private cursorSeq(): string {
     const c = this.promptCursor;
-    if (!c || this.covered()) return "\x1b[?25l";
+    if (!c || this.mode === "help" || this.mode === "update") return "\x1b[?25l";
     return `${at(c.row, c.col)}\x1b[6 q\x1b[?25h`;
   }
 
@@ -2502,6 +2533,185 @@ export class App {
     const footer = hidden > 0 ? `  ${hidden} more: make the terminal taller · any key closes` : "  any key closes";
     s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(footer, boxW) + RESET;
     return s + RESET;
+  }
+
+  /** Where the popup address bar is, and which list entry each of its rows shows. */
+  private paletteHits: { box: Rect; rows: { row: number; index: number }[] } | null = null;
+
+  /**
+   * The popup address bar and command palette (Ctrl+L), centred over the
+   * (blanked) pane area: the text being typed, and below it what Enter or a
+   * click can do with it (see paletteList), each action with its shortcut.
+   */
+  private paletteOverlay(p: UrlPrompt): string {
+    const area = this.paneArea();
+    const list = this.paletteList(p);
+    const boxW = Math.min(area.cols, Math.max(40, Math.min(90, area.cols - 8)));
+    // Short of room, just the text and what fits of the list.
+    const compact = area.rows < 7;
+    const listRows = Math.max(0, Math.min(12, area.rows - (compact ? 1 : 4)));
+    const boxH = Math.min(area.rows, listRows + (compact ? 1 : 4));
+    const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 3));
+    const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
+    if (p.sel >= 0 && p.sel < p.first) p.first = p.sel;
+    if (p.sel >= p.first + listRows) p.first = p.sel - listRows + 1;
+    p.first = Math.max(0, Math.min(p.first, list.length - listRows));
+    // (With placeholders the overlay's text replaces the cells showing them.)
+    let s = this.placeholders ? "" : this.deleteOwnImages();
+    for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
+    const panel = bg(C.base) + fg(C.text);
+    const dim = fg(C.overlay);
+    let row = top;
+    if (!compact) s += at(row++, left) + panel + BOLD + fg(C.mauve) + fit(" Go to an address, search, or run a command", boxW) + RESET;
+    const label = " › ";
+    const v = p.edit.view(Math.max(1, boxW - width(label) - 1));
+    const text = p.edit.selectAll ? `\x1b[7m${v.text}\x1b[27m` : v.text;
+    s += at(row, left) + bg(C.surface0) + fg(C.mauve) + label + fg(C.text) + text +
+      " ".repeat(Math.max(0, boxW - width(label) - width(v.text))) + RESET;
+    this.promptCursor = p.edit.selectAll ? null : { row, col: left + width(label) + v.cursorCol };
+    row++;
+    if (!compact) s += at(row++, left) + panel + fit("", boxW);
+    const hits: { row: number; index: number }[] = [];
+    const icons: Record<PaletteItem["kind"], string> = { go: "→", action: "▸", tab: "▣", history: "↺" };
+    for (let i = 0; i < listRows && row < top + boxH; i++, row++) {
+      const index = p.first + i;
+      const item = list[index];
+      if (!item) {
+        s += at(row, left) + panel + fit("", boxW) + RESET;
+        continue;
+      }
+      const style = index === p.sel ? bg(C.surface1) + fg(C.text) + BOLD : panel;
+      const hint = truncate(item.hint ?? "", Math.floor(boxW / 2));
+      const textW = Math.max(1, boxW - 4 - (hint ? width(hint) + 2 : 0));
+      s += at(row, left) + style + fg(index === p.sel ? C.mauve : C.overlay) + ` ${icons[item.kind]} ` +
+        fg(C.text) + fit(item.text, textW) + RESET + style + "\x1b[22m" + dim + (hint ? `  ${hint}` : "") + " " + RESET;
+      hits.push({ row, index });
+    }
+    if (!compact && row < top + boxH) {
+      const where = list.length ? `${p.sel >= 0 ? p.sel + 1 : "–"}/${list.length}` : "no matches";
+      s += at(row, left) + panel + dim + fit(`  ${where} · ↑↓ choose · Enter · Esc closes · > commands only`, boxW) + RESET;
+    }
+    this.paletteHits = { box: { row: top, col: left, rows: boxH, cols: boxW }, rows: hits };
+    return s + RESET;
+  }
+
+  /**
+   * What the popup address bar offers for its text: go to it (or search
+   * for it), then the actions, open tabs and pages seen before that match.
+   * The text as it opened (the address, selected) lists everything;
+   * ">" lists actions only. Keeps the highlighted row in range, and puts it
+   * back on the first row whenever the text changes.
+   */
+  private paletteList(p: UrlPrompt): PaletteItem[] {
+    const typed = p.edit.text.trim();
+    const commands = !p.edit.selectAll && typed.startsWith(">");
+    const query = p.edit.selectAll ? "" : commands ? typed.slice(1) : typed;
+    let go: PaletteItem | null = null;
+    const url = commands ? null : toUrl(typed, this.opts.search);
+    if (url) {
+      const search = url === this.opts.search.replace("%s", encodeURIComponent(typed));
+      go = {
+        kind: "go",
+        text: search ? `Search for ${typed}` : `Go to ${url}`,
+        hint: "Enter",
+        run: () => {
+          if (this.pages.has(p.page.sessionId)) this.go(p.page, url);
+        },
+      };
+    }
+    const items = this.commandActions().map(actionItem);
+    if (!commands) items.push(...this.tabItems(), ...this.historyItems(p.page));
+    const list = paletteRows(query, go, items);
+    const key = `${p.edit.selectAll}:${p.edit.text}`;
+    if (p.selFor !== key) {
+      p.selFor = key;
+      p.sel = list.length && (go || commands) ? 0 : -1;
+      p.first = 0;
+    }
+    p.sel = Math.min(p.sel, list.length - 1);
+    return list;
+  }
+
+  /** Open tabs other than this one, in every space (choosing one shows it). */
+  private tabItems(): PaletteItem[] {
+    const items: PaletteItem[] = [];
+    for (const space of this.spaces) {
+      space.tabs.forEach((tab, i) => {
+        if (tab === this.tab) return;
+        const page = tab.focused;
+        const where = space === this.space ? (i < 9 ? `Ctrl+B ${i + 1}` : `tab ${i + 1}`) : `${space.name} · tab ${i + 1}`;
+        items.push({ kind: "tab", text: pageTitle(page), hint: where, keywords: displayUrl(page), run: () => void this.agentSelect(page) });
+      });
+    }
+    return items;
+  }
+
+  /** Pages seen in this session and no longer open, latest first (choosing one opens it in `page`). */
+  private historyItems(page: Page): PaletteItem[] {
+    const open = new Set([...this.pages.values()].map((p) => p.url));
+    const items: PaletteItem[] = [];
+    for (const [url, title] of [...this.visited].reverse()) {
+      if (open.has(url)) continue;
+      items.push({
+        kind: "history", text: title || url, hint: hostOf(url), keywords: url,
+        run: () => {
+          if (this.pages.has(page.sessionId)) this.go(page, url);
+        },
+      });
+    }
+    return items;
+  }
+
+  /** Addresses (and titles) seen in this session, oldest first. */
+  private visited = new Map<string, string>();
+
+  private remember(page: Page): void {
+    const url = displayUrl(page);
+    if (!url || url.startsWith("chrome")) return;
+    this.visited.delete(url);
+    this.visited.set(url, page.title && page.title !== url && !page.title.includes(MARKER) ? page.title : "");
+    if (this.visited.size > 200) this.visited.delete(this.visited.keys().next().value!);
+  }
+
+  /**
+   * Everything termium can do from the keyboard, with its shortcut: the
+   * command palette's actions (every Ctrl+B action and the global ones).
+   */
+  commandActions(): PaletteAction[] {
+    const g = (combo: string) => () => void this.globalShortcut(combo);
+    const b = (combo: string, ev?: KeyEvent) => () => this.prefixAction(combo, ev ?? PALETTE_KEY);
+    return [
+      { label: "New tab", keys: "Ctrl+T", keywords: "Ctrl+B c open", run: g("ctrl+t") },
+      { label: "Close pane", keys: "Ctrl+W", keywords: "Ctrl+B x", run: g("ctrl+w") },
+      { label: "Close tab", keys: "Ctrl+B X", run: b("shift+x") },
+      { label: "Back", keys: "Alt+←", keywords: "history previous page", run: g("alt+arrowleft") },
+      { label: "Forward", keys: "Alt+→", keywords: "history next page", run: g("alt+arrowright") },
+      { label: "Reload", keys: "Ctrl+R", keywords: "F5 refresh", run: g("ctrl+r") },
+      { label: "Reload, bypassing the cache", keys: "Ctrl+Shift+R", keywords: "hard refresh", run: g("ctrl+shift+r") },
+      { label: "Zoom in", keys: "Alt+=", keywords: "bigger larger", run: g("alt+=") },
+      { label: "Zoom out", keys: "Alt+-", keywords: "smaller", run: g("alt+-") },
+      { label: "Reset zoom", keys: "Alt+0", keywords: "actual size", run: g("alt+0") },
+      { label: "Next tab", keys: "Ctrl+B n", run: b("n") },
+      { label: "Previous tab", keys: "Ctrl+B p", run: b("p") },
+      { label: "Split right", keys: "Ctrl+B v", keywords: "pane vertical", run: b("v") },
+      { label: "Split down", keys: "Ctrl+B -", keywords: "pane horizontal", run: b("-") },
+      { label: "Focus pane left", keys: "Ctrl+B h", run: b("h") },
+      { label: "Focus pane down", keys: "Ctrl+B j", run: b("j") },
+      { label: "Focus pane up", keys: "Ctrl+B k", run: b("k") },
+      { label: "Focus pane right", keys: "Ctrl+B l", run: b("l") },
+      { label: "Zoom pane", keys: "Ctrl+B z", keywords: "maximize fullscreen", run: b("z") },
+      { label: "Resize panes", keys: "Ctrl+B r", run: b("r") },
+      { label: "Switch space", keys: "Ctrl+B w", keywords: "spaces workspace", run: b("w") },
+      { label: "New space", keys: "Ctrl+B N", keywords: "workspace", run: b("shift+n") },
+      { label: "Rename space", keys: "Ctrl+B W", keywords: "workspace", run: b("shift+w") },
+      { label: "Close space", keys: "Ctrl+B D", keywords: "workspace", run: b("shift+d") },
+      { label: "Toggle sidebar", keys: "Ctrl+B b", keywords: "spaces hide show", run: b("b") },
+      { label: "Send Ctrl+B to the page", keys: "Ctrl+B Ctrl+B", run: b("ctrl+b", PALETTE_CTRL_B) },
+      { label: "Detach", keys: "Ctrl+B d", keywords: "attach background", run: b("d") },
+      { label: "Update termium", keys: "Ctrl+B U", keywords: "upgrade restart", run: b("shift+u") },
+      { label: "Keyboard shortcuts", keys: "Ctrl+B ?", keywords: "help keys", run: b("?") },
+      { label: "Quit", keys: "Ctrl+Q", keywords: "Ctrl+B q exit", run: g("ctrl+q") },
+    ];
   }
 
   // ---------------------------------------------------------- updates
@@ -3215,6 +3425,7 @@ export class App {
 
   private promptKey(ev: KeyEvent): void {
     const prompt = this.prompt!;
+    if (prompt.kind === "url" && this.paletteKey(prompt, ev)) return;
     if (prompt.kind === "confirm") {
       if (ev.key === "Enter") {
         this.prompt = null;
@@ -3242,12 +3453,7 @@ export class App {
     } else if (result === "submit") {
       this.prompt = null;
       const text = prompt.edit.text;
-      if (prompt.kind === "url") {
-        const url = toUrl(text, this.opts.search);
-        if (url && this.pages.has(prompt.page.sessionId)) {
-          this.go(prompt.page, url);
-        }
-      } else if (prompt.kind === "rename") {
+      if (prompt.kind === "rename") {
         if (text.trim()) prompt.space.name = text.trim();
       } else if (prompt.kind === "file") {
         this.uploadFiles(prompt, text);
@@ -3313,8 +3519,55 @@ export class App {
 
   private openUrlPrompt(page: Page, text?: string): void {
     const current = text ?? (page.url === "about:blank" || page.url.includes(MARKER) ? "" : page.url);
-    this.prompt = { kind: "url", edit: new LineEdit(current, true), page };
+    this.prompt = { kind: "url", edit: new LineEdit(current, true), page, sel: -1, selFor: null, first: 0 };
     this.queueChrome();
+  }
+
+  /** Keys the popup address bar's list takes (the rest edit its text): true if taken. */
+  private paletteKey(p: UrlPrompt, ev: KeyEvent): boolean {
+    const list = this.paletteList(p);
+    if (ev.key === "Enter") {
+      this.runPaletteItem(p, list);
+      return true;
+    }
+    const steps: Record<string, number> = { arrowdown: 1, "ctrl+n": 1, arrowup: -1, "ctrl+p": -1, pagedown: 10, pageup: -10 };
+    const step = steps[comboOf(ev)];
+    if (step === undefined) return false;
+    if (list.length) p.sel = Math.max(0, Math.min(list.length - 1, p.sel + step));
+    this.queueChrome();
+    return true;
+  }
+
+  /** Closes the popup address bar and does what its highlighted row says (nothing highlighted: just closes). */
+  private runPaletteItem(p: UrlPrompt, list = this.paletteList(p)): void {
+    const item = list[p.sel];
+    this.prompt = null;
+    item?.run();
+    this.queueChrome();
+  }
+
+  /** The mouse over the popup address bar: a click runs a row, the wheel moves through them, a click outside closes it. */
+  private paletteMouse(p: UrlPrompt, ev: MouseEvent, col: number, row: number): void {
+    const hits = this.paletteHits;
+    if (!hits) return;
+    const inside = inRect(hits.box, col, row);
+    if (ev.action === "wheel" && inside && (ev.wheel === "up" || ev.wheel === "down")) {
+      const n = this.paletteList(p).length;
+      if (n) p.sel = Math.max(0, Math.min(n - 1, p.sel + (ev.wheel === "down" ? 1 : -1)));
+      this.queueChrome();
+      return;
+    }
+    if (ev.action !== "press") return;
+    if (!inside) {
+      this.prompt = null;
+      this.queueChrome();
+      return;
+    }
+    const hit = hits.rows.find((h) => h.row === row);
+    if (hit && ev.button === 0) {
+      p.sel = hit.index;
+      this.runPaletteItem(p);
+    }
   }
 
   private syntheticDown = new Map<string, { page: Page; ev: KeyEvent }>();
@@ -3641,13 +3894,14 @@ export class App {
       this.pageMouse(captured, ev, px, py);
       return;
     }
+    if (this.prompt?.kind === "url") return this.paletteMouse(this.prompt, ev, col, row);
 
     if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
 
     const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
     if (!g) return;
     if (ev.action === "press") {
-      if (this.prompt?.kind === "url" || this.prompt?.kind === "rename") {
+      if (this.prompt?.kind === "rename") {
         this.prompt = null;
         this.queueChrome();
       }
