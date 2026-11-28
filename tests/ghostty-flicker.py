@@ -94,8 +94,8 @@ def blank_fraction(path):
 
 
 LEGACY = {"enter": "\r", "escape": "\x1b", "pagedown": "\x1b[6~", "pageup": "\x1b[5~", "alt+left": "\x1b[1;3D", "space": " ",
-          # tmux's prefix is Ctrl+B too: pressed twice, one reaches termium
-          "ctrl+b": "\x02\x02"}
+          # tmux's prefix is Ctrl+B: there termium's leader is Ctrl+Space
+          "ctrl+b": "\x00"}
 
 
 def press(k):

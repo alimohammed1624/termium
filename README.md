@@ -65,7 +65,8 @@ Options: `--browser <path>` (default: Helium on `PATH`, or
 `~/.local/share/termium/profile`, or `.../profiles/NAME` for a session
 started with `-s NAME`), `--incognito`, `--scale <n>` (device
 pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
-They apply when a session starts. `--no-update-check` turns off the
+They apply when a session starts. `--leader <key>` (or `$TERMIUM_LEADER`)
+sets [the leader key](#tmux-and-herdr) for this terminal. `--no-update-check` turns off the
 [update check](#updates).
 
 ### Sessions
@@ -125,9 +126,15 @@ changes again.
 time herdr runs it shows an introduction that takes the keyboard until you
 dismiss it: Enter, then Esc.)
 
-tmux and herdr both use `Ctrl+B` as their prefix too: press it twice to
-reach termium (`Ctrl+B Ctrl+B d` detaches termium), or change one of the
-prefixes.
+**The leader key.** termium's key commands start with `Ctrl+B`. tmux and
+herdr use `Ctrl+B` as their prefix too, so inside them (when their prefix
+is `Ctrl+B`: tmux's `prefix`/`prefix2`, herdr's `keys.prefix`) termium
+uses `Ctrl+Space` instead (`Ctrl+A` if that's taken too), and `Ctrl+B`
+stays the multiplexer's. The sidebar's hint (`^Space ? for keys`) and the
+key help show the leader in use. `--leader ctrl-a` (or
+`TERMIUM_LEADER=ctrl-a`) picks one yourself and always wins; it's the
+terminal's, so each terminal attached to a session has its own, and a
+restart keeps it.
 
 ### Agents
 
@@ -190,7 +197,8 @@ termium --skill                # a SKILL.md that teaches an agent all this
 
 ### Keys
 
-Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
+Browser keys work directly; layout keys follow the leader, `Ctrl+B`
+(`Ctrl+Space` inside tmux or herdr; see [the leader key](#tmux-and-herdr)).
 
 | Key | Action |
 | --- | --- |
@@ -211,13 +219,13 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
 | `N` / `W` / `D` | new / rename / close space |
 | `b` | show or hide the sidebar |
-| `Ctrl+B` | send Ctrl+B to the page |
+| the leader again | send it to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |
 | `q` / `?` | quit / show keys |
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
-`Ctrl+B` prefix still work, and Ctrl+W closes the tab as in Chrome; its own
+leader still work, and Ctrl+W closes the tab as in Chrome; its own
 editing keys are Ctrl+A/E (start/end), Ctrl+U/K (delete to start/end),
 Ctrl+Backspace (delete word) and Alt/Ctrl+←/→.
 
