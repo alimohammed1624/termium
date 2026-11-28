@@ -89,6 +89,11 @@ try:
     bold = lambda col: t.screen.buffer[0][col + 2].bold
     check("dragging a tab reorders it (the dragged, active tab is first now)", bold(first) and not bold(second), t.line(1))
 
+    # Right-click on a tab's ×: the tab's menu.
+    click_text("×", row=1, button=2); time.sleep(0.6)
+    check("right-click on a tab's × opens the tab menu", t.wait_text("Duplicate", 5))
+    t.key("escape"); time.sleep(0.6)
+
     # The tab's ×.
     click_text("×", row=1); time.sleep(2)
     check("the tab × closes the tab", t.wait_for(lambda: t.line(1).count("menu test") == 1, 10), t.line(1))
@@ -98,8 +103,14 @@ try:
     t.click(220 + 400, 40 + 300, button=2); time.sleep(1)
     check("right-click on the page opens termium's page menu", t.wait_text("Copy page address", 5))
     t.shot(f"{OUT}/03-page-menu.png")
+    click_text("Reload"); time.sleep(2); t.wait_idle(0.5, 5)
+    t.click(220 + 400, 40 + 300, button=2); time.sleep(1)
+    check("after Reload from the page menu, the next right-click opens it again", t.wait_text("Copy page address", 5))
     t.key("escape"); time.sleep(0.6)
     check("Escape closes the menu", find("Copy page address") is None)
+    t.click(220 + 500, 40 + 100, button=2); time.sleep(1)
+    check("right-click inside an iframe opens the page menu", t.wait_text("Copy page address", 5))
+    t.key("escape"); time.sleep(0.6)
     t.click(220 + 60, 40 + 100, button=2); time.sleep(1.2)
     check("a page with its own context menu gets it (termium shows none)", find("Copy page address") is None and evaluate("window.own") == [1],
           evaluate("window.own"))
@@ -131,6 +142,15 @@ try:
     click_text("‹", row=1); time.sleep(0.6)
     check("‹ scrolls the tab bar back", " 1 " in t.line(1), t.line(1))
 
+    # A tab closed while it's being dragged: the drag ends, termium carries on.
+    at = find(" 2 ", row=1)
+    t.mouse(at[0] * 10 + 15, 10, 0, "press"); time.sleep(0.4)
+    t.key("ctrl+w"); time.sleep(1.5)
+    for x in range(at[0] + 2, 24, -3):
+        t.mouse(x * 10, 10, 0, "drag"); time.sleep(0.05)
+    t.mouse(250, 10, 0, "release"); time.sleep(0.8)
+    check("closing the dragged tab mid-drag doesn't end termium", os.waitpid(t.pid, os.WNOHANG)[0] == 0 and "New Tab" in t.line(1), t.line(1))
+
     # Spaces: right-click menu; rename.
     click_text("space 1", button=2); time.sleep(0.6)
     check("right-click on a space opens its menu", t.wait_text("Rename space", 5))
@@ -146,6 +166,20 @@ try:
     click_text("^B ? for keys", row=t.rows); time.sleep(0.8)
     check("the ^B ? hint opens the keys", t.wait_text("termium keys", 5))
     t.click_cell(80, 20); time.sleep(0.6)
+finally:
+    t.close()
+
+# Unicode placeholders (as inside tmux): the menu stays on top of the page's cells.
+shutil.rmtree(profile, ignore_errors=True); os.makedirs(profile)
+t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "-s", "pr14-mouse-ph", "--profile", profile, f"{BASE}/menu.html"],
+         cols=160, rows=45, cwd=ROOT, env={"TERMIUM_GRAPHICS": "placeholders"})
+try:
+    t.wait_text("menu test", 25); t.wait_idle(0.8, 10); time.sleep(1)
+    t.click(220 + 400, 40 + 300, button=2); time.sleep(1.5)
+    check("placeholders: the page menu shows over the page", t.wait_text("Copy page address", 5))
+    t.key("escape"); time.sleep(0.8)
+    t.click_cell(159, 2); time.sleep(1)
+    check("placeholders: the ≡ menu shows over the page", t.wait_text("Split right", 5) and find("Hard reload") is not None)
 finally:
     t.close()
     srv.terminate()

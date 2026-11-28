@@ -392,7 +392,7 @@ export class App {
   private tabScroll: number | null = null;
   private tabRange = { first: 0, last: -1 };
   /** A tab or space being dragged to a new place (pressed on it, button still down). */
-  private reorder: { kind: "tab" | "space"; index: number; col: number; row: number } | null = null;
+  private reorder: { kind: "tab"; tab: Tab } | { kind: "space"; space: Space } | null = null;
 
   private nextImage = 100;
   private nextTabId = 1;
@@ -1012,6 +1012,8 @@ export class App {
   private onGone(page: Page | undefined): void {
     if (!page) return;
     this.clearForeign(page);
+    // An open menu may be about this page or its tab or space (redrawn away below).
+    this.menu = null;
     if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
@@ -2140,6 +2142,8 @@ export class App {
       s += transmitVirtual(data, ids[i]!, cols, rows);
       if (moved) s += placeholderCells(this.phHigh, this.phColour(indexes[i]!), this.phRgb, t.row, t.col, cols, rows);
     });
+    // Cells written just now over an open menu: the menu goes back on top.
+    if (moved && this.menu) s += this.menu.draw(MENU_STYLE);
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;
     page.placed = { ...r };
@@ -2306,7 +2310,8 @@ export class App {
       const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
       s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
-      if (text.endsWith("× ")) this.clicks.add(1, col + used + tw - 2, 1, (b) => b !== 2 && this.closeTabAt(i));
+      const x = col + used + tw - 2;
+      if (text.endsWith("× ")) this.clicks.add(1, x, 1, (b) => (b === 2 ? this.tabMenu(i, x) : this.closeTabAt(i)));
       used += tw + 1;
     }
     if (last < first && items.length > 0) {
@@ -2492,7 +2497,7 @@ export class App {
       }
       // A close button at the right end (right-click the header for more).
       s += at(row, col) + style + fit(text, cols - 3) + " × " + RESET;
-      this.clicks.add(row, col + cols - 3, 3, (b) => b !== 2 && this.closePage(page));
+      this.clicks.add(row, col + cols - 3, 3, (b) => (b === 2 ? this.paneMenu(page, col + cols - 3, row) : this.closePage(page)));
     }
     for (const sep of this.seps) {
       if (sep.split.dir !== "h") continue;
@@ -3790,7 +3795,8 @@ export class App {
       if (hit) {
         if (this.mode === "spaces") this.mode = "normal";
         this.switchSpace(hit.index);
-        this.reorder = { kind: "space", index: hit.index, col, row };
+        const space = this.spaces[hit.index];
+        if (space) this.reorder = { kind: "space", space };
       } else if (row === this.newSpaceRow) this.newSpace();
       return true;
     }
@@ -3806,7 +3812,7 @@ export class App {
         else if (ev.button === 2) this.tabMenu(hit.index, col);
         else if (ev.button === 0) {
           this.selectTab(hit.index);
-          this.reorder = { kind: "tab", index: hit.index, col, row };
+          if (tab) this.reorder = { kind: "tab", tab };
         }
       } else if (this.newTabHit && col >= this.newTabHit.start && col < this.newTabHit.end && ev.button === 0) {
         this.newTab();
@@ -3866,33 +3872,31 @@ export class App {
     if (same) d.sep = same;
   }
 
-  /** Moves the tab or space being dragged to where the pointer is. */
+  /** Moves the tab or space being dragged to where the pointer is (it may have closed meanwhile). */
   private reorderTo(col: number, row: number): void {
     const r = this.reorder!;
-    // Only toward where the pointer is going: a wider neighbour, swapped in, isn't swapped straight back.
-    const ahead = (to: number, now: number, was: number) => (to > r.index ? now > was : now < was);
     if (r.kind === "tab") {
       const space = this.space;
+      const from = space ? space.tabs.indexOf(r.tab) : -1;
+      const own = this.tabHits.find((h) => h.index === from);
       const hit = row === 1 ? this.tabHits.find((h) => col >= h.start && col < h.end) : undefined;
-      if (space && hit && hit.index !== r.index && ahead(hit.index, col, r.col)) {
-        const [tab] = space.tabs.splice(r.index, 1);
-        space.tabs.splice(hit.index, 0, tab!);
-        space.active = hit.index; // the dragged tab (selected when pressed)
-        r.index = hit.index;
-        this.queueChrome();
-      }
+      if (!space || from < 0 || !own || !hit || hit.index === from) return;
+      // Only once the pointer is over where the dragged tab would be after
+      // the swap: a wider neighbour isn't swapped straight back.
+      const w = own.end - own.start;
+      if (hit.index > from ? col < hit.end - w : col >= hit.start + w) return;
+      space.tabs.splice(from, 1);
+      space.tabs.splice(hit.index, 0, r.tab);
+      space.active = hit.index; // the dragged tab (selected when pressed)
     } else {
+      const from = this.spaces.indexOf(r.space);
       const hit = col < this.mainCol() ? this.spaceHits.find((h) => h.row === row) : undefined;
-      if (hit && hit.index !== r.index && ahead(hit.index, row, r.row)) {
-        const [space] = this.spaces.splice(r.index, 1);
-        this.spaces.splice(hit.index, 0, space!);
-        this.activeSpace = hit.index;
-        r.index = hit.index;
-        this.queueChrome();
-      }
+      if (from < 0 || !hit || hit.index === from) return;
+      this.spaces.splice(from, 1);
+      this.spaces.splice(hit.index, 0, r.space);
+      this.activeSpace = hit.index;
     }
-    r.col = col;
-    r.row = row;
+    this.queueChrome();
   }
 
   // ---------------------------------------------------------- menus
@@ -4070,13 +4074,12 @@ export class App {
   }
 
   private menuSeq = 0;
-  /** The page's last right-click already looked at (see pageMenu). */
-  private contextSeen = new WeakMap<Page, number>();
 
   /**
    * After a right-click reached a page: unless the page showed its own menu
    * (it cancelled `contextmenu`), termium shows one: back, forward, reload,
-   * copy (the link, the selection, the address).
+   * copy (the link, the selection, the address). Every frame is asked
+   * (iframes, cross-site ones included); each answer is taken once.
    */
   private async pageMenu(page: Page, released: Promise<unknown>, col: number, row: number): Promise<void> {
     const seq = ++this.menuSeq;
@@ -4084,22 +4087,30 @@ export class App {
     await released;
     // The probe notes the click once every listener has run (a timer after it).
     await Bun.sleep(40);
-    let info: { n: number; prevented: boolean; link: string; selection: boolean } | null = null;
-    try {
-      // The world the probe runs in (same name: the same world, not a new one).
-      const { executionContextId } = await this.cdp.send("Page.createIsolatedWorld", { frameId: page.targetId, worldName: "termium" }, page.sessionId);
-      const r = await this.cdp.send("Runtime.evaluate", {
-        expression: "window.__termiumContext ? window.__termiumContext() : null",
-        contextId: executionContextId,
-        returnByValue: true,
-      }, page.sessionId);
-      info = r?.result?.value ?? null;
-    } catch {
-      return;
-    }
-    if (!info || info.n === this.contextSeen.get(page)) return;
-    this.contextSeen.set(page, info.n);
-    if (info.prevented || seq !== this.menuSeq || !t.valid() || this.menu || this.focused !== page || this.mouseButtons) return;
+    type Info = { prevented: boolean; link: string; selection: boolean };
+    const sessions = [page.sessionId, ...[...this.frameOwner].filter(([, p]) => p === page).map(([sid]) => sid)];
+    const ask = async (sid: string): Promise<Info[]> => {
+      const frames: string[] = [];
+      const walk = (n: any) => {
+        if (frames.length >= 32) return;
+        frames.push(n.frame.id);
+        for (const c of n.childFrames ?? []) walk(c);
+      };
+      walk((await this.cdp.send("Page.getFrameTree", {}, sid)).frameTree);
+      return Promise.all(frames.map(async (frameId) => {
+        // The world the probe runs in (same name: the same world, not a new one).
+        const { executionContextId } = await this.cdp.send("Page.createIsolatedWorld", { frameId, worldName: "termium" }, sid);
+        const r = await this.cdp.send("Runtime.evaluate", {
+          expression: "window.__termiumContext ? window.__termiumContext() : null",
+          contextId: executionContextId,
+          returnByValue: true,
+        }, sid);
+        return r?.result?.value as Info;
+      }).map((p) => p.catch(() => null))).then((all) => all.filter((i): i is Info => !!i));
+    };
+    const found = (await Promise.all(sessions.map((sid) => ask(sid).catch(() => [])))).flat();
+    const info = found[0];
+    if (!info || info.prevented || seq !== this.menuSeq || !t.valid() || this.menu || this.focused !== page || this.mouseButtons) return;
     const live = (run: () => void) => () => {
       if (this.pages.has(page.sessionId)) run();
     };
@@ -4111,12 +4122,12 @@ export class App {
       "-",
       ...(link
         ? [
-            { label: "Open link in new tab", run: () => this.newTab(link) },
-            { label: "Copy link address", run: () => this.copyText(link, "link") },
+            { label: "Open link in new tab", run: live(() => this.newTab(link)) },
+            { label: "Copy link address", run: live(() => this.copyText(link, "link")) },
           ]
         : []),
       ...(info.selection ? [{ label: "Copy", key: "Ctrl+C", run: live(() => void this.copySelection(page)) }] : []),
-      { label: "Copy page address", run: () => this.copyText(page.url, "address") },
+      { label: "Copy page address", run: live(() => this.copyText(page.url, "address")) },
     ], { col, row });
   }
 

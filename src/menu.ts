@@ -118,6 +118,8 @@ export class Menu {
   /** Scrolls by `delta` rows (a no-op when everything fits). */
   scroll(delta: number): void {
     this.offset = Math.max(0, Math.min(this.entries.length - this.visible, this.offset + delta));
+    // A highlight scrolled out of view is dropped: Enter never runs what isn't shown.
+    if (this.active < this.offset || this.active >= this.offset + this.visible) this.active = -1;
   }
 
   /** Keys while the menu is open: what to do (or null when the key isn't the menu's). */
@@ -222,15 +224,16 @@ export function around(r: Rect, hole: Rect): Rect[] {
  */
 export const CONTEXT_PROBE = String.raw`(() => {
   if (window.__termiumContext) return;
-  let last = null, n = 0;
+  let last = null;
   addEventListener("contextmenu", (e) => {
     const t = e.composedPath()[0];
     const el = t && t.nodeType === 1 ? t : t && t.parentElement;
     // Once every listener has run: whether the page took the right-click for itself.
     setTimeout(() => {
       const a = el && el.closest ? el.closest("a[href], area[href]") : null;
-      last = { n: ++n, prevented: e.defaultPrevented, link: a ? a.href : "", selection: String(getSelection()).length > 0 };
+      last = { prevented: e.defaultPrevented, link: a ? a.href : "", selection: String(getSelection()).length > 0 };
     });
   }, true);
-  window.__termiumContext = () => last;
+  // Each right-click is answered once: reading it forgets it.
+  window.__termiumContext = () => { const l = last; last = null; return l; };
 })()`;

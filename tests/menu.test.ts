@@ -70,6 +70,9 @@ describe("menu", () => {
     expect(m.active).toBe(39);
     m.move(1); // wraps to the first, scrolled back
     expect(m.offset).toBe(0);
+    m.scroll(5); // the highlight scrolled out of view is dropped: Enter runs nothing hidden
+    expect(m.active).toBe(-1);
+    expect(m.key("enter")).toBe("handled");
   });
 
   test("draws every row the width of the menu, keys right-aligned", () => {

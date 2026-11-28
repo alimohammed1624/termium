@@ -5,5 +5,6 @@
 <div id="own" style="position:absolute; left:20px; top:80px; width:200px; height:80px; background:#ddd"
      oncontextmenu="event.preventDefault(); window.own = (window.own || 0) + 1">has its own menu</div>
 <button id="ask" style="position:absolute; left:20px; top:200px" onclick="window.answer = confirm('Really?')">ask</button>
+<iframe id="frame" srcdoc="<body style='margin:0;height:200px;background:#cef'>inside a frame</body>" style="position:absolute; left:400px; top:20px; width:300px; height:200px; border:0"></iframe>
 <script>window.answer = null; window.own = 0;</script>
 </body></html>
