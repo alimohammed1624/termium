@@ -14,6 +14,15 @@ export const HOVER_DWELL_MS = 450;
 export const PREVIEW_COLS = 40;
 /** Most pictures in one contact sheet (the rest are counted as "+N more"). */
 export const SHEET_MAX = 24;
+/** The most base64 PNG bytes one thumbnail can take (incompressible pixels, plus headers). */
+export const THUMB_WORST_BYTES = Math.ceil(((THUMB_MAX_W * 3 + 1) * THUMB_MAX_H * 1.01 + 1024) * 4 / 3);
+/**
+ * The cache holds two full sheets at their worst, so drawing one never
+ * evicts a picture the same sheet shows (it would capture it again, and
+ * evict another: round and round).
+ */
+export const CACHE_ENTRIES = SHEET_MAX * 2;
+export const CACHE_BYTES = SHEET_MAX * 2 * THUMB_WORST_BYTES;
 /** Thumbnails stack above the pages' pictures (z-index 0). */
 export const THUMB_Z = 1;
 
@@ -98,8 +107,8 @@ export class ThumbCache<K> {
   private size = 0;
 
   constructor(
-    private maxEntries = 48,
-    private maxBytes = 8 << 20,
+    private maxEntries = CACHE_ENTRIES,
+    private maxBytes = CACHE_BYTES,
   ) {}
 
   get(k: K): Thumb | undefined {

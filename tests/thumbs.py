@@ -133,6 +133,22 @@ def run_direct():
         check("preview gone after the switch", not preview(t), preview(t))
         check("the switched-to page saw nothing of that click", events(t, 3) == [], events(t, 3))
 
+        # Two buttons pressed on a preview: neither's drag or release reaches the page it switched to.
+        move(t, tab_col(t, " 1 ") + 3, 1)
+        check("preview again", t.wait_for(lambda: preview(t), 3))
+        p1 = preview(t)
+        if p1:
+            (_, (row, pcol, c, r)), = p1.items()
+            x, y = (pcol + 4) * 10 - 5, (row + 2) * 20 - 10
+            t.mouse(x, y - 20, action="move"); t.mouse(x, y, action="move")
+            t.mouse(x, y, button=2, action="press"); time.sleep(0.1)
+            t.mouse(x, y, button=0, action="press"); time.sleep(0.6)
+            t.mouse(x, y, button=2, action="release"); time.sleep(0.1)
+            t.mouse(x + 30, y + 40, button=0, action="drag"); time.sleep(0.1)
+            t.mouse(x + 30, y + 40, button=0, action="release"); time.sleep(0.6)
+            check("two-button press on the preview switches tab", (active(t) or {}).get("tab") == 1, active(t))
+            check("...and the page saw none of it", events(t, 1) == [], events(t, 1))
+
         # A second space, with one tab.
         t.key("ctrl+b"); t.key("shift+n"); time.sleep(0.6)
         t.type(f"{BASE}/page.html?space=2"); t.key("enter")
@@ -234,6 +250,12 @@ def run_text():
         t.resize(160, 6); time.sleep(1.0)
         move(t, 5, 4); move(t, 5, 3)
         check("text sheet counts the tabs that don't fit", t.wait_text("+2 more", 4), t.text())
+        # No row to spare: a tab, never the count, takes the last one.
+        move(t, 100, 5)
+        t.resize(160, 5); time.sleep(1.0)
+        move(t, 5, 4); move(t, 5, 3)
+        ok = t.wait_text("· 3 tabs", 4)
+        check("text sheet in 5 rows shows a tab, not the count", ok and "1 termium test page" in t.text() and "more" not in t.text(), t.text())
     finally:
         t.close()
 

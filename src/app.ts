@@ -3884,8 +3884,8 @@ export class App {
   private hoverSheet: Space | null = null;
   /** Where the preview or sheet on screen is (pointer events there are its own), and the tabs in it. */
   private thumbAreas: Rect[] = [];
-  /** A press the thumbnails took: its drag and release go nowhere either. */
-  private thumbPress = false;
+  /** Buttons whose press the thumbnails took (bit 1 << button): their drags and releases go nowhere either. */
+  private thumbPress = 0;
   private thumbHits: { rect: Rect; space: Space; tab: Tab }[] = [];
 
   /** The space whose contact sheet covers the panes, if any. */
@@ -3969,7 +3969,7 @@ export class App {
     this.thumbAreas = [];
     this.thumbHits = [];
     this.thumbSlots.clear();
-    this.thumbPress = false;
+    this.thumbPress = 0;
   }
 
   /** The tab preview: title and address on row 2, its picture under them. */
@@ -4078,9 +4078,11 @@ export class App {
       if (lay.more) s += at(panel.row + panel.rows - 1, panel.col) + panelBg + fg(C.overlay) + fit(`  +${lay.more} more`, panel.cols) + RESET;
     } else {
       // Text only: a line per tab.
-      let shown = Math.min(n, Math.max(1, area.rows - 2));
-      if (shown < n) shown = Math.max(1, shown - 1); // room for "+N more"
-      const rows = shown + 2 + (shown < n ? 1 : 0);
+      // A line per tab under the header and a blank row; "+N more" only on a row of its own.
+      const room = Math.max(1, area.rows - 2);
+      const shown = n <= room ? n : room >= 2 ? room - 1 : 1;
+      const footer = shown < n && shown < room;
+      const rows = shown + 2 + (footer ? 1 : 0);
       panel = {
         col: area.col,
         row: Math.max(area.row, Math.min(anchor - 1, area.row + area.rows - rows)),
@@ -4097,7 +4099,7 @@ export class App {
         s += at(rect.row, rect.col) + panelBg + style + fit(`  ${i + 1} ${pageTitle(page)}${host ? ` — ${host}` : ""}`, rect.cols) + RESET;
         hits.push({ rect, space, tab });
       }
-      if (shown < n) s += at(panel.row + panel.rows - 1, panel.col) + panelBg + fg(C.overlay) + fit(`  +${n - shown} more`, panel.cols) + RESET;
+      if (footer) s += at(panel.row + 2 + shown, panel.col) + panelBg + fg(C.overlay) + fit(`  +${n - shown} more`, panel.cols) + RESET;
     }
     s += at(panel.row, panel.col) + panelBg + fg(C.mauve) + BOLD + fit(head, panel.cols) + RESET;
     this.dropThumbs((k) => used.has(k));
@@ -4127,17 +4129,19 @@ export class App {
    */
   private thumbMouse(ev: MouseEvent, col: number, row: number): boolean {
     if (this.mouseCapture) return false;
-    if (this.thumbPress) {
-      // The rest of a click the thumbnails took (the page under it never saw the press).
-      if (ev.action === "release") this.thumbPress = false;
-      if (ev.action === "release" || (ev.action === "move" && this.mouseButtons === 0 && ev.button !== 3)) return true;
+    // The rest of a click the thumbnails took (the page under it never saw the press).
+    const bit = ev.button < 3 ? 1 << ev.button : 0;
+    if (ev.action === "release" && this.thumbPress & bit) {
+      this.thumbPress &= ~bit;
+      return true;
     }
+    if (ev.action === "move" && ev.button !== 3 && this.thumbPress && !this.mouseButtons) return true;
     const sheet = this.sheetSpace() !== null;
     const inside = (this.preview !== null || sheet) && this.thumbAreas.some((a) => inRect(a, col, row));
     // A sheet hides the pages: the pointer over them is the sheet's.
     const covering = sheet && inRect(this.paneArea(), col, row);
     if (ev.action === "press") {
-      if (inside || covering) this.thumbPress = true;
+      if (inside || covering) this.thumbPress |= bit;
       if (inside) {
         const hit = this.thumbHits.find((h) => inRect(h.rect, col, row));
         if (hit && ev.button === 0) this.openThumb(hit.space, hit.tab);

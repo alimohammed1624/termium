@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { decodePng, encodeRegion, type Raster } from "../src/png";
-import { THUMB_MAX_H, THUMB_MAX_W, ThumbCache, downscale, fitCells, makeThumb, sheetLayout } from "../src/thumbs";
+import { SHEET_MAX, THUMB_MAX_H, THUMB_MAX_W, THUMB_WORST_BYTES, ThumbCache, downscale, fitCells, makeThumb, sheetLayout } from "../src/thumbs";
 
 function solid(width: number, height: number, rgba: [number, number, number, number]): Raster {
   const data = new Uint8Array(width * height * 4);
@@ -64,6 +64,19 @@ describe("ThumbCache", () => {
     c.delete("b");
     expect([c.entries, c.bytes]).toEqual([0, 0]);
   });
+});
+
+test("the cache holds two whole sheets of the largest thumbnails", () => {
+  // Noise doesn't compress: the biggest a thumbnail gets.
+  const noise: Raster = { width: 1920, height: 1200, channels: 3, data: new Uint8Array(1920 * 1200 * 3) };
+  for (let i = 0; i < noise.data.length; i++) noise.data[i] = (i * 2654435761) >>> 24 ^ (i * 40503) & 0xff;
+  const t = makeThumb(encodeRegion(noise, 0, 0, 1920, 1200).toString("base64"))!;
+  expect([t.w, t.h]).toEqual([THUMB_MAX_W, THUMB_MAX_H]);
+  expect(t.png.length).toBeGreaterThan(THUMB_WORST_BYTES * 0.8); // really incompressible
+  expect(t.png.length).toBeLessThanOrEqual(THUMB_WORST_BYTES);
+  const c = new ThumbCache<number>();
+  for (let i = 0; i < SHEET_MAX * 2; i++) c.set(i, { ...t, seq: 0, at: 0 });
+  for (let i = 0; i < SHEET_MAX * 2; i++) expect(c.get(i)).toBeDefined();
 });
 
 test("fitCells keeps the picture undistorted inside the box", () => {
