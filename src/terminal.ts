@@ -122,6 +122,7 @@ export function restoreTerminal(): void {
         `${ESC}[<u` + // pop kitty keyboard flags
         `${ESC}[?2004l${ESC}[?1016l${ESC}[?1006l${ESC}[?1003l` +
         `${ESC}[0m${ESC}[0 q${ESC}[?25h` + // default cursor shape, visible
+        `${ESC}]22;default${ESC}\\` + // default pointer (OSC 22: a hand over clickable chrome)
         `${ESC}[?1049l`,
     );
   } catch {}
