@@ -155,6 +155,23 @@ try:
     t.scroll(COLS * 5, 100, n=3); time.sleep(0.6)
     check("...below it, it does", (ev("__wh") or 0) > 0, ev("__wh"))
     t.key("escape"); wait_placed(t, FULL, 8)
+    # A one-row pane on top: while the line shows, its picture goes (it would cover the line).
+    t.resize(COLS, 10); time.sleep(1.5)
+    t.key("ctrl+b"); t.key("minus"); time.sleep(1.5); t.key("escape"); time.sleep(0.5)
+    t.key("ctrl+b"); t.key("k"); time.sleep(0.3)
+    t.key("ctrl+b"); t.key("r")
+    for _ in range(4):
+        t.key("shift+k"); time.sleep(0.2)
+    t.key("escape"); time.sleep(1.0)
+    top = lambda: [p for p in placed(t) if p[0] == 1]
+    check("a one-row pane on top", t.wait_for(lambda: [p[3] for p in top()] == [1], 8), placed(t))
+    t.key("ctrl+b")
+    check("...hides while the ^B line shows", t.wait_for(lambda: not top() and "^B" in t.line(1), 5), (placed(t), t.line(1)))
+    t.key("escape")
+    check("...and comes back after", t.wait_for(lambda: [p[3] for p in top()] == [1], 8), placed(t))
+    t.key("ctrl+b"); t.key("x"); time.sleep(1.0)
+    t.resize(COLS, ROWS)
+    check("back to one pane filling the terminal (again)", wait_placed(t, FULL, 10), placed(t))
 
     # ---------------------------------------------------- the palette, the help
     t.key("ctrl+l"); time.sleep(0.4); t.type(">chromeless"); time.sleep(0.5)

@@ -1628,8 +1628,9 @@ export class App {
     const next = on ?? !this.chromeless;
     if (next !== this.chromeless) {
       this.chromeless = next;
-      this.relayoutAndRedraw();
+      // (The toast first: one redraw shows it.)
       if (next) this.showToast("Chromeless: Ctrl+L for the address, Ctrl+B f shows the bars", 2500);
+      this.relayoutAndRedraw();
     }
     return this.chromeless;
   }
@@ -2094,6 +2095,14 @@ export class App {
     const replaces = page.imageIds[0] ?? null;
     // Under the chromeless address line, the picture's top row is left out (the rest stays where it was).
     const skip = this.underStrip(r) ? 1 : 0;
+    if (r.rows - skip < 1) {
+      // A one-row pane: nothing of it shows meanwhile.
+      this.staleImages.push(...page.imageIds);
+      page.imageIds = [];
+      page.placed = null;
+      out(this.sync(this.takeStale() + this.cursorSeq()));
+      return false;
+    }
     const skipY = skip ? Math.round(pngHeight(page.lastFrame) / r.rows) : 0;
     const img = drawImage(page.lastFrame, id, replaces, r.row + skip, r.col, r.cols, r.rows - skip, skipY);
     out(this.sync(img + this.takeStale() + this.cursorSeq()), done);
@@ -2109,7 +2118,7 @@ export class App {
 
   /** The pane's top row is under the chromeless address line (shown for now). */
   private underStrip(r: Rect): boolean {
-    return this.strip && r.row === 1 && r.rows > 1;
+    return this.strip && r.row === 1;
   }
 
   /**
