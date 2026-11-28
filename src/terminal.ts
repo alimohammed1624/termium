@@ -120,9 +120,11 @@ export function restoreTerminal(): void {
     outSync(
       wrapGraphics([...ownImages].map(deleteImage).join("")) + // delete our pictures
         `${ESC}[<u` + // pop kitty keyboard flags
+        // Usual pointer back (OSC 22: a hand over clickable chrome); before
+        // mouse reporting goes off, as Ghostty picks its text pointer then.
+        `${ESC}]22;default${ESC}\\${ESC}]22;${ESC}\\` +
         `${ESC}[?2004l${ESC}[?1016l${ESC}[?1006l${ESC}[?1003l` +
         `${ESC}[0m${ESC}[0 q${ESC}[?25h` + // default cursor shape, visible
-        `${ESC}]22;default${ESC}\\` + // default pointer (OSC 22: a hand over clickable chrome)
         `${ESC}[?1049l`,
     );
   } catch {}

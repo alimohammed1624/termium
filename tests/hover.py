@@ -154,10 +154,12 @@ try:
     t.mouse(700, 400, action="press")
     t.mouse(640, 380, action="drag"); time.sleep(0.1)
     t.key("ctrl+b"); t.key("question"); time.sleep(0.5)
-    t.mouse(640, 380, action="release"); time.sleep(0.1)
+    t.mouse(plus * t.cell_w, 10, action="drag"); time.sleep(0.1)
+    t.mouse(plus * t.cell_w, 10, action="release"); time.sleep(0.1)
     t.key("escape"); time.sleep(0.5)
-    move(t, plus + 1, 1)
-    check("hover works after a release under an overlay", bg(t, plus + 1, 1) == HOVER, bg(t, plus + 1, 1))
+    check("released over + under an overlay: lit once it closes", bg(t, plus + 1, 1) == HOVER, bg(t, plus + 1, 1))
+    move(t, tab + 3, 1)
+    check("hover works after a release under an overlay", bg(t, tab + 3, 1) == HOVER, bg(t, tab + 3, 1))
 
     # A second tab; closing the tab that is flashing doesn't pass the flash on.
     move(t, 70, 20)

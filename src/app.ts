@@ -3696,6 +3696,7 @@ export class App {
     if (ev.action === "release" && this.covered()) {
       if (this.drag) this.drag = null;
       else if (this.mouseCapture) this.pageMouse(this.mouseCapture, ev, px, py);
+      this.hover.move(col, row);
     }
 
     if (this.mode === "help") {
