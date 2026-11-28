@@ -191,6 +191,16 @@ describe("distinctTitles", () => {
     expect(new Set(out).size).toBe(3);
   });
 
+  test("a literal title on the same URL as a labelled tab stays its own", () => {
+    const out = distinctTitles([tab("Docs", "http://h/same/a"), tab("Docs", "http://h/same/b"), tab("Docs · a", "http://h/same/a")], 22);
+    expect(out[2]).toBe("Docs · a");
+    expect(new Set(out).size).toBe(3);
+  });
+
+  test("the scheme tells URLs apart when nothing else does", () => {
+    expect(distinctTitles([tab("D", "http://h/a"), tab("D", "https://h/a")], 22)).toEqual(["D · http:", "D · https:"]);
+  });
+
   test("a trailing slash tells URLs apart", () => {
     expect(new Set(distinctTitles([tab("R", "http://h/slash"), tab("R", "http://h/slash/")], 22)).size).toBe(2);
   });

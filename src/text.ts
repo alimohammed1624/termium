@@ -83,7 +83,7 @@ const MIN_TITLE = 8;
 
 /**
  * Parts of a URL that can tell it apart: host (and its labels), port and path segments first,
- * then query and fragment. `whole` is the URL as shown, `id` the URL itself.
+ * then query, fragment and scheme. `whole` is the URL as shown, `id` the URL itself.
  */
 function urlParts(url: string): { parts: string[]; extra: string[]; whole: string; id: string } {
   let u: URL;
@@ -105,7 +105,7 @@ function urlParts(url: string): { parts: string[]; extra: string[]; whole: strin
   if (u.port) parts.push(`:${u.port}`, `${host}:${u.port}`);
   for (const seg of u.pathname.split("/")) parts.push(clean(seg));
   const whole = clean(u.host + u.pathname + u.search + u.hash);
-  return { parts: parts.filter(Boolean), extra: [clean(u.search), clean(u.hash)].filter(Boolean), whole, id: u.href };
+  return { parts: parts.filter(Boolean), extra: [clean(u.search), clean(u.hash), u.protocol].filter(Boolean), whole, id: u.href };
 }
 
 /** `title · suffix` in at most `max` columns; the title gives way first, down to MIN_TITLE. */
@@ -173,7 +173,7 @@ export function distinctTitles(tabs: readonly { title: string; url: string }[], 
     for (const clash of clashes.values()) {
       // Tabs on one URL can't differ: they move as one.
       const movers = clash.filter((i, k) => options.has(i) && clash.findIndex((j) => options.has(j) && ids[j] === ids[i]) === k);
-      if (new Set(clash.map((i) => ids[i])).size < 2 || !movers.length) continue;
+      if (new Set(clash.map((i) => (options.has(i) ? ids[i] : i))).size < 2 || !movers.length) continue;
       const taken = new Set(out.filter((_, i) => !clash.includes(i) || !options.has(i)).map(key));
       const steps = Math.max(...movers.map((i) => options.get(i)!.length));
       let next: string[] | undefined;
