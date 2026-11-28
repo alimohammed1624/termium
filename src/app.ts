@@ -4213,6 +4213,8 @@ export class App {
       return this.opts.log(`history: ${e}`);
     }
     if (seq !== this.menuSeq || !t.valid() || this.menu || this.focused !== page || !this.pages.has(page.sessionId)) return;
+    // (A menu needs a title, a row and a bottom line: a shorter terminal has no room for one.)
+    if (this.rows < 3) return;
     // The history may have changed since it was read (a pushState drops the forward entries): looked up again.
     // (An entry keeps its id through replaceState: its address must match too.)
     const go = (entryId: number, url: string) => async () => {

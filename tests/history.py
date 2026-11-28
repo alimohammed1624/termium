@@ -167,6 +167,12 @@ try:
     if rows:
         t.click_cell(find("Hist", [rows[0]])[0], rows[0])
         check("and clicking it goes there", t.wait_for(lambda: location() == f"{BASE}/p13.html" or location() == f"{BASE}/different.html", 5), str(location()))
+
+    # Two rows: no room for a menu (it would hide its rows yet take clicks), so none opens.
+    t.key("escape"); t.resize(160, 2); time.sleep(1.5)
+    before = location()
+    t.click_cell(find("←", [2])[0], 2, 2); time.sleep(1)
+    check("a 2-row terminal opens no history menu", "Back" not in t.text() and location() == before, f"{location()} {t.text()!r}")
 finally:
     t.close()
     srv.terminate()
