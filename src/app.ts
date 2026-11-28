@@ -3703,13 +3703,17 @@ export class App {
     if (this.mode === "help") {
       if (ev.action === "press") {
         this.mode = "normal";
+        this.chromeHeld.add(ev.button); // (its release isn't the page's)
         this.fullRedraw();
       }
       return;
     }
     if (this.mode === "update") {
       // A click anywhere puts the box away (unanswered; the notice stays).
-      if (ev.action === "press") this.closeUpdate(this.updateBox?.state === "failed");
+      if (ev.action === "press") {
+        this.chromeHeld.add(ev.button);
+        this.closeUpdate(this.updateBox?.state === "failed");
+      }
       return;
     }
 
@@ -3727,6 +3731,13 @@ export class App {
       this.leaveHover();
     }
 
+    // A press termium's own bars took: its moves and release are theirs too
+    // (even if the click moved a page under the pointer, as hiding the footer does).
+    if ((ev.action === "release" || ev.action === "move") && this.chromeHeld.has(ev.button)) {
+      if (ev.action === "release") this.chromeHeld.delete(ev.button);
+      return;
+    }
+
     // Pointer captured by a page while a button is held.
     const captured = this.mouseCapture;
     if (captured && (ev.action === "move" || ev.action === "release")) {
@@ -3734,12 +3745,6 @@ export class App {
       return;
     }
 
-    // A press termium's own bars took: its moves and release are theirs too
-    // (even if the click moved a page under the pointer, as hiding the footer does).
-    if ((ev.action === "release" || ev.action === "move") && this.chromeHeld.has(ev.button)) {
-      if (ev.action === "release") this.chromeHeld.delete(ev.button);
-      return;
-    }
     // (A press means that button's earlier release was lost, e.g. in help.)
     if (ev.action === "press") this.chromeHeld.delete(ev.button);
     if (ev.action === "press" && this.chromeClick(ev, col, row)) {

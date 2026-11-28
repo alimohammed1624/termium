@@ -96,10 +96,10 @@ export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
     pin(key("Done", "Esc", "escape")),
   ],
   spaces: [
-    needs("spaces", key("Down", "j")),
-    needs("spaces", key("Up", "k")),
     key("Open", "Enter"),
     key("New", "N", "shift+n"),
+    needs("spaces", key("Down", "j")),
+    needs("spaces", key("Up", "k")),
     pin(key("Cancel", "Esc", "escape")),
   ],
   help: [key("Close", "Esc", "escape")],

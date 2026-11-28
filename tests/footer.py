@@ -257,6 +257,24 @@ try:
     t.mouse(*px(60, 10), action="drag"); time.sleep(0.1)
     t.mouse(*px(60, 10), action="release"); time.sleep(0.5)
     check("a tab-bar press's drag and release never reach the page (a wheel turn between)", value("window.ups") == [], value("window.ups"))
+    # A footer press, with the page holding another button meanwhile: the page sees only its own button.
+    ctl("eval", "window.ev = []; for (const k of ['mousedown', 'mouseup']) addEventListener(k, (e) => ev.push(k[5] + e.button)); 1")
+    t.mouse(*px(COLS - 5, ROWS), action="press"); time.sleep(0.1)
+    t.mouse(*px(60, 10), button=2, action="press"); time.sleep(0.1)
+    t.mouse(*px(60, 12), action="drag"); time.sleep(0.1)
+    t.mouse(*px(60, 12), action="release"); time.sleep(0.1)
+    t.mouse(*px(60, 12), button=2, action="release"); time.sleep(0.5)
+    t.key("escape"); time.sleep(0.3)  # (a context menu, if any)
+    check("a footer press's release stays termium's while the page holds another button", value("window.ev") == ["d2", "u2"], value("window.ev"))
+    # Closing help with a click: that click's release isn't the page's either.
+    ctl("eval", "window.ev = []; for (const k of ['mousemove', 'mouseup']) addEventListener(k, (e) => ev.push(k)); 1")
+    t.key("ctrl+b"); time.sleep(0.2); t.key("question"); time.sleep(0.8)
+    i = foot().find("Close Esc")
+    t.mouse(*px(i + 2, ROWS), action="press"); time.sleep(0.3)
+    for y in (30, 20, 10):
+        t.mouse(*px(60, y), action="drag"); time.sleep(0.1)
+    t.mouse(*px(60, 10), action="release"); time.sleep(0.5)
+    check("closing help by its footer chip: its drag and release don't reach the page", "edit address" not in t.text() and value("window.ev") == [], value("window.ev"))
 
     # ---- ^B f: the row goes back to the page
     ctl("eval", "window.ups = []; addEventListener('mouseup', (e) => ups.push(e.clientY)); addEventListener('mousedown', (e) => ups.push('down')); 1")
@@ -308,6 +326,9 @@ try:
     # ---- narrow: what doesn't fit is left out, never cut mid-action
     t.resize(60, ROWS); time.sleep(1.5)
     f = foot()
+    t.key("ctrl+b"); time.sleep(0.2); t.key("w"); time.sleep(0.6)
+    check("60 columns, two spaces: the picker keeps Open, New and Cancel", all(x in foot() for x in ("Open Enter", "New N", "Cancel Esc")), foot())
+    t.key("escape"); time.sleep(0.4)
     check("narrow: whole actions only, Keys and Hide kept", "Address ^L" in f and "New tab" not in f and f.rstrip().endswith("Keys ^B? · Hide ^Bf"), f)
     t.resize(COLS, ROWS); time.sleep(1)
     # ---- a short terminal: the footer never hides a pane

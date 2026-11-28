@@ -52,7 +52,7 @@ describe("hint footer", () => {
     expect(labels("resize", { sideBySide: true })).toEqual(["Left", "Right", "Done"]);
     expect(labels("resize", { stacked: true })).toEqual(["Down", "Up", "Done"]);
     expect(labels("spaces", {})).toEqual(["Open", "New", "Cancel"]);
-    expect(labels("spaces", { spaces: true })).toEqual(["Down", "Up", "Open", "New", "Cancel"]);
+    expect(labels("spaces", { spaces: true })).toEqual(["Open", "New", "Down", "Up", "Cancel"]);
   });
 
   test("on for someone who never chose; the choice is kept; the environment wins", () => {
