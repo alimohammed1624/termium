@@ -6,6 +6,14 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The chrome follows the terminal's colors (asked for with OSC 10, 11
+  and 4 as a terminal attaches) instead of always being Catppuccin
+  Mocha, so it is light and readable in a light terminal theme; the
+  `<select>` menu takes the same colors. `--theme catppuccin` or
+  `--theme catppuccin-latte` (or `$TERMIUM_THEME`) keeps a fixed look;
+  `--theme auto` is the default.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added

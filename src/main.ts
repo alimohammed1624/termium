@@ -14,6 +14,7 @@ import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
 import { restoreTerminal } from "./terminal";
 import { DEFAULT_SEARCH } from "./text";
+import { THEMES, isTheme, type ThemeName } from "./theme";
 import {
   UPGRADE_CMD,
   cachePath,
@@ -58,6 +59,8 @@ Options:
   --incognito           use a throwaway profile that is deleted when the session ends
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)
+  --theme <name>        chrome colors: auto (follow the terminal's colors; default, or
+                        $TERMIUM_THEME), catppuccin (Mocha), catppuccin-latte
   --no-update-check     don't check GitHub for a newer termium, nor offer to update
                         (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help
@@ -77,6 +80,9 @@ interface Args extends LaunchOptions {
   /** The launch options given, by flag, for the "already running" message. */
   launchFlags: string[];
   noUpdateCheck: boolean;
+  /** The chrome theme for this terminal (not a launch option: each terminal picks its own). */
+  theme: ThemeName;
+  themeFromFlag: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -85,6 +91,8 @@ function parseArgs(argv: string[]): Args {
     session: DEFAULT_SESSION,
     launchFlags: [],
     noUpdateCheck: false,
+    theme: "auto",
+    themeFromFlag: false,
     url: null,
     incognito: false,
     scale: null,
@@ -132,6 +140,13 @@ function parseArgs(argv: string[]): Args {
         sessionGiven = true;
         break;
       case "--no-update-check": args.noUpdateCheck = true; break;
+      case "--theme": {
+        const t = value();
+        if (!isTheme(t)) fail(`unknown theme "${t}" (${THEMES.join(", ")})`);
+        args.theme = t;
+        args.themeFromFlag = true;
+        break;
+      }
       // Older termiums (0.3.0 pre-releases) restarted with --restore; a
       // restart snapshot is reopened whenever one is waiting, so it means nothing now.
       case "--restore": break;
@@ -173,6 +188,10 @@ function parseArgs(argv: string[]): Args {
         if (args.url) fail("only one URL may be given");
         args.url = a;
     }
+  }
+  if (!args.themeFromFlag && process.env.TERMIUM_THEME) {
+    if (!isTheme(process.env.TERMIUM_THEME)) fail(`unknown TERMIUM_THEME "${process.env.TERMIUM_THEME}" (${THEMES.join(", ")})`);
+    args.theme = process.env.TERMIUM_THEME;
   }
   if (!validSessionName(args.session)) fail(`bad session name "${args.session}" (letters, digits, . _ -; up to 64)`);
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
@@ -306,6 +325,7 @@ async function main(): Promise<void> {
       }
       const restartArgv = [...selfArgv(), "--session", args.session];
       if (args.noUpdateCheck) restartArgv.push("--no-update-check");
+      if (args.themeFromFlag) restartArgv.push("--theme", args.theme);
       return runClient({
         name: args.session,
         mode: args.command === "attach" ? "attach" : "auto",
@@ -316,6 +336,7 @@ async function main(): Promise<void> {
         updateCheck: checkEnabled(args.noUpdateCheck),
         restartArgv,
         selfArgv: selfArgv(),
+        theme: args.theme,
       });
     }
   }

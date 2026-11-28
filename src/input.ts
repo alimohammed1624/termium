@@ -41,6 +41,8 @@ export type InputEvent =
   | { type: "kittyKeyboard"; flags: number }
   | { type: "kittyGraphics"; id: number; message: string }
   | { type: "deviceAttributes" }
+  /** A terminal color (OSC 10 text, 11 background, 4 palette entry `index`), as the terminal wrote it. */
+  | { type: "color"; which: "fg" | "bg" | number; spec: string }
   | { type: "focus"; focused: boolean };
 
 /** String.fromCodePoint that tolerates garbage (out-of-range values give ""). */
@@ -317,7 +319,7 @@ export class InputParser {
       // String sequences are only replies to our queries (kitty graphics
       // replies are APC "ESC _ G"); otherwise a legacy Alt+_ / Alt+] / Alt+P
       // must stay a key rather than swallow all input after it.
-      if ((n === "_" && (this.expectApc || buf[i + 2] === "G" && this.kittyActive)) || ((n === "]" || n === "P") && this.kittyActive)) {
+      if ((n === "_" && (this.expectApc || buf[i + 2] === "G" && this.kittyActive)) || ((n === "]" || n === "P") && this.kittyActive) || (n === "]" && this.expectOsc)) {
         // String sequence terminated by ST (ESC \) or BEL.
         let end = -1;
         let termLen = 0;
@@ -328,6 +330,7 @@ export class InputParser {
         }
         if (end < 0) break; // incomplete
         if (n === "_") this.apc(buf.slice(i + 2, end));
+        else if (n === "]") this.osc(buf.slice(i + 2, end));
         i = end + termLen;
         continue;
       }
@@ -365,6 +368,14 @@ export class InputParser {
     const message = semi >= 0 ? body.slice(semi + 1) : "";
     const idMatch = ctrl.match(/(?:^|,)i=(\d+)/);
     this.emit({ type: "kittyGraphics", id: idMatch ? Number(idMatch[1]) : 0, message });
+  }
+
+  private osc(body: string): void {
+    // Color replies: 10;<spec>, 11;<spec>, 4;<index>;<spec>
+    const m = /^(10|11|4;(\d{1,3}));(.*)$/s.exec(body);
+    if (!m) return;
+    const which = m[1] === "10" ? "fg" : m[1] === "11" ? "bg" : Number(m[2]);
+    this.emit({ type: "color", which, spec: m[3]! });
   }
 
   private csi(params: string, final: string): void {
@@ -452,6 +463,8 @@ export class InputParser {
   kittyActive = false;
   /** True while capability replies (APC) may still arrive. */
   expectApc = true;
+  /** True while the terminal's color replies (OSC) may still arrive. */
+  expectOsc = false;
 
   private mouse(body: string, final: string): void {
     const [bRaw, xRaw, yRaw] = body.split(";").map(Number);

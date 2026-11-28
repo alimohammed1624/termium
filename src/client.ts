@@ -32,6 +32,7 @@ import {
   graphicsDir,
   sweepGraphicsFiles,
 } from "./session";
+import { parseColorSpec, type TermColors, type ThemeName } from "./theme";
 import { drained, enterTerminal, out, queryCapabilities, querySizes, restoreTerminal, setTmuxPassthrough } from "./terminal";
 
 export interface ClientOptions {
@@ -51,6 +52,8 @@ export interface ClientOptions {
   restartArgv: string[];
   /** argv that runs this termium (the binary, or bun and the script). */
   selfArgv: string[];
+  /** The chrome theme (--theme, $TERMIUM_THEME): "auto" follows this terminal's colors. */
+  theme: ThemeName;
 }
 
 function fail(msg: string, code = 2): never {
@@ -342,6 +345,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
     kittyFlags: -1,
     cell: null as { width: number; height: number } | null,
     area: null as { width: number; height: number } | null,
+    colors: {} as TermColors,
   };
   let onCapsDone: (() => void) | null = null;
   let onGraphics: (() => void) | null = null;
@@ -398,6 +402,14 @@ export async function runClient(o: ClientOptions): Promise<void> {
       case "textAreaSize":
         caps.area = { width: ev.width, height: ev.height };
         return;
+      case "color": {
+        const c = parseColorSpec(ev.spec);
+        if (!c) return;
+        if (ev.which === "fg") caps.colors.fg = c;
+        else if (ev.which === "bg") caps.colors.bg = c;
+        else (caps.colors.ansi ??= {})[ev.which] = c;
+        return;
+      }
       case "deviceAttributes":
         onCapsDone?.();
         onSizes?.();
@@ -521,7 +533,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
   const pane0 = inTmux ? tmuxPane() : { active: true, visible: true, rgb: false };
   let paneActive = pane0.active;
   let paneVisible = pane0.visible;
-  queryCapabilities(paneActive);
+  parser.expectOsc = o.theme === "auto";
+  queryCapabilities(paneActive, parser.expectOsc);
 
   const graphicsReply = new Promise<void>((r) => (onGraphics = r));
   await Promise.race([new Promise<void>((r) => (onCapsDone = r)), Bun.sleep(1500)]);
@@ -555,8 +568,9 @@ export async function runClient(o: ClientOptions): Promise<void> {
     fileProbe = unanswered || !paneActive ? "unknown" : await probeFiles();
     fileTransport = fileProbe === "yes";
   }
-  // From here on ESC _ is a legacy Alt+_ keypress, not a reply we're waiting for.
+  // From here on ESC _ is a legacy Alt+_ keypress (and ESC ] Alt+]), not a reply we're waiting for.
   parser.expectApc = false;
+  parser.expectOsc = false;
 
   /** Stops a server this client started but won't attach to. */
   const stopOwnServer = async () => {
@@ -922,6 +936,8 @@ export async function runClient(o: ClientOptions): Promise<void> {
     placeholders,
     rgbIds: pane0.rgb,
     cwd: process.cwd(),
+    theme: o.theme,
+    colors: caps.colors,
     via: !inTmux ? "direct" : fileTransport ? "tmux-files" : "tmux-paced",
     // A session we just started opens the URL itself.
     url: o.url,

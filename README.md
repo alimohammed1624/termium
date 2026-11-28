@@ -68,6 +68,13 @@ pixels per CSS pixel), `--search <url-with-%s>` (or `$TERMIUM_SEARCH`).
 They apply when a session starts. `--no-update-check` turns off the
 [update check](#updates).
 
+The chrome (sidebar, tabs, address bar, dialogs and `<select>` menus)
+takes its colors from the terminal it's attached to, so it's light in a
+light terminal theme. `--theme catppuccin` (Mocha) or `--theme
+catppuccin-latte` (or `$TERMIUM_THEME`) picks a fixed look instead; each
+terminal that attaches picks its own. A terminal that doesn't report its
+colors gets Catppuccin Mocha.
+
 ### Sessions
 
 termium runs the browser in a background session, so it survives the
