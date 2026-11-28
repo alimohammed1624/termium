@@ -45,6 +45,7 @@ def page_eval(expr):
 def hover(col, row):
     t.mouse((col - 1) * t.cell_w + 3, (row - 1) * t.cell_h + 3, action="move")
 
+t2 = None
 t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "--profile", profile,
           f"http://127.0.0.1:{PORT}/page.html"], cols=COLS, rows=ROWS, cwd=ROOT)
 try:
@@ -116,7 +117,20 @@ try:
     time.sleep(6)  # longer than the toast's 5 s
     t.key("enter")
     check("once it's answered, the toast is back (it waited)", t.wait_text(OFF, 4), t.text()[-600:])
+
+    # Detached while hovering a toast: in the next terminal nothing is under
+    # a pointer yet, so the toast's timer runs again.
+    t.key("ctrl+b"); t.key("shift+u"); t.wait_text(OFF, 5)
+    col, row = toast_cell("Update news"); hover(col + 2, row); time.sleep(0.3)
+    t.key("ctrl+b"); t.key("d")
+    t.wait_for(lambda: os.waitpid(t.pid, os.WNOHANG)[0] != 0, 10)
+    t2 = Term(["bun", os.path.join(ROOT, "src/main.ts"), "attach"], cols=COLS, rows=ROWS, cwd=ROOT,
+              env={"XDG_RUNTIME_DIR": t.runtime_dir, "XDG_DATA_HOME": os.path.join(t.own_root, "data"),
+                   "XDG_STATE_HOME": os.path.join(t.own_root, "state")})
+    check("re-attached: the toast is still there", t2.wait_text(OFF, 10), t2.text()[-400:])
+    check("...and expires with no pointer over it", t2.wait_for(lambda: OFF not in t2.text(), 8), t2.text()[-400:])
 finally:
+    if t2: t2.close()
     t.close()
     srv.terminate()
     shutil.rmtree(profile, ignore_errors=True)

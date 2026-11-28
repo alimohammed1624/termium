@@ -1545,6 +1545,10 @@ export class App {
    */
   private resetInput(): void {
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
+    // Where that terminal's pointer was means nothing in the next one.
+    this.pointer = null;
+    this.toastPressed = false;
+    this.hoverToast(null);
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
     }
