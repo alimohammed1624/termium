@@ -36,7 +36,7 @@ import {
   setClipboard,
   transmitVirtual,
 } from "./terminal";
-import { decodePng, encodeRegion, type Raster } from "./png";
+import { decodePng, encodeRegion, pngHeight, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
 import { actionItem, paletteRows, type PaletteAction, type PaletteItem } from "./palette";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
@@ -288,6 +288,7 @@ const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 const DETACHED_VIEWPORT = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false, screenWidth: 1920, screenHeight: 1080 };
 
 const SIDEBAR_W = 22;
+const CHROMELESS_HINT = "Chromeless: Ctrl+L for the address, Ctrl+B F shows the bars";
 const TOP_ROWS = 2;
 /** URL fragment that marks pages termium created; random so real URLs never match. */
 const MARKER = `#termium-${crypto.randomUUID().slice(0, 8)}-`;
@@ -314,6 +315,7 @@ const HELP: [string, string][] = [
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
+  ["F", "chromeless (hide tab & address bars)"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
@@ -365,11 +367,16 @@ export class App {
 
   private zoom = 1;
   sidebar = true;
+  /** No tab bar, address bar or sidebar: the pages fill the terminal (Ctrl+B F). */
+  chromeless = false;
+  /** Chromeless: the address line shows over the top row for now (a toast, a question, a key prefix). */
+  private strip = false;
 
   private mode: Mode = "normal";
   private prompt: Prompt | null = null;
   private spaceCursor = 0;
-  private toast: { text: string; until: number } | null = null;
+  /** `nav`: only says a page is loading or loaded, or gives a hint (any other toast outranks it). */
+  private toast: { text: string; until: number; nav?: boolean } | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   private geom = new Map<Page, PaneGeom<Page>>();
@@ -621,7 +628,7 @@ export class App {
       });
       return { name: s.name, active, tabs };
     });
-    return { spaces, activeSpace: this.activeSpace, sidebar: this.sidebar, zoom: this.zoom, notKept };
+    return { spaces, activeSpace: this.activeSpace, sidebar: this.sidebar, chromeless: this.chromeless, zoom: this.zoom, notKept };
   }
 
   /** The person at the terminal is in the middle of something (address bar, a prompt, help, a key prefix...). */
@@ -713,6 +720,7 @@ export class App {
     this.activeSpace = clampInt(saved.activeSpace, 0, this.spaces.length - 1);
     if (!this.space?.tabs.length) this.activeSpace = Math.max(0, this.spaces.findIndex((s) => s.tabs.length > 0));
     this.sidebar = saved.sidebar !== false;
+    this.chromeless = saved.chromeless === true;
     const z = Number(saved.zoom);
     if (Number.isFinite(z) && z !== 1) this.zoom = Math.max(0.3, Math.min(5, Math.round(z * 100) / 100));
     this.relayout();
@@ -1113,7 +1121,10 @@ export class App {
     if (!page || frameId !== page.targetId) return;
     page.loading = loading;
     if (loading) page.crashed = false;
-    else void this.refreshInfo(page);
+    // Chromeless, a brief line over the top says the focused page is loading, then what it is.
+    const say = this.chromeless && page === this.focused;
+    if (loading && say) this.navToast("◌ Loading…", 2000);
+    if (!loading) void this.refreshInfo(page).then(() => say && page === this.focused && this.navToast(pageTitle(page), 1500));
     this.queueChrome();
   }
 
@@ -1599,12 +1610,39 @@ export class App {
   }
 
   private mainCol(): number {
-    return (this.sidebar || this.mode === "spaces") && this.cols >= SIDEBAR_W + 30 ? SIDEBAR_W + 1 : 1;
+    return ((this.sidebar && !this.chromeless) || this.mode === "spaces") && this.cols >= SIDEBAR_W + 30 ? SIDEBAR_W + 1 : 1;
   }
 
   private paneArea(): Rect {
     const col = this.mainCol();
-    return { col, row: TOP_ROWS + 1, cols: Math.max(1, this.cols - col + 1), rows: Math.max(1, this.rows - TOP_ROWS) };
+    const top = this.chromeless ? 0 : TOP_ROWS;
+    return { col, row: top + 1, cols: Math.max(1, this.cols - col + 1), rows: Math.max(1, this.rows - top) };
+  }
+
+  /** The address line's row (chromeless: over the top row, while it shows). */
+  private barRow(): number {
+    return this.chromeless ? 1 : 2;
+  }
+
+  /** Turns chromeless mode on or off (null: the other way round); says so in a toast. */
+  setChromeless(on: boolean | null = null): boolean {
+    const next = on ?? !this.chromeless;
+    if (next !== this.chromeless) {
+      this.chromeless = next;
+      // (The toast first: one redraw shows it. Only a hint: any other toast, or a page's loading, outranks it.)
+      if (next) this.navToast(CHROMELESS_HINT, 2500);
+      else if (this.toast?.text === CHROMELESS_HINT) this.toast = null;
+      this.relayoutAndRedraw();
+    }
+    return this.chromeless;
+  }
+
+  /** Chromeless: something needs the address line for now (a toast, a question, a key prefix). */
+  private stripWanted(): boolean {
+    const p = this.prompt;
+    // (Spaces mode shows the sidebar, unless the terminal is too narrow for it.)
+    const spaces = this.mode === "spaces" && this.mainCol() === 1;
+    return (!!this.toast && this.toast.until > Date.now()) || (!!p && p.kind !== "url") || this.mode === "prefix" || this.mode === "resize" || spaces;
   }
 
   /** Recomputes pane geometry and fixes every page's viewport and screencast. */
@@ -2057,10 +2095,32 @@ export class App {
     if (this.nextImage > 0xfffffff0) this.nextImage = 1;
     // New picture placed first, old one deleted after, in one synchronized update.
     const replaces = page.imageIds[0] ?? null;
-    out(this.sync(drawImage(page.lastFrame, id, replaces, r.row, r.col, r.cols, r.rows) + this.takeStale() + this.cursorSeq()), done);
+    // Under the chromeless address line, the picture's top row is left out (the rest stays where it was).
+    const skip = this.underStrip(r) ? 1 : 0;
+    if (r.rows - skip < 1) {
+      // A one-row pane: nothing of it shows meanwhile.
+      this.staleImages.push(...page.imageIds);
+      page.imageIds = [];
+      page.placed = null;
+      out(this.sync(this.takeStale() + this.cursorSeq()));
+      return false;
+    }
+    const skipY = skip ? Math.round(pngHeight(page.lastFrame) / r.rows) : 0;
+    const img = drawImage(page.lastFrame, id, replaces, r.row + skip, r.col, r.cols, r.rows - skip, skipY);
+    out(this.sync(img + this.takeStale() + this.cursorSeq()), done);
     page.imageIds = [id];
     page.placed = { ...r };
     return true;
+  }
+
+  /** The cell shows that pane's page (not the chromeless address line over its top row). */
+  private onPage(g: PaneGeom<Page>, col: number, row: number): boolean {
+    return inRect(g.content, col, row) && !(this.strip && row === 1);
+  }
+
+  /** The pane's top row is under the chromeless address line (shown for now). */
+  private underStrip(r: Rect): boolean {
+    return this.strip && r.row === 1;
   }
 
   /**
@@ -2111,7 +2171,9 @@ export class App {
       const cols = Math.min(t.cols, PLACEHOLDER_MAX);
       const rows = Math.min(t.rows, PLACEHOLDER_MAX);
       s += transmitVirtual(data, ids[i]!, cols, rows);
-      if (moved) s += placeholderCells(this.phHigh, this.phColour(indexes[i]!), this.phRgb, t.row, t.col, cols, rows);
+      // (Under the chromeless address line, a top tile's first row of cells is left to it.)
+      const skip = t.row === r.row && this.underStrip(r) ? 1 : 0;
+      if (moved) s += placeholderCells(this.phHigh, this.phColour(indexes[i]!), this.phRgb, t.row, t.col, cols, rows, skip);
     });
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;
@@ -2172,8 +2234,27 @@ export class App {
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
     if (mainCol > 1) s += this.drawSidebar();
-    s += this.drawTabBar(mainCol, mainW);
-    s += this.drawUrlBar(mainCol, mainW);
+    const strip = this.chromeless && this.stripWanted();
+    if (strip !== this.strip) {
+      // The address line comes or goes over the top row: the pictures there are drawn again around it.
+      this.strip = strip;
+      if (!this.redrawing) return this.fullRedraw();
+    }
+    if (!this.chromeless) {
+      s += this.drawTabBar(mainCol, mainW);
+      s += this.drawUrlBar(mainCol, mainW);
+    } else {
+      // (Nothing of the bars to click, unless the address line shows.)
+      this.tabHits = [];
+      this.newTabHit = null;
+      this.badgeHit = null;
+      this.navHits = null;
+      this.noticeHit = null;
+      this.promptCursor = null;
+    }
+    // (Drawn last, over pane headers and a dialog's panel on that row.)
+    const stripLine = strip ? this.drawUrlBar(mainCol, mainW, 1) : "";
+    s += stripLine;
     const palette = this.prompt?.kind === "url" ? this.prompt : null;
     if (!palette) this.paletteHits = null;
     if (this.paletteShown && !palette) {
@@ -2195,6 +2276,7 @@ export class App {
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
+    s += stripLine;
     out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
@@ -2317,10 +2399,10 @@ export class App {
     }
   }
 
-  private drawUrlBar(col: number, w: number): string {
+  private drawUrlBar(col: number, w: number, row = 2): string {
     const page = this.focused;
     const barBg = bg(C.base);
-    let s = at(2, col) + barBg;
+    let s = at(row, col) + barBg;
     const mode = this.modeLabel();
     const zoom = this.zoom !== 1 ? ` ${Math.round(this.zoom * 100)}% ` : "";
     const toast = this.toast && this.toast.until > Date.now() ? ` ${this.toast.text} ` : "";
@@ -2350,7 +2432,7 @@ export class App {
       if (d?.type === "prompt") {
         const rest = w - modeW - width(text);
         const v = prompt.edit.view(rest - 2);
-        this.promptCursor = { row: 2, col: col + width(text) + 1 + v.cursorCol };
+        this.promptCursor = { row, col: col + width(text) + 1 + v.cursorCol };
         s += bg(C.surface0) + fg(C.text) + " " + fit(v.text, rest - 1) + RESET;
       } else {
         this.promptCursor = null;
@@ -2385,7 +2467,7 @@ export class App {
         : v.text;
       s += bg(C.surface1) + fg(C.text) + " " + fg(C.overlay) + label + fg(C.text) + text +
         " ".repeat(Math.max(0, fieldW - 1 - width(label) - width(v.text))) + RESET;
-      this.promptCursor = prompt.edit.selectAll ? null : { row: 2, col: urlStart + 1 + width(label) + v.cursorCol };
+      this.promptCursor = prompt.edit.selectAll ? null : { row, col: urlStart + 1 + width(label) + v.cursorCol };
     } else {
       this.promptCursor = null;
       const url = page ? displayUrl(page) : "";
@@ -2710,6 +2792,7 @@ export class App {
       { label: "Rename space", keys: "Ctrl+B W", keywords: "workspace", run: b("shift+w") },
       { label: "Close space", keys: "Ctrl+B D", keywords: "workspace", run: b("shift+d") },
       { label: "Toggle sidebar", keys: "Ctrl+B b", keywords: "spaces hide show", run: b("b") },
+      { label: "Toggle chromeless", keys: "Ctrl+B F", keywords: "hide show bars tab address fullscreen full page", run: b("shift+f") },
       { label: "Send Ctrl+B to the page", keys: "Ctrl+B Ctrl+B", run: b("ctrl+b", PALETTE_CTRL_B) },
       { label: "Detach", keys: "Ctrl+B d", keywords: "attach background", run: b("d") },
       { label: "Update termium", keys: "Ctrl+B U", keywords: "upgrade restart", run: b("shift+u") },
@@ -3151,6 +3234,23 @@ export class App {
     return s + RESET;
   }
 
+  /** A loading / loaded toast (or a hint): never in place of another toast still showing. */
+  private navToast(text: string, ms: number): void {
+    const t = this.toast;
+    if (t && !t.nav && t.until > Date.now()) return;
+    this.showToast(text, ms);
+    this.toast!.nav = true;
+  }
+
+  /** Chromeless, there's no tab bar to say which tab shows: a toast does. (Call before the redraw: one redraw shows it.) */
+  private sayTab(): void {
+    const space = this.space;
+    const tab = this.tab;
+    if (!this.chromeless || !space || !tab) return;
+    const where = this.spaces.length > 1 ? `${space.name}: ` : "";
+    this.showToast(`${where}Tab ${space.active + 1} of ${space.tabs.length}: ${pageTitle(tab.focused)}`, 1500);
+  }
+
   showToast(text: string, ms = 3000): void {
     this.toast = { text, until: Date.now() + ms };
     if (this.toastTimer) clearTimeout(this.toastTimer);
@@ -3363,6 +3463,9 @@ export class App {
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
+      case "shift+f":
+        this.setChromeless();
+        return;
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
       case "shift+u": this.openUpdate(); return;
@@ -3422,7 +3525,7 @@ export class App {
   /** Changes mode, re-laying out when that shows or hides the sidebar. */
   private setMode(mode: Mode, wasSpaces = this.mode === "spaces"): void {
     this.mode = mode;
-    const sidebarChanged = !this.sidebar && wasSpaces !== (mode === "spaces");
+    const sidebarChanged = (!this.sidebar || this.chromeless) && wasSpaces !== (mode === "spaces");
     if (sidebarChanged) this.relayoutAndRedraw();
     else this.queueChrome();
   }
@@ -3566,7 +3669,7 @@ export class App {
     if (!inside) {
       // A click on the address keeps the draft (as it always did).
       const n = this.navHits;
-      if (row === 2 && n && col >= n.url[0] && col < n.url[1]) return;
+      if (row === this.barRow() && n && col >= n.url[0] && col < n.url[1]) return;
       // Anywhere else closes it; a click on the bars (a tab, a space, a button) also does what it says there.
       this.prompt = null;
       this.queueChrome();
@@ -3795,6 +3898,7 @@ export class App {
   private setZoom(z: number): void {
     this.zoom = Math.max(0.3, Math.min(5, Math.round(z * 100) / 100));
     if (Math.abs(this.zoom - 1) < 0.04) this.zoom = 1;
+    if (this.chromeless) this.showToast(`Zoom ${Math.round(this.zoom * 100)}%`, 1500);
     this.relayoutAndRedraw();
   }
 
@@ -3826,6 +3930,7 @@ export class App {
     if (i < 0 || i >= n || i === space.active) return;
     space.active = i;
     this.prompt = this.prompt?.kind === "rename" ? this.prompt : null;
+    this.sayTab();
     this.relayoutAndRedraw();
   }
 
@@ -3833,6 +3938,7 @@ export class App {
     if (i < 0 || i >= this.spaces.length) return;
     this.activeSpace = i;
     this.prompt = null;
+    this.sayTab();
     this.relayoutAndRedraw();
   }
 
@@ -3907,7 +4013,7 @@ export class App {
     }
 
     if (ev.action === "move" && this.hoverPage && !this.mouseCapture &&
-        ![...this.geom.values()].some((p) => p.item === this.hoverPage && inRect(p.content, col, row))) {
+        ![...this.geom.values()].some((p) => p.item === this.hoverPage && this.onPage(p, col, row))) {
       this.leaveHover();
     }
 
@@ -3927,7 +4033,7 @@ export class App {
 
     if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
 
-    const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
+    const g = [...this.geom.values()].find((p) => this.onPage(p, col, row));
     if (!g) return;
     if (ev.action === "press") {
       if (this.prompt?.kind === "rename") {
@@ -3952,7 +4058,7 @@ export class App {
       } else if (row === this.newSpaceRow) this.newSpace();
       return true;
     }
-    if (row === 1) {
+    if (row === 1 && !this.chromeless) {
       if (this.badgeHit && col >= this.badgeHit[0] && col < this.badgeHit[1]) {
         if (ev.button === 0) this.openUpdate();
         return true;
@@ -3967,7 +4073,7 @@ export class App {
       }
       return true;
     }
-    if (row === 2) {
+    if (row === this.barRow() && (!this.chromeless || this.strip)) {
       const page = this.focused;
       const n = this.navHits;
       if (!page || !n || ev.button !== 0) return true;
@@ -4187,11 +4293,13 @@ export class App {
   agentSelect(page: Page): boolean {
     const loc = this.locate(page);
     if (!loc) return false;
+    const shown = this.tab;
     this.activeSpace = this.spaces.indexOf(loc.space);
     loc.space.active = loc.space.tabs.indexOf(loc.tab);
     loc.tab.focused = page;
     if (loc.tab.zoomed && !leaves(loc.tab.root).includes(page)) loc.tab.zoomed = false;
     if (this.prompt?.kind === "url" || this.prompt?.kind === "rename") this.prompt = null;
+    if (this.tab !== shown) this.sayTab();
     this.relayoutAndRedraw();
     return true;
   }

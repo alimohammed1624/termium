@@ -64,6 +64,7 @@ it) loads a new document they're stale (exit 1): take a new snapshot.
 | `eval JS [TAB]` | run JavaScript in the page (promises awaited); prints JSON |
 | `wait load\|selector CSS\|text TEXT\|url PART [--gone]` | wait until it's there (or gone) |
 | `dialog accept\|dismiss [TEXT]` | answer an alert/confirm/prompt/"Leave page?" |
+| `chromeless [on\|off\|toggle]` | hide or show termium's bars in the terminal (no argument: say which) |
 
 Options: `--tab N` (`-t N`) for commands that act on a tab, `--json` for
 machine-readable output, `--timeout SEC` (default 30). Exit status: 0 done,

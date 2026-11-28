@@ -151,7 +151,7 @@ const CHUNK = 4096;
 /**
  * Transmits a base64 PNG as image `id`, places it at (row, col) scaled to
  * cols x rows cells, then frees the image `replaces` so the swap has no
- * visible gap.
+ * visible gap. With `skipY`, the image's top `skipY` pixels are left out.
  */
 export function drawImage(
   base64Png: string,
@@ -161,13 +161,15 @@ export function drawImage(
   col: number,
   cols: number,
   rows: number,
+  skipY = 0,
 ): string {
   const parts: string[] = [`${ESC}[${row};${col}H`];
+  const crop = skipY > 0 ? `,y=${skipY}` : "";
   for (let i = 0; i < base64Png.length; i += CHUNK) {
     const chunk = base64Png.slice(i, i + CHUNK);
     const more = i + CHUNK < base64Png.length ? 1 : 0;
     const ctrl =
-      i === 0 ? `a=T,f=100,i=${id},p=1,q=2,C=1,c=${cols},r=${rows},m=${more}` : `m=${more}`;
+      i === 0 ? `a=T,f=100,i=${id},p=1,q=2,C=1,c=${cols},r=${rows}${crop},m=${more}` : `m=${more}`;
     parts.push(`${ESC}_G${ctrl};${chunk}${ST}`);
   }
   if (replaces !== null) parts.push(`${ESC}_Ga=d,d=I,i=${replaces},q=2${ST}`);
@@ -262,9 +264,9 @@ export function transmitVirtual(base64Png: string, id: number, cols: number, row
 
 /**
  * Placeholder text showing image placeholderImageId(high, index) in the
- * cols x rows cells at (row, col).
+ * cols x rows cells at (row, col); the first `skip` rows are left as they are.
  */
-export function placeholderCells(high: number, colour: number, rgb: boolean, row: number, col: number, cols: number, rows: number): string {
+export function placeholderCells(high: number, colour: number, rgb: boolean, row: number, col: number, cols: number, rows: number, skip = 0): string {
   const c = Math.min(cols, PLACEHOLDER_MAX);
   const r = Math.min(rows, PLACEHOLDER_MAX);
   const top = DIACRITICS[high & 0xff];
@@ -277,6 +279,6 @@ export function placeholderCells(high: number, colour: number, rgb: boolean, row
   // tmux lets queue for the terminal: it then discards and redraws again,
   // dropping passthrough (our pictures) all the while.
   const bare = "\u{10EEEE}".repeat(Math.max(0, c - 1));
-  for (let y = 0; y < r; y++) s += `${ESC}[${row + y};${col}H\u{10EEEE}${DIACRITICS[y]}${DIACRITICS[0]}${top}${bare}`;
+  for (let y = skip; y < r; y++) s += `${ESC}[${row + y};${col}H\u{10EEEE}${DIACRITICS[y]}${DIACRITICS[0]}${top}${bare}`;
   return s + `${ESC}[0m`;
 }

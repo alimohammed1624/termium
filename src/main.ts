@@ -58,6 +58,8 @@ Options:
   --incognito           use a throwaway profile that is deleted when the session ends
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)
+  --chromeless          hide the tab bar, address bar and sidebar: the page fills the terminal
+                        (the session keeps it; Ctrl+B F or termium ctl chromeless off turns it off)
   --no-update-check     don't check GitHub for a newer termium, nor offer to update
                         (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help
@@ -77,6 +79,7 @@ interface Args extends LaunchOptions {
   /** The launch options given, by flag, for the "already running" message. */
   launchFlags: string[];
   noUpdateCheck: boolean;
+  chromeless: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -85,6 +88,7 @@ function parseArgs(argv: string[]): Args {
     session: DEFAULT_SESSION,
     launchFlags: [],
     noUpdateCheck: false,
+    chromeless: false,
     url: null,
     incognito: false,
     scale: null,
@@ -132,6 +136,7 @@ function parseArgs(argv: string[]): Args {
         sessionGiven = true;
         break;
       case "--no-update-check": args.noUpdateCheck = true; break;
+      case "--chromeless": args.chromeless = true; break;
       // Older termiums (0.3.0 pre-releases) restarted with --restore; a
       // restart snapshot is reopened whenever one is waiting, so it means nothing now.
       case "--restore": break;
@@ -177,6 +182,7 @@ function parseArgs(argv: string[]): Args {
   if (!validSessionName(args.session)) fail(`bad session name "${args.session}" (letters, digits, . _ -; up to 64)`);
   if (!searchFromFlag && !args.search.includes("%s")) fail("TERMIUM_SEARCH needs a %s placeholder");
   if (args.incognito && args.profile) fail("--incognito and --profile can't be used together");
+  if (args.chromeless && args.command !== "open" && args.command !== "attach") fail("--chromeless only applies with a terminal (termium or termium attach)");
   if (args.command !== "open" && args.command !== "server" && args.command !== "start" && args.launchFlags.length) {
     fail(`${args.launchFlags.join(", ")} only apply when starting a session`);
   }
@@ -314,6 +320,7 @@ async function main(): Promise<void> {
         serverArgv: serverArgv(args),
         version: VERSION,
         updateCheck: checkEnabled(args.noUpdateCheck),
+        chromeless: args.chromeless,
         restartArgv,
         selfArgv: selfArgv(),
       });

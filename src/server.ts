@@ -102,6 +102,8 @@ export interface Hello {
   url?: string | null;
   /** This terminal wants update news: the session checks for a newer termium while it's attached. */
   updateCheck?: boolean;
+  /** Turn chromeless mode on (`termium --chromeless`); the session keeps it until it's turned off. */
+  chromeless?: boolean;
   /** How to run this terminal's termium (its binary, or bun and the script): a restart into it runs that. */
   argv?: string[];
   /**
@@ -511,6 +513,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
       app.setUpdatesShown((lastHello ?? h).updateCheck === true && !!client);
+      // (Set before anything is drawn; set again once a restart snapshot, which has its own, is reopened.)
+      if ((lastHello ?? h).chromeless === true) app.chromeless = true;
       app.attach(terminalOf(lastHello ?? h));
       if (!client) app.detach();
       log(`start ${bin} dsf=${app.dsf}`);
@@ -540,6 +544,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         return;
       }
       appReady = true;
+      // (After the restart snapshot, whose setting it overrides.)
+      if (client && lastHello?.chromeless === true) app.setChromeless(true);
       app.flushEarlyInput();
       for (const url of pendingUrls.splice(0)) app.openTab(url);
       // The UI is up: now look for a newer termium (never before, never in the way).
@@ -833,6 +839,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       } else {
         // Whether this terminal shows update news is settled before anything is drawn for it.
         app.setUpdatesShown(h.updateCheck === true);
+        // (Before attaching: the first thing drawn is chromeless.)
+        if (h.chromeless === true && appReady) app.setChromeless(true);
         app.attach(terminalOf(h));
         if (h.url) {
           if (appReady) app.openTab(h.url);
