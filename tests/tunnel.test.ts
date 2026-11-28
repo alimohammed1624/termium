@@ -62,6 +62,20 @@ test("a refused login fails the start with ssh's reason and what to do", async (
   await t.stop();
 });
 
+test("ssh that runs but never opens its proxy fails the start, and is stopped", async () => {
+  const t = new Tunnel("noforward", () => {});
+  t.openTimeoutMs = 700;
+  await expect(t.start()).rejects.toThrow(/SOCKS proxy never opened/);
+  await t.stop();
+});
+
+test("user ssh config can't send ssh to the background or drop the forward", () => {
+  const a = sshArgv("h", 1);
+  expect(a).toContain("ForkAfterAuthentication=no");
+  expect(a).toContain("ClearAllForwardings=no");
+  expect(a.indexOf("ClearAllForwardings=no")).toBeLessThan(a.indexOf("h"));
+});
+
 test("the tunnel comes up on a free port, reconnects on the same port after a drop, and stops", async () => {
   process.env.FAKE_SSH_EXIT_MS = "600";
   const states: string[] = [];

@@ -67,6 +67,10 @@ export function sshArgv(dest: string, port: number): string[] {
     // Its own connection: a shared master would keep the forward (and hide its loss) after ssh exits.
     "-o", "ControlMaster=no",
     "-o", "ControlPath=none",
+    // Settings in ~/.ssh/config that would undo the above (the first value ssh reads wins):
+    // going to the background (out of termium's reach), or dropping the -D forward.
+    "-o", "ForkAfterAuthentication=no",
+    "-o", "ClearAllForwardings=no",
     dest,
   ];
 }
@@ -99,6 +103,7 @@ function portOpen(port: number): Promise<boolean> {
 
 export type TunnelState = "up" | "down";
 
+
 /**
  * The session's SSH tunnel. start() opens it (or throws why it couldn't);
  * if it drops later, it's reopened on the same port (the browser's proxy
@@ -113,6 +118,8 @@ export class Tunnel {
   private stopped = false;
   private retry: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
+  /** How long ssh may take to open its proxy (its ConnectTimeout is 15 s, then the login). */
+  openTimeoutMs = 45_000;
 
   constructor(
     readonly dest: string,
@@ -152,7 +159,9 @@ export class Tunnel {
       await Promise.race([reading, Bun.sleep(500)]);
       return lastLines(err) || (proc.signalCode || (proc.exitCode ?? 0) > 128 ? "ssh was stopped" : proc.exitCode === 0 ? "ssh ended" : `ssh exited with code ${proc.exitCode}`);
     });
-    // Ready once something answers on the port while this ssh still runs.
+    // Ready once something answers on the port while this ssh still runs; given up
+    // on (ssh stopped) if it never does, past ssh's own ConnectTimeout and a login.
+    const deadline = Date.now() + this.openTimeoutMs;
     for (;;) {
       const gone = await Promise.race([exited, Bun.sleep(150).then(() => null)]);
       if (gone !== null || proc.exitCode !== null) {
@@ -166,6 +175,12 @@ export class Tunnel {
         throw new Error("stopped");
       }
       if (await portOpen(this.port)) break;
+      if (Date.now() > deadline) {
+        this.lastError = `ssh connected, but its SOCKS proxy never opened on 127.0.0.1:${this.port}`;
+        if (this.proc === proc) this.proc = null;
+        proc.kill();
+        throw new Error(this.lastError);
+      }
     }
     this.state = "up";
     this.attempt = 0;
