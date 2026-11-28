@@ -33,6 +33,13 @@ describe("hint footer", () => {
     expect(layoutFooter(plain, first - 1).length).toBe(0);
   });
 
+  test("the footer toggles with ^B i; ^B f is left to find in page", () => {
+    const toggles = [...FOOTER_ACTIONS.normal, ...FOOTER_ACTIONS.prefix].filter((a) => a.label === "Hide" || a.label === "Footer");
+    expect(toggles.map((a) => [a.key, a.combo])).toEqual([["^Bi", "ctrl+b i"], ["i", "i"]]);
+    const combos = Object.values(FOOTER_ACTIONS).flat().map((a) => a.combo);
+    expect(combos).not.toContain("ctrl+b f");
+    expect(combos).not.toContain("f");
+  });
   test("short of room, pinned actions stay and unpinned ones go from the end", () => {
     const prefix = FOOTER_ACTIONS.prefix;
     const pinned = prefix.filter((a) => a.pin);

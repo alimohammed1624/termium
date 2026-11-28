@@ -306,7 +306,7 @@ const HELP: [string, string][] = [
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
-  ["f", "hint footer: on / only with ^B / off"],
+  ["i", "hint footer: on / only with ^B / off"],
   ["q", "quit"],
   ["?", "this help"],
 ];
@@ -1652,7 +1652,7 @@ export class App {
     return this.footerMode === "auto" && (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces");
   }
 
-  /** ^B f: the hint footer goes on → only with ^B → off → on, remembered for later sessions. */
+  /** ^B i: the hint footer goes on → only with ^B → off → on, remembered for later sessions. */
   private cycleFooter(): void {
     this.footerMode = FOOTER_MODES[(FOOTER_MODES.indexOf(this.footerMode) + 1) % FOOTER_MODES.length]!;
     const saved = !this.opts.footerFile || saveFooterMode(this.opts.footerFile, this.footerMode);
@@ -3243,7 +3243,7 @@ export class App {
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
       case "shift+u": this.openUpdate(); return;
-      case "f": this.cycleFooter(); return;
+      case "i": this.cycleFooter(); return;
       case "?":
         this.mode = "help";
         this.fullRedraw();

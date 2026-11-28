@@ -71,7 +71,7 @@ export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
     act("Reload", "^R", "ctrl+r"),
     pre("Spaces", "w"),
     pin(pre("Keys", "?")),
-    pin(pre("Hide", "f")),
+    pin(pre("Hide", "i")),
   ],
   prefix: [
     key("Split→", "v"),
@@ -81,7 +81,7 @@ export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
     needs("panes", key("Zoom", "z")),
     needs("panes", key("Resize", "r")),
     key("Spaces", "w"),
-    pin(key("Footer", "f")),
+    pin(key("Footer", "i")),
     pin(key("Keys", "?")),
     pin(key("Cancel", "Esc", "escape")),
     needs("tabs", key("Next", "n")),
@@ -112,11 +112,11 @@ export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
   leave: [key("Leave", "Enter"), key("Stay", "Esc", "escape")],
 };
 
-/** Shown when ^B f picks a mode. */
+/** Shown when ^B i picks a mode. */
 export const FOOTER_TOAST: Record<FooterMode, string> = {
-  on: "Hint footer on (^B f: only with ^B)",
-  auto: "Hint footer shows only while ^B waits for a key (^B f: off)",
-  off: "Hint footer off (^B f: on)",
+  on: "Hint footer on (^B i: only with ^B)",
+  auto: "Hint footer shows only while ^B waits for a key (^B i: off)",
+  off: "Hint footer off (^B i: on)",
 };
 
 export const SEPARATOR = "·";

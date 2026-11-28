@@ -2,7 +2,7 @@
 
 In each context (normal, ^B prefix, resize, spaces picker, help, a page's
 dialogs, the address bar) checks what the footer lists, clicks each action
-with real mouse sequences and checks what it did; then that ^B f takes the
+with real mouse sequences and checks what it did; then that ^B i takes the
 row back (the page grows by one row), that with the footer only shown with
 ^B the hints take the address line, that off is off, and that the choice
 is kept for the next session.
@@ -105,7 +105,7 @@ try:
 
     # ---- someone who never chose: the footer is on, under the panes
     check("normal: footer lists the common actions with their keys",
-          all(s in foot() for s in ("Address ^L", "New tab ^T", "Split ^Bv", "Close ^W", "Back Alt←", "Reload ^R", "Spaces ^Bw", "Keys ^B?", "Hide ^Bf")), foot())
+          all(s in foot() for s in ("Address ^L", "New tab ^T", "Split ^Bv", "Close ^W", "Back Alt←", "Reload ^R", "Spaces ^Bw", "Keys ^B?", "Hide ^Bi")), foot())
     h_on = value("innerHeight")
     check("the page is one row short of the panes' full height", h_on == (ROWS - 3) * 20, h_on)
 
@@ -144,13 +144,13 @@ try:
     # Keys: help, whose footer has Close
     click_hint("Keys ^B?")
     check("Keys shows help, with Close in the footer", wait(lambda: "edit address" in t.text() and "Close Esc" in foot()), foot())
-    check("help lists ^B f", "hint footer: on / only with ^B / off" in t.text(), t.text())
+    check("help lists ^B i", "hint footer: on / only with ^B / off" in t.text(), t.text())
     click_hint("Close Esc")
     check("Close puts help away", wait(lambda: "edit address" not in t.text() and "Address ^L" in foot()))
 
     # ---- ^B prefix
     t.key("ctrl+b")
-    want = ("Split→ v", "Split↓ -", "New tab c", "Close x", "Spaces w", "Footer f", "Keys ?", "Cancel Esc", "Sidebar b")
+    want = ("Split→ v", "Split↓ -", "New tab c", "Close x", "Spaces w", "Footer i", "Keys ?", "Cancel Esc", "Sidebar b")
     check("prefix: footer lists the prefix keys", wait(lambda: all(s in foot() for s in want)), foot())
     check("...but not Zoom, Resize, Next or Prev with one pane and one tab",
           not any(s in foot() for s in ("Zoom z", "Resize r", "Next n", "Prev p")), foot())
@@ -276,12 +276,12 @@ try:
     t.mouse(*px(60, 10), action="release"); time.sleep(0.5)
     check("closing help by its footer chip: its drag and release don't reach the page", "edit address" not in t.text() and value("window.ev") == [], value("window.ev"))
 
-    # ---- ^B f: the row goes back to the page
+    # ---- ^B i: the row goes back to the page
     ctl("eval", "window.ups = []; addEventListener('mouseup', (e) => ups.push(e.clientY)); addEventListener('mousedown', (e) => ups.push('down')); 1")
-    click_hint("Hide ^Bf")
+    click_hint("Hide ^Bi")
     check("Hide takes the footer away", wait(lambda: "Address ^L" not in foot()), foot())
     check("...and the page grows by one row", wait(lambda: value("innerHeight") == h_on + 20), (h_on, value("innerHeight")))
-    check("...and says how to get it back", "^B f" in url_line(), url_line())
+    check("...and says how to get it back", "^B i" in url_line(), url_line())
     time.sleep(0.5)
     check("...and the click's release doesn't reach the page now under it", value("window.ups") == [], value("window.ups"))
     # Only with ^B: the hints take the address line while a key is awaited; the page keeps its size.
@@ -298,38 +298,41 @@ try:
     check("...and work", wait(lambda: 0 < sep_col() < c0), (c0, sep_col()))
     click_hint("Done Esc", row=2)
     check("Done leaves resize mode; the address is back", wait(lambda: "Left h" not in url_line() and "←" in url_line()), url_line())
-    t.key("ctrl+b"); time.sleep(0.3); click_hint("Footer f", row=2)
-    check("Footer f turns hints off", wait(lambda: "footer off" in url_line()), url_line())
+    t.key("ctrl+b"); time.sleep(0.3); click_hint("Footer i", row=2)
+    check("Footer i turns hints off", wait(lambda: "footer off" in url_line()), url_line())
     t.key("ctrl+b")
     check("off: ^B shows no hints", wait(lambda: " ^B " in url_line()) and "Split→" not in url_line() and "Split" not in foot(), url_line())
     t.key("escape"); time.sleep(0.4)
     saved = json.load(open(os.path.join(state, "termium", "footer.json")))
     check("the choice is saved", saved == {"footer": "off"}, saved)
     h_off = value("innerHeight")
-    t.key("ctrl+b"); time.sleep(0.2); t.key("f")
-    check("^B f from off turns it back on", wait(lambda: "Address ^L" in foot()), foot())
+    t.key("ctrl+b"); time.sleep(0.2); t.key("f"); time.sleep(0.8)
+    check("^B f doesn't touch the footer", "Address ^L" not in foot() and json.load(open(os.path.join(state, "termium", "footer.json"))) == {"footer": "off"}, foot())
+    t.key("escape"); time.sleep(0.3)
+    t.key("ctrl+b"); time.sleep(0.2); t.key("i")
+    check("^B i from off turns it back on", wait(lambda: "Address ^L" in foot()), foot())
     check("...and the page is one row shorter again", wait(lambda: value("innerHeight") == h_off - 20), (h_off, value("innerHeight")))
 
     # ---- 140 columns with the sidebar: the prefix's essentials still fit (the rest go first)
     t.resize(140, ROWS); time.sleep(1.5)
     t.key("ctrl+b")
-    check("140 columns: ^B still shows Footer, Keys and Cancel", wait(lambda: all(s in foot() for s in ("Footer f", "Keys ?", "Cancel Esc"))), foot())
+    check("140 columns: ^B still shows Footer, Keys and Cancel", wait(lambda: all(s in foot() for s in ("Footer i", "Keys ?", "Cancel Esc"))), foot())
     t.key("escape"); time.sleep(0.4)
     # ---- 80 columns, one pane: the prefix keeps its way out and to everything; no-op actions aren't offered
     t.key("ctrl+t"); time.sleep(0.8); t.key("escape"); time.sleep(0.5)
     t.resize(80, ROWS); time.sleep(1.5)
     t.key("ctrl+b")
     check("80 columns: ^B shows Footer, Keys and Cancel, not Zoom or Resize",
-          wait(lambda: all(s in foot() for s in ("Footer f", "Keys ?", "Cancel Esc"))) and "Zoom" not in foot() and "Resize" not in foot(), foot())
+          wait(lambda: all(s in foot() for s in ("Footer i", "Keys ?", "Cancel Esc"))) and "Zoom" not in foot() and "Resize" not in foot(), foot())
     t.key("escape"); time.sleep(0.4)
-    check("80 columns: the normal footer keeps Keys and Hide", "Keys ^B?" in foot() and "Hide ^Bf" in foot(), foot())
+    check("80 columns: the normal footer keeps Keys and Hide", "Keys ^B?" in foot() and "Hide ^Bi" in foot(), foot())
     # ---- narrow: what doesn't fit is left out, never cut mid-action
     t.resize(60, ROWS); time.sleep(1.5)
     f = foot()
     t.key("ctrl+b"); time.sleep(0.2); t.key("w"); time.sleep(0.6)
     check("60 columns, two spaces: the picker keeps Open, New and Cancel", all(x in foot() for x in ("Open Enter", "New N", "Cancel Esc")), foot())
     t.key("escape"); time.sleep(0.4)
-    check("narrow: whole actions only, Keys and Hide kept", "Address ^L" in f and "New tab" not in f and f.rstrip().endswith("Keys ^B? · Hide ^Bf"), f)
+    check("narrow: whole actions only, Keys and Hide kept", "Address ^L" in f and "New tab" not in f and f.rstrip().endswith("Keys ^B? · Hide ^Bi"), f)
     t.resize(COLS, ROWS); time.sleep(1)
     # ---- a short terminal: the footer never hides a pane
     for _ in range(2):

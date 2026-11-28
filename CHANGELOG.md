@@ -10,7 +10,7 @@ All notable changes to termium are documented here. The format follows
 - A hint footer: one clickable row under the panes listing the actions
   that fit what you're doing (browsing, `Ctrl+B`, resize mode, the space
   picker, help, the address bar, a page's dialog), each with its key.
-  `Ctrl+B f` switches it between on, only while `Ctrl+B` waits for a key
+  `Ctrl+B i` switches it between on, only while `Ctrl+B` waits for a key
   (the row goes back to the page), and off; the choice is kept
   (`TERMIUM_FOOTER` overrides it).
 
