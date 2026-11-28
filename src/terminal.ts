@@ -287,6 +287,19 @@ export function transmitVirtual(base64Png: string, id: number, cols: number, row
 }
 
 /**
+ * Placeholder text for part of one row of an image: `n` cells at (row,
+ * col) showing its row `imgRow` from column `imgCol` on. The first cell
+ * carries all its marks, so it doesn't depend on the cell to its left (text
+ * drawn over the image's cells, a menu, breaks that chain).
+ */
+export function placeholderSpan(high: number, colour: number, rgb: boolean, row: number, col: number, imgRow: number, imgCol: number, n: number): string {
+  if (n <= 0 || imgRow >= PLACEHOLDER_MAX || imgCol >= PLACEHOLDER_MAX) return "";
+  const fg = rgb ? `38;2;${(colour >> 16) & 0xff};${(colour >> 8) & 0xff};${colour & 0xff}` : `38;5;${colour & 0xff}`;
+  const bare = "\u{10EEEE}".repeat(Math.max(0, Math.min(n, PLACEHOLDER_MAX - imgCol) - 1));
+  return `${ESC}[0m${ESC}[${fg}m${ESC}[${row};${col}H\u{10EEEE}${DIACRITICS[imgRow]}${DIACRITICS[imgCol]}${DIACRITICS[high & 0xff]}${bare}${ESC}[0m`;
+}
+
+/**
  * Placeholder text showing image placeholderImageId(high, index) in the
  * cols x rows cells at (row, col).
  */

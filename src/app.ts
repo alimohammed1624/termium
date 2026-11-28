@@ -34,6 +34,7 @@ import {
   out,
   placeholderCells,
   placeholderImageId,
+  placeholderSpan,
   setClipboard,
   transmitVirtual,
 } from "./terminal";
@@ -1021,6 +1022,7 @@ export class App {
     this.clearForeign(page);
     // An open menu may be about this page or its tab or space (redrawn away below).
     this.menu = null;
+    this.phTiles.delete(page);
     if (this.hoverPage === page) this.hoverPage = null;
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
@@ -2151,8 +2153,9 @@ export class App {
       s += transmitVirtual(data, ids[i]!, cols, rows);
       if (moved) s += placeholderCells(this.phHigh, this.phColour(indexes[i]!), this.phRgb, t.row, t.col, cols, rows);
     });
+    this.phTiles.set(page, tiles.map((t, i) => ({ row: t.row, col: t.col, cols: t.cols, rows: t.rows, index: indexes[i]! })));
     // Cells written just now over an open menu: the menu goes back on top.
-    if (moved && this.menu) s += this.menu.draw(MENU_STYLE);
+    if (moved && this.menu) s += this.drawMenu();
     out(this.sync(s + this.cursorSeq()), done);
     page.imageIds = ids;
     page.placed = { ...r };
@@ -2220,7 +2223,7 @@ export class App {
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
-    if (this.menu) s += this.menu.draw(MENU_STYLE);
+    if (this.menu) s += this.drawMenu();
     out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
@@ -3057,6 +3060,13 @@ export class App {
     }
     s += at(top + boxH - 2, left) + panel + fit("", boxW);
     s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(`  ${footer}`, boxW) + RESET;
+    // Its keys ("u update · l later") click too: in a short terminal the choice lines may be cut.
+    let x = left + 2;
+    for (const seg of footer.split(" · ")) {
+      const k = /^([a-z]) /.exec(seg)?.[1];
+      if (k && x + width(seg) <= left + boxW) this.clicks.add(top + boxH - 1, x, width(seg), (b) => b === 0 && this.updateKey(letterKey(k), k));
+      x += width(seg) + 3;
+    }
     return s + RESET;
   }
 
@@ -3742,7 +3752,8 @@ export class App {
     }
     if (this.mode === "update") {
       // A click on a choice answers it; anywhere else puts the box away (unanswered; the notice stays).
-      if (ev.action === "press" && !this.clicks.click(col, row, ev.button)) this.closeUpdate(this.updateBox?.state === "failed");
+      const inBox = row > TOP_ROWS && col >= this.mainCol(); // (the chrome around it isn't clickable meanwhile)
+      if (ev.action === "press" && !(inBox && this.clicks.click(col, row, ev.button))) this.closeUpdate(this.updateBox?.state === "failed");
       return;
     }
 
@@ -3923,6 +3934,31 @@ export class App {
   // Right-click menus (tabs, spaces, pane headers, pages) and the ≡ menu:
   // every action has a click, and each shows its keys.
 
+  /** Where each page's placeholder images are (tmux): see drawMenu. */
+  private phTiles = new Map<Page, (Rect & { index: number })[]>();
+
+  /**
+   * The open menu. With placeholders, a placeholder cell carries on from the
+   * one to its left: the cells right of the menu (on its rows) are written
+   * again, each row starting from an explicit column.
+   */
+  private drawMenu(): string {
+    const m = this.menu!;
+    let s = m.draw(MENU_STYLE);
+    if (!this.placeholders) return s;
+    const right = m.rect.col + m.rect.cols;
+    for (const page of this.geom.keys()) {
+      for (const t of this.phTiles.get(page) ?? []) {
+        if (right <= t.col || right >= t.col + t.cols) continue;
+        const colour = this.phColour(t.index);
+        for (let row = Math.max(t.row, m.rect.row); row < Math.min(t.row + t.rows, m.rect.row + m.rect.rows); row++) {
+          s += placeholderSpan(this.phHigh, colour, this.phRgb, row, right, row - t.row, right - t.col, t.col + t.cols - right);
+        }
+      }
+    }
+    return s;
+  }
+
   private openMenu(entries: MenuEntry[], point: { col: number; row: number }, opts: { title?: string; align?: "left" | "right" } = {}): void {
     if (!this.attached || this.covered()) return;
     if (this.mode !== "normal") this.setMode("normal");
@@ -4081,8 +4117,11 @@ export class App {
   private paneMenu(page: Page, col: number, row: number): void {
     this.focusPage(page);
     const tab = this.tab;
+    // On its pane, whichever pane has focus by then (an agent may have moved it).
     const live = (run: () => void) => () => {
-      if (this.pages.has(page.sessionId) && this.focused === page) run();
+      if (!this.pages.has(page.sessionId) || !this.tab || !leaves(this.tab.root).includes(page)) return;
+      this.focusPage(page);
+      run();
     };
     this.openMenu([
       { label: "Split right", key: "^B v", run: live(() => this.chromeAction("v")) },
@@ -4104,7 +4143,7 @@ export class App {
   private async pageMenu(page: Page, released: Promise<unknown>, col: number, row: number): Promise<void> {
     const seq = ++this.menuSeq;
     // (Linux fires contextmenu as the button goes down: from the press on.)
-    const pressed = this.lastClick.time - 250;
+    const pressed = this.lastClick.time - 20;
     const t = this.ticket();
     await released;
     // The probe notes the click once every listener has run (a timer after it).

@@ -200,8 +200,16 @@ try:
     check("a newer release is announced", t.wait_text("99.0.0", 20))
     t.click_cell(159, 2); time.sleep(0.6); click_text("Update termium"); time.sleep(1)
     check("≡ → Update termium opens the update box", t.wait_text("skip this version", 5))
-    click_text("skip this version"); time.sleep(1.5)
-    check("clicking a choice in the update box answers it", find("skip this version") is None and t.wait_text("skipped", 5))
+    tabs_before = t.line(1).count("menu test")
+    t.click_cell(t.line(1).find("×") + 1, 1); time.sleep(1)
+    check("with the update box open, the tab bar's × doesn't act (the click only puts the box away)",
+          t.line(1).count("menu test") == tabs_before and find("skip this version") is None, t.line(1))
+    # A short terminal cuts the choice lines: the footer's keys click instead.
+    t.resize(160, 11); time.sleep(1.5)
+    t.key("ctrl+b"); t.key("shift+u"); time.sleep(1)  # (opening it isn't what's tested here)
+    check("short terminal: the update box footer shows its keys", t.wait_text("s skip", 5))
+    click_text("s skip"); time.sleep(1.5)
+    check("clicking a key in the update box footer answers it", find("s skip") is None and t.wait_text("skipped", 5))
 finally:
     t.close()
     rsrv.terminate()

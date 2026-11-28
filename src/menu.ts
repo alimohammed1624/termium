@@ -234,6 +234,7 @@ export const CONTEXT_PROBE = String.raw`(() => {
       last = { at: Date.now(), prevented: e.defaultPrevented, link: a ? a.href : "", selection: String(getSelection()).length > 0 };
     });
   }, true);
-  // Each right-click is answered once: reading it forgets it.
-  window.__termiumContext = () => { const l = last; last = null; return l; };
+  // (Kept, not taken on read: termium picks the newest since its press, and
+  // a scan for an earlier click mustn't take the answer for a later one.)
+  window.__termiumContext = () => last;
 })()`;
