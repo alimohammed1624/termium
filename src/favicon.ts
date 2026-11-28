@@ -20,6 +20,11 @@ const MAX_BYTES = 512 * 1024;
 const MAX_TRIES = 4;
 /** How long one icon may take: one that never comes mustn't hold up the next. */
 const TRY_MS = 4000;
+/**
+ * An icon that took too long isn't asked for again for this long: its
+ * request can't be cancelled, and each would hold a connection to its host.
+ */
+const STALLED_MS = 60_000;
 
 /**
  * Run in an isolated world of the page (its scripts can't interfere): the
@@ -158,6 +163,8 @@ interface PageIcons {
 export class Favicons {
   private pages = new WeakMap<IconPage, PageIcons>();
   private serial = 0;
+  /** Icons that took too long, and until when they're skipped. */
+  private stalled = new Map<string, number>();
 
   constructor(
     private cdp: CDP,
@@ -180,21 +187,31 @@ export class Favicons {
       const found = await this.find(page);
       if (found && st.gen === g) {
         st.candidates = found.key;
+        // The page no longer links the icon shown: a dot until its own is ready.
+        if (st.icon && !found.hrefs.includes(st.icon.url) && found.fallback !== st.icon.url) {
+          st.icon = null;
+          this.changed();
+        }
         // The best links, and /favicon.ico in any case.
         const tries = found.hrefs.slice(0, MAX_TRIES);
         if (found.fallback && !tries.includes(found.fallback)) {
           if (tries.length === MAX_TRIES) tries.pop();
           tries.push(found.fallback);
         }
+        const now = Date.now();
+        for (const [url, until] of this.stalled) if (until <= now) this.stalled.delete(url);
         for (const url of tries) {
           if (st.gen !== g) break;
+          if (this.stalled.has(url)) continue;
           // One that can't be fetched or decoded (or takes too long): the next.
           let timer: ReturnType<typeof setTimeout> | undefined;
+          let late = false;
           const png = await Promise.race([
             this.render(page, url, w, h).catch(() => null),
-            new Promise<null>((r) => (timer = setTimeout(() => r(null), TRY_MS))),
+            new Promise<null>((r) => (timer = setTimeout(() => ((late = true), r(null)), TRY_MS))),
           ]);
           clearTimeout(timer);
+          if (late) this.stalled.set(url, Date.now() + STALLED_MS);
           if (png) {
             icon = { site: siteOf(found.href), url, png, w, h, serial: ++this.serial };
             break;

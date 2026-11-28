@@ -76,6 +76,8 @@ SLOW = {
     # A linked /favicon.ico (32px) outranks a 16px png.
     "ranked": '<link rel="icon" sizes="16x16" href="/red16.png"><link rel="icon" sizes="32x32" href="/favicon.ico">',
     # The icon changes while the first lookup still waits: the change isn't lost.
+    # Same site as "ranked", but its own links all hang: no leftover icon meanwhile.
+    "allhang": '<link rel="icon" href="/hang3.png"><link rel="icon" href="/hang4.png">',
     "swapbusy": '<link rel="icon" href="/hang2.png"><script>setTimeout(() => { document.querySelector("link").href = "/red16.png"; document.title = "swapbusy changed"; }, 1000)</script>',
 }
 for name, head in SLOW.items():
@@ -234,6 +236,20 @@ try:
         check("a linked 32px /favicon.ico outranks a 16px png", t.wait_for(lambda: near(tab_icon("ranked"), (60, 120, 230)), 8), tab_icon("ranked"))
         ok = t.wait_for(lambda: near(tab_icon("swapbusy changed"), (230, 60, 60)), 15)
         check("an icon changed during a lookup still shows", ok, (tab_icon("swapbusy changed"), t.line(1)))
+
+        # Tab 3 (red, a link the new page lacks) goes to a same-site page whose links hang.
+        t.key("ctrl+b"); t.key("3"); time.sleep(0.5)
+        t.key("ctrl+l"); time.sleep(0.3); t.type(curl("allhang")); t.key("enter")
+        t.wait_for(lambda: "allhang page" in t.line(1) and "◌" not in t.line(1), 10)
+        time.sleep(1.5)
+        check("same site, new links: no leftover icon while they're fetched", tab_icon("allhang") is None, tab_icon("allhang"))
+        check("...then /favicon.ico", t.wait_for(lambda: near(tab_icon("allhang"), (60, 120, 230)), 12), tab_icon("allhang"))
+        # Reloaded: the links that hung are skipped for a while, so it shows at once.
+        t0 = time.time()
+        t.key("ctrl+r")
+        t.wait_for(lambda: "◌" in t.line(1), 3); t.wait_for(lambda: "◌" not in t.line(1), 10)
+        ok = t.wait_for(lambda: near(tab_icon("allhang"), (60, 120, 230)), 10)
+        check("icons that hung aren't waited for again", ok and time.time() - t0 < 4, round(time.time() - t0, 1))
 
     # Through tmux (unicode placeholders), no pictures in the chrome: dots.
     with Term(["bun", os.path.join(ROOT, "src/main.ts"), "--incognito"], cols=200, rows=40,
