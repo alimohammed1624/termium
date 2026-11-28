@@ -37,7 +37,7 @@ export interface Bar {
 }
 
 function eased(l: Load, now: number): number {
-  const cap = Math.max(LOADING_CAP, l.base);
+  const cap = LOADING_CAP;
   return cap - (cap - l.base) * Math.exp(-Math.max(0, now - l.since) / l.tau);
 }
 
@@ -58,14 +58,16 @@ export function bar(l: Load | undefined, now: number): Bar | null {
 /**
  * A load starts at `now`. One already running carries on. One that ended
  * so recently its bar is still filling (a redirect, or a stop and start of
- * the same navigation) picks up from where the bar is, rather than jumping
- * back to empty; otherwise the bar starts again from nothing.
+ * the same navigation) picks up from where the bar is (no further than the
+ * cap: it is still loading), rather than jumping back to empty; otherwise
+ * the bar starts again from nothing. Either way the stop button's minimum
+ * time counts from now.
  */
 export function started(l: Load | undefined, now: number): Load {
   if (l && !l.end) return l;
   if (l && now - l.end < FILL_MS) {
-    const fill = bar(l, now)!.fill;
-    return { start: l.start, since: now, base: fill, tau: TRICKLE_MS, end: 0, from: 0 };
+    const fill = Math.min(LOADING_CAP, bar(l, now)!.fill);
+    return { start: now, since: now, base: fill, tau: TRICKLE_MS, end: 0, from: 0 };
   }
   return { start: now, since: now, base: 0, tau: TRICKLE_MS, end: 0, from: 0 };
 }

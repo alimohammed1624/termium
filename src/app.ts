@@ -1240,7 +1240,15 @@ export class App {
           }, 250);
         }
       })
-      .catch((e) => this.showToast(String(e)));
+      .catch((e) => {
+        // Refused outright (an invalid address): no load events will end it.
+        if (page.navSeq === seq) {
+          page.loading = false;
+          page.load = finished(page.load, Date.now());
+          this.queueChrome();
+        }
+        this.showToast(String(e));
+      });
     this.queueChrome();
   }
 

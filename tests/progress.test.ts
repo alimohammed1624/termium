@@ -98,3 +98,22 @@ describe("underline", () => {
     expect(s).toBe(`${ON}🔒a${OFF}b`);
   });
 });
+
+describe("a load starting while the last one fills", () => {
+  test("holds the stop button for its own minimum", () => {
+    const done = finished(started(undefined, 0), 1000)!;
+    const again = started(done, 1000 + FILL_MS / 2);
+    const back = finished(again, 1000 + FILL_MS / 2 + 10);
+    expect(holdsStop(back, 1000 + FILL_MS / 2 + MIN_STOP_MS - 1)).toBe(true);
+    expect(holdsStop(back, 1000 + FILL_MS / 2 + MIN_STOP_MS)).toBe(false);
+  });
+
+  test("never shows more than the cap while it loads", () => {
+    const done = finished(started(undefined, 0), 1000)!;
+    const late = 1000 + FILL_MS - 5; // the bar is nearly full here
+    expect(bar(done, late)!.fill).toBeGreaterThan(LOADING_CAP);
+    const again = started(done, late);
+    for (const t of [late, late + 100, late + 10_000]) expect(bar(again, t)!.fill).toBeLessThanOrEqual(LOADING_CAP);
+    expect(bar(parsed(again, late + 50), late + 10_000)!.fill).toBeLessThanOrEqual(LOADING_CAP);
+  });
+});
