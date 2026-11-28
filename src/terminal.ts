@@ -175,6 +175,32 @@ export function drawImage(
 }
 
 /**
+ * Like drawImage, but shows only some pieces of the picture: each piece is
+ * a cell rectangle and the part of the picture (in pixels) drawn there.
+ * Used to leave a hole for text drawn over a page (an open menu): text
+ * under a picture would be hidden.
+ */
+export function drawImagePieces(
+  base64Png: string,
+  id: number,
+  replaces: number | null,
+  pieces: { row: number; col: number; cols: number; rows: number; x: number; y: number; w: number; h: number }[],
+): string {
+  const parts: string[] = [];
+  for (let i = 0; i < base64Png.length; i += CHUNK) {
+    const chunk = base64Png.slice(i, i + CHUNK);
+    const more = i + CHUNK < base64Png.length ? 1 : 0;
+    parts.push(`${ESC}_G${i === 0 ? `a=t,f=100,i=${id},q=2,m=${more}` : `m=${more}`};${chunk}${ST}`);
+  }
+  pieces.forEach((p, k) => {
+    parts.push(`${ESC}[${p.row};${p.col}H`);
+    parts.push(`${ESC}_Ga=p,i=${id},p=${k + 1},q=2,C=1,c=${p.cols},r=${p.rows},x=${p.x},y=${p.y},w=${p.w},h=${p.h}${ST}`);
+  });
+  if (replaces !== null) parts.push(`${ESC}_Ga=d,d=I,i=${replaces},q=2${ST}`);
+  return parts.join("");
+}
+
+/**
  * Synchronized output (DECSET 2026): the terminal shows what comes between
  * these two at once, so a redraw never shows a cleared screen or a pane
  * whose old picture is gone and new one not yet there. Terminals without
