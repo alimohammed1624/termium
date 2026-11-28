@@ -16,7 +16,8 @@ not character art, so text is sharp and video, canvas and WebGL work.
 ## Features
 
 - **Detachable sessions**, like tmux: the browser runs in a background
-  session; detach with `Ctrl+B d` and attach again from any terminal, at
+  session; detach with `Ctrl+B d` (the [leader](#tmux-and-herdr), then
+  `d`) and attach again from any terminal, at
   any size, with every page as you left it.
 - **Works inside tmux and herdr** (see [tmux and herdr](#tmux-and-herdr)).
 - **Agents can drive it while you watch** (see [Agents](#agents)):

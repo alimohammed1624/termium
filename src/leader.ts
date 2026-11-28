@@ -78,8 +78,13 @@ function herdrPrefix(env: NodeJS.ProcessEnv): string[] {
   const path = env.HERDR_CONFIG_PATH || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config"), "herdr", "config.toml");
   try {
     const prefix = (Bun.TOML.parse(readFileSync(path, "utf8")) as { keys?: { prefix?: unknown } }).keys?.prefix;
-    // (herdr takes an empty or "none" prefix for a bad one: its default.)
-    if (typeof prefix === "string") return [hostKey(prefix) ?? DEFAULT_LEADER];
+    // herdr takes a prefix it can't read ("", "none", a typo) for its
+    // default, Ctrl+B: so does termium, for any that isn't plainly a key
+    // (modifiers, then a character, Space or an F-key).
+    if (typeof prefix === "string") {
+      const k = hostKey(prefix);
+      return [k && /^(?:(?:ctrl|alt|shift|super)\+)*(?:[^\s+]|space|f\d{1,2})$/.test(k) ? k : DEFAULT_LEADER];
+    }
   } catch {}
   return [DEFAULT_LEADER];
 }
