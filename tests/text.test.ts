@@ -117,17 +117,53 @@ describe("distinctTitles", () => {
   });
 
   test("the title gives way to the part, which is cut only past a minimum title", () => {
+    expect(
+      distinctTitles([tab("Dashboard overview", "https://one.example.com/"), tab("Dashboard overview", "https://two.example.com/")], 22),
+    ).toEqual(["Dashboard overv… · one", "Dashboard overv… · two"]);
     const out = distinctTitles(
-      [tab("Dashboard overview", "https://one.example.com/"), tab("Dashboard overview", "https://two.example.com/")],
+      [tab("Dashboard overview", "https://a.com/production-west"), tab("Dashboard overview", "https://a.com/staging-north")],
       22,
     );
-    expect(out).toEqual(["Dashboa… · one.exampl…", "Dashboa… · two.exampl…"]);
-    expect(new Set(out).size).toBe(2);
+    expect(out).toEqual(["Dashboa… · production…", "Dashboa… · staging-no…"]);
+  });
+
+  test("hosts that differ in a label", () => {
+    expect(
+      distinctTitles([tab("G", "https://metrics-production-eu.example.com/"), tab("G", "https://metrics-production-us.example.com/")], 22),
+    ).toEqual(["G · …ics-production-eu", "G · …ics-production-us"]);
   });
 
   test("same parts in another order fall back to the whole URL, keeping its end", () => {
     const out = distinctTitles([tab("T", "https://a.com/x/y"), tab("T", "https://a.com/y/x")], 12);
     expect(out).toEqual(["T · …com/x/y", "T · …com/y/x"]);
+  });
+
+  test("a part cut short that no longer differs shows its end instead", () => {
+    const a = "a".repeat(30);
+    const out = distinctTitles([tab("Docs", `http://h/docs${a}1`), tab("Docs", `http://h/docs${a}2`)], 22);
+    expect(out).toEqual([`Docs · …${"a".repeat(13)}1`, `Docs · …${"a".repeat(13)}2`]);
+  });
+
+  test("a label never copies another tab's title", () => {
+    const out = distinctTitles(
+      [tab("Docs", "http://h:1/docs/a"), tab("Docs", "http://h:1/docs/b"), tab("Docs · a", "http://h:1/literal")],
+      22,
+    );
+    expect(out[2]).toBe("Docs · a");
+    expect(new Set(out).size).toBe(3);
+  });
+
+  test("prefers host and path over query and fragment", () => {
+    expect(
+      distinctTitles([tab("Docs", "https://a.com/project-alpha?a"), tab("Docs", "https://a.com/project-bravo?b")], 22),
+    ).toEqual(["Docs · project-alpha", "Docs · project-bravo"]);
+  });
+
+  test("www and bare host are different URLs", () => {
+    expect(distinctTitles([tab("D", "https://www.x.com/d"), tab("D", "https://x.com/d")], 22)).toEqual([
+      "D · www.x.com",
+      "D · x.com/d",
+    ]);
   });
 
   test("tabs on the same URL, or with no URL, are left alone", () => {
@@ -136,7 +172,7 @@ describe("distinctTitles", () => {
     // Two on one URL and a third elsewhere: the third still stands out.
     expect(
       distinctTitles([tab("T", "https://a.com/"), tab("T", "https://a.com/"), tab("T", "https://b.com/")], 22),
-    ).toEqual(["T · a.com", "T · a.com", "T · b.com"]);
+    ).toEqual(["T · a", "T · a", "T · b"]);
   });
 
   test("decodes the part and strips controls", () => {

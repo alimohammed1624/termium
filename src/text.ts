@@ -81,13 +81,16 @@ const TITLE_SEP = " · ";
 /** Columns of the title kept before a long distinguishing part is cut instead. */
 const MIN_TITLE = 8;
 
-/** Parts of a URL that can tell it apart: host, port, path segments, query, fragment. */
-function urlParts(url: string): { parts: string[]; whole: string } {
+/**
+ * Parts of a URL that can tell it apart: host (and its labels), port and path segments first,
+ * then query and fragment. `whole` is the URL as shown, `id` the URL itself.
+ */
+function urlParts(url: string): { parts: string[]; extra: string[]; whole: string; id: string } {
   let u: URL;
   try {
     u = new URL(url);
   } catch {
-    return { parts: [], whole: "" };
+    return { parts: [], extra: [], whole: "", id: "" };
   }
   const clean = (s: string) => {
     try {
@@ -96,14 +99,13 @@ function urlParts(url: string): { parts: string[]; whole: string } {
     return s.replace(CONTROLS, "");
   };
   const host = u.hostname.replace(/^www\./, "");
-  const parts: string[] = [];
-  if (host) parts.push(host);
+  const parts: string[] = [host, u.hostname];
+  // A name's labels (not the top-level one): "eu" in eu.example.com.
+  if (!/^[\d.]+$|^\[/.test(host)) parts.push(...host.split(".").slice(0, -1));
   if (u.port) parts.push(`:${u.port}`, `${host}:${u.port}`);
-  for (const seg of u.pathname.split("/")) if (seg) parts.push(clean(seg));
-  if (u.search) parts.push(clean(u.search));
-  if (u.hash) parts.push(clean(u.hash));
-  const whole = clean(u.host.replace(/^www\./, "") + u.pathname.replace(/\/$/, "") + u.search + u.hash);
-  return { parts: parts.filter(Boolean), whole };
+  for (const seg of u.pathname.split("/")) parts.push(clean(seg));
+  const whole = clean(u.host + u.pathname.replace(/\/$/, "") + u.search + u.hash);
+  return { parts: parts.filter(Boolean), extra: [clean(u.search), clean(u.hash)].filter(Boolean), whole, id: u.href };
 }
 
 /** `title · suffix` in at most `max` columns; the title gives way first, down to MIN_TITLE. */
@@ -116,7 +118,6 @@ function withSuffix(title: string, suffix: string, max: number, keepEnd: boolean
   if (width(suffix) > suffixRoom) {
     if (!keepEnd) tail = truncate(suffix, suffixRoom);
     else {
-      // The end of a URL is what differs most: keep it.
       const segs = [...segmenter.segment(suffix)].map((s) => s.segment);
       tail = "";
       while (segs.length && width(segs[segs.length - 1]! + tail) <= suffixRoom - 1) tail = segs.pop()! + tail;
@@ -129,30 +130,54 @@ function withSuffix(title: string, suffix: string, max: number, keepEnd: boolean
 /**
  * Labels for a row of tabs whose titles are cut to `max` columns. Tabs that
  * would look the same get the shortest part of their URL that no other of
- * them has (host, port, path segment, query or fragment), after a " · ",
- * all within `max` columns. Every other title comes back unchanged.
+ * them has (host, port or path segment; else query or fragment; else the
+ * whole URL), after a " · ", all within `max` columns. If cutting that part
+ * makes two labels (or a label and another tab's title) look the same, the
+ * part's end or another part is shown instead. Every other title comes back
+ * unchanged; tabs on the very same URL can't be told apart by it.
  */
 export function distinctTitles(tabs: readonly { title: string; url: string }[], max: number): string[] {
   const out = tabs.map((t) => t.title);
+  const key = (s: string) => truncate(s, max);
   const groups = new Map<string, number[]>();
-  tabs.forEach((t, i) => {
-    const key = truncate(t.title, max);
-    groups.set(key, [...(groups.get(key) ?? []), i]);
-  });
+  tabs.forEach((t, i) => groups.set(key(t.title), [...(groups.get(key(t.title)) ?? []), i]));
+  // Each disambiguated tab's labels, best first.
+  const options = new Map<number, string[]>();
   for (const group of groups.values()) {
     if (group.length < 2) continue;
     const info = group.map((i) => urlParts(tabs[i]!.url));
     group.forEach((i, k) => {
       const mine = info[k]!;
-      // Tabs on the very same URL can't be told apart by it: compare with the rest.
-      const others = info.filter((o) => o.whole !== mine.whole);
+      const others = info.filter((o) => o.id !== mine.id);
       if (!mine.whole || !others.length) return;
-      const taken = new Set(others.flatMap((o) => o.parts));
-      const unique = mine.parts.filter((p) => !taken.has(p));
-      const best = unique.reduce<string | null>((a, p) => (a === null || width(p) < width(a) ? p : a), null);
-      // No single part is its own (the same parts in another order): show the whole URL.
-      out[i] = best !== null ? withSuffix(tabs[i]!.title, best, max, false) : withSuffix(tabs[i]!.title, mine.whole, max, true);
+      const taken = new Set(others.flatMap((o) => [...o.parts, ...o.extra]));
+      const byWidth = (ps: string[]) => ps.filter((p) => !taken.has(p)).sort((a, b) => width(a) - width(b));
+      const title = tabs[i]!.title;
+      const labels = [...byWidth(mine.parts), ...byWidth(mine.extra)].flatMap((p) => [
+        withSuffix(title, p, max, false),
+        withSuffix(title, p, max, true),
+      ]);
+      labels.push(withSuffix(title, mine.whole, max, true));
+      options.set(i, [...new Set(labels)]);
+      out[i] = labels[0]!;
     });
+  }
+  // Labels that still look alike (a part cut short, or another tab's title):
+  // those tabs move on together to the first labels that all look different.
+  const clashes = new Map<string, number[]>();
+  out.forEach((o, i) => clashes.set(key(o), [...(clashes.get(key(o)) ?? []), i]));
+  for (const clash of clashes.values()) {
+    const movers = clash.filter((i) => options.has(i));
+    if (clash.length < 2 || !movers.length) continue;
+    const rest = new Set(out.filter((_, i) => !movers.includes(i)).map(key));
+    const steps = Math.max(...movers.map((i) => options.get(i)!.length));
+    for (let step = 1; step < steps; step++) {
+      const labels = movers.map((i) => options.get(i)![Math.min(step, options.get(i)!.length - 1)]!);
+      const keys = labels.map(key);
+      if (new Set(keys).size < keys.length || keys.some((k) => rest.has(k))) continue;
+      movers.forEach((i, m) => (out[i] = labels[m]!));
+      break;
+    }
   }
   return out;
 }
