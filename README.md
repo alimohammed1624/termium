@@ -200,6 +200,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | Ctrl+R, F5 (Ctrl+Shift+R hard) | reload |
 | Alt+= / Alt+- / Alt+0 | zoom in / out / reset |
 | Ctrl+C | copy the selection to the clipboard |
+| Ctrl+F (or `Ctrl+B f`) | find in page: Enter / Shift+Enter for the next / previous match, Esc closes; the scrollbar marks every match (click one to go there) |
 | Ctrl+Q | quit (works everywhere, even mid-prompt) |
 | **Ctrl+B then** | |
 | `c`, `n` / `p`, `1`-`9`, `X` | new / next / previous / go to / close tab |
@@ -211,6 +212,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
 | `N` / `W` / `D` | new / rename / close space |
 | `b` | show or hide the sidebar |
+| `f` | find in page (also Ctrl+F, unless the page takes it) |
 | `Ctrl+B` | send Ctrl+B to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
 | `U` | update termium, or restart the session into an installed update |

@@ -1,0 +1,10 @@
+<!doctype html>
+<title>find page</title>
+<style>body { margin: 0; font: 16px sans-serif; } div { height: 100px; border-bottom: 1px solid #ccc; padding: 4px; box-sizing: border-box; }</style>
+<p style="display: none">needle hidden</p>
+<script>
+  // 80 rows of 100px; "needle" in rows 5, 20, 21, 50 and 78 ("Needle" twice in 50).
+  const hits = { 5: "a needle here", 20: "needle", 21: "needle again", 50: "Needle and NEEDLE", 78: "last needle" };
+  for (let i = 0; i < 80; i++) document.write(`<div id="row${i}">row ${i} ${hits[i] ?? ""}</div>`);
+</script>
+<p>a.b(c) literal</p>
