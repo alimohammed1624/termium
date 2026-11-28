@@ -3353,7 +3353,8 @@ export class App {
     // meanwhile is placed as if at a pixel ratio of 1 (at HiDPI, half way to the corner).
     // Where to click is found once it's the click's turn, in the same document.
     await this.serial(page, async () => {
-      if (!this.pages.has(page.sessionId) || page.docGen !== doc) return;
+      if (!this.pages.has(page.sessionId)) return;
+      // (The labels come down either way.)
       const t = await h.hints.target(i);
       if (!t || page.docGen !== doc) return this.showToast("That element is gone or covered now");
       const newTab = h.newTab && t.link;

@@ -71,10 +71,12 @@ const INSTALL = String.raw`(() => {
   // A same-origin frame's document (null for another origin's).
   const inner = (f) => { try { return f.contentDocument; } catch { return null; } };
   // Where a frame's content starts in its parent's viewport, and its scale there (a CSS transform).
+  // (The same in agent.ts's coverAt.)
   const frameBox = (f) => {
     const b = f.getBoundingClientRect();
-    const s = f.offsetWidth > 0 ? b.width / f.offsetWidth : 1;
-    return { dx: b.left + f.clientLeft * s, dy: b.top + f.clientTop * s, s: s > 0 ? s : 1 };
+    const sx = f.offsetWidth > 0 && b.width > 0 ? b.width / f.offsetWidth : 1;
+    const sy = f.offsetHeight > 0 && b.height > 0 ? b.height / f.offsetHeight : 1;
+    return { dx: b.left + f.clientLeft * sx, dy: b.top + f.clientTop * sy, sx, sy };
   };
   // What a click at (x, y) of the top viewport lands on: through shadow roots and same-origin frames.
   const hitAt = (x, y) => {
@@ -87,8 +89,8 @@ const INSTALL = String.raw`(() => {
       const d = (e.tagName === 'IFRAME' || e.tagName === 'FRAME') && inner(e);
       if (!d) break;
       const f = frameBox(e);
-      x = (x - f.dx) / f.s;
-      y = (y - f.dy) / f.s;
+      x = (x - f.dx) / f.sx;
+      y = (y - f.dy) / f.sy;
       const s = d.elementFromPoint(x, y);
       if (!s) break;
       e = s;
@@ -103,8 +105,8 @@ const INSTALL = String.raw`(() => {
       right = Math.min(w.innerWidth, right); bottom = Math.min(w.innerHeight, bottom);
       const f = w.frameElement;
       if (!f) return { left, top, right, bottom };
-      const { dx, dy, s } = frameBox(f);
-      left = dx + left * s; right = dx + right * s; top = dy + top * s; bottom = dy + bottom * s;
+      const { dx, dy, sx, sy } = frameBox(f);
+      left = dx + left * sx; right = dx + right * sx; top = dy + top * sy; bottom = dy + bottom * sy;
       w = f.ownerDocument.defaultView;
     }
     return null;

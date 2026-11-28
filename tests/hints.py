@@ -212,6 +212,15 @@ try:
     r = ctl(s, "click", half["label"])
     check("ctl click LABEL clicks where the hint was found (an element covered at its centre)",
           r.returncode == 0 and [c.get("id") for c in page(s, "window.clicks") or []] == ["half"], (r.returncode, r.stderr, page(s, "window.clicks")))
+    # Something new over a listed element (here inside the scaled frame): nothing clicked, exit 1.
+    sf = by_id(hints, "scaled frame button")
+    page(s, "(() => { const d = document.getElementById('frame2').contentDocument; const o = d.createElement('div'); o.id = 'fover';"
+            " o.style.cssText = 'position:fixed;inset:0;background:#fff'; d.body.appendChild(o); })()")
+    page(s, "window.clicks = []")
+    r = ctl(s, "click", sf["label"])
+    check("ctl click LABEL refuses an element covered since it was listed (in a scaled frame)",
+          r.returncode == 1 and "isn't where it was listed" in r.stderr and page(s, "window.clicks") == [], (r.returncode, r.stderr, page(s, "window.clicks")))
+    page(s, "document.getElementById('frame2').contentDocument.getElementById('fover').remove()")
     # Several agents listing at once: each gets the whole, consistent list.
     procs = [subprocess.Popen(["bun", main, "ctl", "-s", s, "hints", "--json"], cwd=ROOT, env=dict(os.environ, **ENV), stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(4)]

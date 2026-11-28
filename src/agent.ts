@@ -652,10 +652,19 @@ class Agent {
    * slow to take the pointer (a heavy mousemove handler) stops it there; a
    * press is always followed by its release, so no button is left held.
    */
-  private mouseClick(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
+  private mouseClick(
+    page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number,
+    check?: () => Promise<void>,
+  ): Promise<void> {
     // Not while termium takes a screenshot of the page: input sent meanwhile lands
-    // as if at a pixel ratio of 1 (at HiDPI, half way to the page's corner).
-    return this.app.withPage(page, () => this.mouseClickNow(page, x, y, button, count));
+    // as if at a pixel ratio of 1 (at HiDPI, half way to the page's corner). Once
+    // it's the click's turn, the deadline and `check` (that the target is still
+    // there) come first: nothing goes to the page if either fails.
+    return this.app.withPage(page, async () => {
+      this.step("not clicked");
+      await check?.();
+      return this.mouseClickNow(page, x, y, button, count);
+    });
   }
 
   private async mouseClickNow(page: Page, x: number, y: number, button: "left" | "right" | "middle", count: number): Promise<void> {
@@ -707,11 +716,17 @@ class Agent {
       `function () { return !!(this.disabled || (this.closest && this.closest("fieldset:disabled")) || (this.getAttribute && this.getAttribute("aria-disabled") === "true")); }`,
     ).catch(() => false);
     if (disabled) throw new CtlError(`element ${req.ref} is disabled; not clicked`);
-    const cover = await this.coverAt(page, node, objectId, x, y);
-    if (cover && at) throw new CtlError(`hint ${req.ref} isn't where it was listed (${cover} is there now: the page scrolled or changed); not clicked. Take hints again`);
-    if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
+    const gen = page.docGen;
+    const check = async () => {
+      if (page.docGen !== gen) throw new CtlError(`stale id ${req.ref}: the page changed meanwhile; not clicked. Take a new snapshot (or hints)`);
+      const cover = await this.coverAt(page, node, objectId, x, y);
+      if (cover && at) throw new CtlError(`hint ${req.ref} isn't where it was listed (${cover} is there now: the page scrolled or changed); not clicked. Take hints again`);
+      if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
+    };
+    await check();
     this.step("not clicked");
-    const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count));
+    // (Checked again once it's the click's turn: see mouseClick.)
+    const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count, check));
     // (The page is held by its dialog: it can't be asked for the element's name.)
     const label = dialog ? "an element" : await this.label(page, objectId);
     this.note(`clicked ${label}`);
@@ -742,9 +757,12 @@ class Agent {
                 let d = null;
                 try { d = e.contentDocument; } catch {}
                 if (!d) break;
+                // (Its scale too: a frame can be scaled by a CSS transform.)
                 const b = e.getBoundingClientRect();
-                x -= b.left + e.clientLeft;
-                y -= b.top + e.clientTop;
+                const sx = e.offsetWidth > 0 && b.width > 0 ? b.width / e.offsetWidth : 1;
+                const sy = e.offsetHeight > 0 && b.height > 0 ? b.height / e.offsetHeight : 1;
+                x = (x - b.left - e.clientLeft * sx) / sx;
+                y = (y - b.top - e.clientTop * sy) / sy;
                 const inner = d.elementFromPoint(x, y);
                 if (!inner) break;
                 e = inner;
