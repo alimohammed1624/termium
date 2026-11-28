@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { CLOSED_MAX, countLeaves, mapLeaves, replayPlan, type ClosedTab, type NavHistory } from "./reopen";
 import { TOAST_MAX, layoutToasts, pause, remaining, resume, timerBar, type Toast, type ToastAction, type ToastBox } from "./toast";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
@@ -145,6 +146,8 @@ export interface AgentTab {
 
 interface Tab {
   id: number;
+  /** Its order in its space: tabs are in increasing `pos` (a closed tab keeps its own, to go back between the same ones). */
+  pos: number;
   root: Node<Page>;
   focused: Page;
   zoomed: boolean;
@@ -158,6 +161,11 @@ interface Space {
   /** Tabs most recently shown first: closing the current tab returns to the previous one. */
   recent: Tab[];
 }
+
+/** A closed tab or space that can be reopened (see reopen). */
+type Closed =
+  | { kind: "tab"; title: string; space: Space; tab: ClosedTab; toast?: number }
+  | { kind: "space"; title: string; space: Space; active: number; tabs: ClosedTab[]; toast?: number };
 
 type Placement =
   | { kind: "tab"; space: Space; index: number; editUrl: boolean; url?: string; background?: boolean; agent?: boolean }
@@ -243,7 +251,7 @@ const at = (row: number, col: number) => `\x1b[${row};${col}H`;
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
 const PROMPT_GLOBALS = new Set([
-  "ctrl+t", "ctrl+w", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
+  "ctrl+t", "ctrl+shift+t", "ctrl+w", "ctrl+r", "f5", "shift+f5", "ctrl+shift+r", "alt+arrowleft", "alt+arrowright",
   "alt+=", "alt++", "alt+-", "alt+0",
 ]);
 /**
@@ -285,6 +293,7 @@ const HELP: [string, string][] = [
   ["Ctrl+W", "close pane"],
   ["Alt+← / Alt+→", "back / forward"],
   ["Ctrl+R / F5", "reload"],
+  ["Ctrl+Shift+T", "reopen closed tab or space"],
   ["Alt+= / Alt+- / Alt+0", "zoom in / out / reset"],
   ["Ctrl+C", "copy selection to clipboard"],
   ["Ctrl+Q", "quit"],
@@ -300,6 +309,7 @@ const HELP: [string, string][] = [
   ["x", "close pane"],
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
+  ["u", "reopen closed tab or space"],
   ["b", "toggle sidebar"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
@@ -379,6 +389,12 @@ export class App {
   private navHits: { back: [number, number]; fwd: [number, number]; reload: [number, number]; url: [number, number] } | null = null;
   private spaceHits: { row: number; index: number }[] = [];
   private newSpaceRow = -1;
+
+  /** Closed tabs and spaces, most recent last, for reopening. */
+  private closed: Closed[] = [];
+  /** Tabs and spaces the person is closing, as they were (kept once they're gone). */
+  private closingTabs = new Map<Tab, Closed & { kind: "tab" }>();
+  private closingSpaces = new Map<Space, Closed & { kind: "space" }>();
 
   private nextImage = 100;
   private nextTabId = 1;
@@ -655,12 +671,55 @@ export class App {
     const valid = (n: any, depth = 0): n is SavedNode =>
       depth < 32 && !!n && typeof n === "object" &&
       (typeof n.url === "string" || ((n.dir === "h" || n.dir === "v") && valid(n.a, depth + 1) && valid(n.b, depth + 1)));
-    const leftmost = (n: SavedNode): string => ("url" in n ? n.url : leftmost(n.a));
-    const count = (n: SavedNode): number => ("url" in n ? 1 : count(n.a) + count(n.b));
     // Pages in the snapshot (an unreadable tab counts as one), and pages that came up.
     let expected = 0;
     let opened = 0;
     const clampInt = (v: unknown, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.floor(Number(v)) || 0));
+    let any = false;
+    const spaces = Array.isArray(saved.spaces) ? saved.spaces : [];
+    if (spaces.length > 64) expected += spaces.length - 64;
+    for (const [si, ss] of spaces.slice(0, 64).entries()) {
+      const space = si === 0 ? first : this.newSpaceModel();
+      if (si > 0) this.spaces.push(space);
+      if (typeof ss?.name === "string" && ss.name.trim()) space.name = ss.name.slice(0, 64);
+      const tabs = Array.isArray(ss?.tabs) ? ss.tabs : [];
+      if (tabs.length > 200) expected += tabs.length - 200;
+      for (const st of tabs.slice(0, 200)) {
+        if (!valid(st?.root)) {
+          expected++;
+          continue;
+        }
+        expected += countLeaves(st.root);
+        const r = await this.openSavedTab(space, space.tabs.length, st, true);
+        if (!r) continue;
+        any = true;
+        opened += r.opened;
+      }
+      space.active = clampInt(ss?.active, 0, Math.max(0, space.tabs.length - 1));
+    }
+    // Spaces none of whose pages came back go (the first stays).
+    this.spaces = this.spaces.filter((s, i) => i === 0 || s.tabs.length > 0);
+    if (!any) return "none";
+    this.activeSpace = clampInt(saved.activeSpace, 0, this.spaces.length - 1);
+    if (!this.space?.tabs.length) this.activeSpace = Math.max(0, this.spaces.findIndex((s) => s.tabs.length > 0));
+    this.sidebar = saved.sidebar !== false;
+    const z = Number(saved.zoom);
+    if (Number.isFinite(z) && z !== 1) this.zoom = Math.max(0.3, Math.min(5, Math.round(z * 100) / 100));
+    this.relayout();
+    if (opened < expected) this.opts.log(`restore: ${opened} of ${expected} pages reopened`);
+    return opened < expected ? "some" : "all";
+  }
+
+  /**
+   * Opens a saved tab (its splits, their sizes, focus and zoom) at `index`
+   * in `space`: the tab, and how many of its pages came up; null if its
+   * first page didn't (or the tab went at once).
+   */
+  private async openSavedTab(
+    space: Space, index: number, st: { root: SavedNode; focus: unknown; zoomed: unknown }, background: boolean,
+  ): Promise<{ tab: Tab; opened: number } | null> {
+    const leftmost = (n: SavedNode): string => ("url" in n ? n.url : leftmost(n.a));
+    let opened = 0;
     const build = async (n: SavedNode, p: Page, tab: Tab): Promise<void> => {
       if ("url" in n) return;
       const url = leftmost(n.b);
@@ -676,47 +735,18 @@ export class App {
       ratios(n.a, s.a);
       ratios(n.b, s.b);
     };
-    let any = false;
-    const spaces = Array.isArray(saved.spaces) ? saved.spaces : [];
-    if (spaces.length > 64) expected += spaces.length - 64;
-    for (const [si, ss] of spaces.slice(0, 64).entries()) {
-      const space = si === 0 ? first : this.newSpaceModel();
-      if (si > 0) this.spaces.push(space);
-      if (typeof ss?.name === "string" && ss.name.trim()) space.name = ss.name.slice(0, 64);
-      const tabs = Array.isArray(ss?.tabs) ? ss.tabs : [];
-      if (tabs.length > 200) expected += tabs.length - 200;
-      for (const st of tabs.slice(0, 200)) {
-        if (!valid(st?.root)) {
-          expected++;
-          continue;
-        }
-        expected += count(st.root);
-        const url = leftmost(st.root);
-        const page = await this.placePage({ kind: "tab", space, index: space.tabs.length, editUrl: false, url: url || undefined, background: true });
-        if (!page) continue;
-        any = true;
-        opened++;
-        const tab = this.locate(page)?.tab;
-        if (!tab) continue;
-        await build(st.root, page, tab);
-        ratios(tab.root, st.root);
-        const ls = leaves(tab.root);
-        tab.focused = ls[clampInt(st.focus, 0, ls.length - 1)] ?? tab.focused;
-        tab.zoomed = !!st.zoomed && ls.length > 1;
-      }
-      space.active = clampInt(ss?.active, 0, Math.max(0, space.tabs.length - 1));
-    }
-    // Spaces none of whose pages came back go (the first stays).
-    this.spaces = this.spaces.filter((s, i) => i === 0 || s.tabs.length > 0);
-    if (!any) return "none";
-    this.activeSpace = clampInt(saved.activeSpace, 0, this.spaces.length - 1);
-    if (!this.space?.tabs.length) this.activeSpace = Math.max(0, this.spaces.findIndex((s) => s.tabs.length > 0));
-    this.sidebar = saved.sidebar !== false;
-    const z = Number(saved.zoom);
-    if (Number.isFinite(z) && z !== 1) this.zoom = Math.max(0.3, Math.min(5, Math.round(z * 100) / 100));
-    this.relayout();
-    if (opened < expected) this.opts.log(`restore: ${opened} of ${expected} pages reopened`);
-    return opened < expected ? "some" : "all";
+    const url = leftmost(st.root);
+    const page = await this.placePage({ kind: "tab", space, index, editUrl: false, url: url || undefined, background });
+    if (!page) return null;
+    opened++;
+    const tab = this.locate(page)?.tab;
+    if (!tab) return null;
+    await build(st.root, page, tab);
+    ratios(tab.root, st.root);
+    const ls = leaves(tab.root);
+    tab.focused = ls[Math.max(0, Math.min(ls.length - 1, Math.floor(Number(st.focus)) || 0))] ?? tab.focused;
+    tab.zoomed = !!st.zoomed && ls.length > 1;
+    return { tab, opened };
   }
 
   private onFirstPage: (() => void) | null = null;
@@ -950,12 +980,12 @@ export class App {
       this.cdp.send("Target.closeTarget", { targetId: old.targetId }).catch(() => {});
     } else if (placement.kind === "replace") {
       const space = this.space!;
-      space.tabs.splice(space.active + 1, 0, { id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false });
+      space.tabs.splice(space.active + 1, 0, { id: this.nextTabId++, pos: posAt(space.tabs, space.active + 1), root: leaf(page), focused: page, zoomed: false });
       space.active++;
     } else if (placement.kind === "tab") {
       const space = this.spaces.includes(placement.space) ? placement.space : this.space!;
-      const tab: Tab = { id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false };
       const index = Math.min(placement.index, space.tabs.length);
+      const tab: Tab = { id: this.nextTabId++, pos: posAt(space.tabs, index), root: leaf(page), focused: page, zoomed: false };
       space.tabs.splice(index, 0, tab);
       // An agent's tab opens in the background while the person is busy (checked as it arrives).
       if (placement.background || (placement.agent && this.humanBusy())) {
@@ -972,7 +1002,7 @@ export class App {
         tab.zoomed = false;
       } else {
         const space = this.space!;
-        space.tabs.push({ id: this.nextTabId++, root: leaf(page), focused: page, zoomed: false });
+        space.tabs.push({ id: this.nextTabId++, pos: posAt(space.tabs, space.tabs.length), root: leaf(page), focused: page, zoomed: false });
         space.active = space.tabs.length - 1;
       }
     }
@@ -1023,6 +1053,16 @@ export class App {
         const i = space.tabs.indexOf(tab);
         const wasActive = space.active === i;
         space.tabs.splice(i, 1);
+        // Closed by the person (not an agent, nor the page itself): it can be reopened.
+        const closing = this.closingTabs.get(tab);
+        this.closingTabs.delete(tab);
+        const byPerson = page.closing && !page.agentClosing;
+        if (closing && byPerson && !this.closingSpaces.has(space)) this.remember({ ...closing, space });
+        const spaceClosing = space.tabs.length === 0 ? this.closingSpaces.get(space) : undefined;
+        if (spaceClosing) {
+          this.closingSpaces.delete(space);
+          if (byPerson) this.remember(spaceClosing);
+        }
         space.recent = space.recent.filter((t) => t !== tab && space.tabs.includes(t));
         const back = wasActive ? space.recent[0] : undefined;
         if (back) space.active = space.tabs.indexOf(back);
@@ -1302,6 +1342,8 @@ export class App {
 
   /** Closes a page the way a browser does: its beforeunload handler may ask first. */
   private closePage(page: Page): void {
+    const loc = this.locate(page);
+    if (loc && leaves(loc.tab.root).length === 1) this.closingTabs.set(loc.tab, this.closedTab(loc.tab));
     page.closing = true;
     const force = () => this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
     this.cdp.send("Page.close", {}, page.sessionId).catch(force);
@@ -1315,7 +1357,182 @@ export class App {
     const pages = leaves(tab.root);
     // A single page asks for itself (its own "Leave this page?").
     if (pages.length === 1) this.closePage(pages[0]!);
-    else void this.closeGroup(pages, "tab");
+    else {
+      const closed = this.closedTab(tab);
+      void this.closeGroup(pages, "tab", () => this.closingTabs.set(tab, closed));
+    }
+  }
+
+  /** A tab as it is now, to reopen once it's closed: its title, splits, and its pages' histories (read now, while they're open). */
+  private closedTab(tab: Tab): Closed & { kind: "tab" } {
+    const node = (n: Node<Page>): SavedNode =>
+      n.kind === "leaf"
+        ? { url: n.item.url.includes(MARKER) || n.item.url === "about:blank" ? "" : n.item.url }
+        : { dir: n.dir, ratio: n.ratio, a: node(n.a), b: node(n.b) };
+    const pages = leaves(tab.root);
+    const history = pages.map((p) =>
+      Promise.race([
+        this.cdp.send("Page.getNavigationHistory", {}, p.sessionId).then((h): NavHistory => h, () => null),
+        Bun.sleep(2000).then(() => null),
+      ]),
+    );
+    const t: ClosedTab = { root: node(tab.root), focus: Math.max(0, pages.indexOf(tab.focused)), zoomed: tab.zoomed, history, pos: tab.pos };
+    return { kind: "tab", title: pageTitle(tab.focused), space: this.space!, tab: t };
+  }
+
+  /** Keeps a closed tab or space for reopening, and offers to undo it. */
+  private remember(c: Closed): void {
+    this.closed.push(c);
+    while (this.closed.length > CLOSED_MAX) this.closed.shift();
+    const name = truncate(c.title, 40);
+    const text = c.kind === "tab" ? `Closed "${name}"` : `Closed space "${name}" (${c.tabs.length === 1 ? "1 tab" : `${c.tabs.length} tabs`})`;
+    c.toast = this.showToast(text, 6000, { label: "Undo", run: () => void this.reopen(c) });
+  }
+
+  /** Reopens a closed tab or space (the most recent with none given) where it was, with its pages' histories where they could be read. */
+  private reopen(c = this.closed[this.closed.length - 1]): Promise<void> {
+    if (!c) return Promise.resolve(void this.showToast("Nothing closed to reopen"));
+    const i = this.closed.indexOf(c);
+    if (i < 0) return Promise.resolve(); // reopened already
+    this.closed.splice(i, 1);
+    if (c.toast !== undefined) this.dismissToast(c.toast);
+    // One at a time: each goes back to its place among those reopened before it.
+    return (this.reopening = this.reopening.then(() => this.reopenNow(c)).catch((e) => this.opts.log(`reopen: ${e}`)));
+  }
+
+  private reopening = Promise.resolve();
+
+  private async reopenNow(c: Closed): Promise<void> {
+    // Its space comes back too if it's gone (as a closed tab's window does in Chrome).
+    const space = c.space;
+    if (!this.spaces.includes(space)) {
+      // Spaces are in the order of their ids (new ones go last).
+      space.tabs = [];
+      space.active = 0;
+      space.recent = [];
+      const at = this.spaces.filter((s) => s.id < space.id).length;
+      this.spaces.splice(at, 0, space);
+      if (this.activeSpace >= at && this.spaces.length > 1) this.activeSpace++;
+    }
+    if (c.kind === "tab") {
+      await this.reopenTab(space, c.tab, false);
+      if (space.tabs.length === 0) this.dropSpace(space);
+      return this.relayoutAndRedraw();
+    }
+    const tabs: (Tab | null)[] = [];
+    for (const ct of c.tabs) tabs.push(await this.reopenTab(space, ct, true));
+    const si = this.spaces.indexOf(space);
+    if (si < 0) return;
+    if (space.tabs.length === 0) this.dropSpace(space);
+    else {
+      const active = tabs[c.active];
+      if (active && space.tabs.includes(active)) space.active = space.tabs.indexOf(active);
+      this.activeSpace = si;
+      this.prompt = null;
+    }
+    this.relayoutAndRedraw();
+  }
+
+  /** A space put back for a reopen that brought none of its tabs back goes again (the last one stays). */
+  private dropSpace(space: Space): void {
+    const si = this.spaces.indexOf(space);
+    if (si < 0 || this.spaces.length === 1) return;
+    this.spaces.splice(si, 1);
+    if (this.activeSpace > si) this.activeSpace--;
+  }
+
+  /** Opens a closed tab at its old place in `space`, and then rebuilds its pages' histories. */
+  private async reopenTab(space: Space, ct: ClosedTab, background: boolean): Promise<Tab | null> {
+    const histories = await Promise.all(ct.history.map((h) => h ?? null));
+    const plans = histories.map((h) => (h ? replayPlan(h, (u) => u.includes(MARKER) || u === "about:blank") : null));
+    const root = mapLeaves(ct.root, (i, old) => plans[i]?.urls[0] ?? old);
+    const r = await this.openSavedTab(space, space.tabs.filter((t) => t.pos < ct.pos).length, { ...ct, root }, background);
+    if (!r) return null;
+    r.tab.pos = ct.pos;
+    const pages = leaves(r.tab.root);
+    if (pages.length === countLeaves(root)) pages.forEach((p, i) => void this.replayHistory(p, plans[i] ?? null));
+    return r.tab;
+  }
+
+  /**
+   * Loads the rest of a reopened page's history into it, one address after
+   * another, then goes back to the entry it was on. It stops if the page
+   * goes, or anything else navigates it meanwhile (the person, the page, an
+   * agent); otherwise, if it doesn't end up on the address it was closed on
+   * (a step failed or took too long, an entry didn't load), it goes straight
+   * there, losing the rest of its history but never its address.
+   */
+  private async replayHistory(page: Page, plan: ReturnType<typeof replayPlan>): Promise<void> {
+    if (!plan || (plan.urls.length < 2 && plan.forward === 0)) return;
+    const current = plan.urls[plan.urls.length - 1 - plan.forward]!;
+    const norm = (u: string) => (URL.canParse(u) ? new URL(u).href : u);
+    const same = (a: string | undefined, b: string) => a !== undefined && norm(a) === norm(b);
+    // Our own navigations only: to the step's address, or (once) the step back to its entry.
+    let expected = plan.urls[0]!;
+    let ownTraversal = 0;
+    let foreign = false;
+    const watch = (p: any, sid?: string) => {
+      if (sid !== page.sessionId || p.frameId !== page.targetId) return;
+      const type = String(p.navigationType ?? "");
+      if (type === "sameDocument") return; // the page's own pushState() or #fragment
+      if (type.startsWith("history") && ownTraversal > 0) ownTraversal--;
+      else if (type !== "differentDocument" || !same(String(p.url), expected)) foreign = true;
+    };
+    const alive = () => !foreign && this.pages.has(page.sessionId);
+    // Each navigation (the first is the placement's) must answer before the next starts.
+    const answered = async (seq: number) => {
+      for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(50)) {
+        if (!alive() || page.navSeq !== seq) return false;
+        if (page.navStarted === 0) return true;
+      }
+      return false;
+    };
+    const history = (): Promise<{ currentIndex: number; entries: { id: number; url: string }[] } | null> =>
+      this.cdp.send("Page.getNavigationHistory", {}, page.sessionId).catch(() => null);
+    this.cdp.on("Page.frameStartedNavigating", watch);
+    let seq = 0;
+    let ok = false;
+    try {
+      for (const end = Date.now() + 15_000; page.navSeq === 0; await Bun.sleep(50)) {
+        if (Date.now() > end || !this.pages.has(page.sessionId)) return;
+      }
+      seq = page.navSeq;
+      ok = await answered(seq);
+      for (const url of plan.urls.slice(1)) {
+        if (!ok) break;
+        expected = url;
+        // (No retry at startup, as other navigations get: something else navigating the page wins.)
+        this.navigate(page, url, 2);
+        seq = page.navSeq;
+        ok = await answered(seq);
+      }
+      // Back to its entry: `forward` entries back if that's its address, else the last one with
+      // its address (an entry that didn't load isn't there; an address can be in it twice).
+      const h = ok && plan.forward > 0 ? await history() : null;
+      if (h && alive() && page.navSeq === seq && !same(h.entries[h.currentIndex]?.url, current)) {
+        const counted = h.entries[h.currentIndex - plan.forward];
+        const target = counted && same(counted.url, current)
+          ? counted
+          : h.entries.slice(0, h.currentIndex).reverse().find((e) => same(e.url, current));
+        if (target) {
+          ownTraversal = 1;
+          await this.cdp.send("Page.navigateToHistoryEntry", { entryId: target.id }, page.sessionId).catch(() => {});
+        }
+      }
+      // It's done once the page is on that address.
+      const replayed = ok;
+      ok = false;
+      for (const end = Date.now() + 8000; replayed && alive() && page.navSeq === seq && Date.now() < end; await Bun.sleep(100)) {
+        const now = await history();
+        if (now && same(now.entries[now.currentIndex]?.url, current)) {
+          ok = true;
+          break;
+        }
+      }
+    } finally {
+      this.cdp.off("Page.frameStartedNavigating", watch);
+    }
+    if (!ok && alive() && page.navSeq === seq) this.navigate(page, current);
   }
 
   /**
@@ -1372,12 +1589,13 @@ export class App {
    * them would ask "Leave this page?", termium asks once for the group, and
    * either closes every page or keeps every page.
    */
-  private async closeGroup(pages: Page[], what: string): Promise<void> {
+  private async closeGroup(pages: Page[], what: string, onClose?: () => void): Promise<void> {
     const guarded: Page[] = [];
     const t = this.ticket();
     for (const page of pages) if (await this.wouldAsk(page)) guarded.push(page);
     if (!t.valid()) return;
     const closeAll = () => {
+      onClose?.();
       for (const page of pages) {
         page.closing = true;
         this.cdp.send("Target.closeTarget", { targetId: page.targetId }).catch(() => this.onGone(page));
@@ -3257,6 +3475,9 @@ export class App {
       case "alt+0":
         this.setZoom(1);
         return true;
+      case "ctrl+shift+t":
+        void this.reopen();
+        return true;
     }
     return false;
   }
@@ -3303,8 +3524,15 @@ export class App {
         if (space) this.prompt = { kind: "rename", edit: new LineEdit(space.name, true), space };
         return;
       case "shift+d":
-        if (space) void this.closeGroup(space.tabs.flatMap((t) => leaves(t.root)), "space");
+        if (space) {
+          const closed: Closed & { kind: "space" } = {
+            kind: "space", title: space.name, space, active: space.active,
+            tabs: space.tabs.map((t) => this.closedTab(t).tab),
+          };
+          void this.closeGroup(space.tabs.flatMap((t) => leaves(t.root)), "space", () => this.closingSpaces.set(space, closed));
+        }
         return;
+      case "u": void this.reopen(); return;
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
@@ -4223,6 +4451,14 @@ export function frameFits(base64Png: string, css: { w: number; h: number }): boo
 
 function sameSize<T extends { w: number; h: number; dsf?: number }>(a: T | null, b: T | null): boolean {
   return !!a && !!b && a.w === b.w && a.h === b.h && a.dsf === b.dsf;
+}
+
+/** An order key for a tab put at `index` in `tabs`: between its neighbours' keys. */
+function posAt(tabs: Tab[], index: number): number {
+  const a = tabs[index - 1]?.pos;
+  const b = tabs[index]?.pos;
+  if (a !== undefined && b !== undefined) return (a + b) / 2;
+  return a !== undefined ? a + 1 : b !== undefined ? b - 1 : 0;
 }
 
 function pageTitle(page: Page): string {

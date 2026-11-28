@@ -198,6 +198,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | Ctrl+T / Ctrl+W | new tab / close pane |
 | Alt+← / Alt+→, mouse back/forward | back / forward |
 | Ctrl+R, F5 (Ctrl+Shift+R hard) | reload |
+| Ctrl+Shift+T | reopen the last closed tab or space, where it was |
 | Alt+= / Alt+- / Alt+0 | zoom in / out / reset |
 | Ctrl+C | copy the selection to the clipboard |
 | Ctrl+Q | quit (works everywhere, even mid-prompt) |
@@ -210,6 +211,7 @@ Browser keys work directly; layout keys follow herdr's `Ctrl+B` prefix.
 | `x` | close pane |
 | `w` | pick a space: `j` / `k`, Enter, `1`-`9`, Esc |
 | `N` / `W` / `D` | new / rename / close space |
+| `u` | reopen the last closed tab or space (also the toast's Undo) |
 | `b` | show or hide the sidebar |
 | `Ctrl+B` | send Ctrl+B to the page |
 | `d` | detach (the session keeps running; `termium attach` resumes) |
