@@ -3849,7 +3849,13 @@ export class App {
     if (row === 2) {
       const page = this.focused;
       const n = this.navHits;
-      if (!page || !n || ev.button !== 0) return true;
+      if (!page || !n) return true;
+      if (ev.button === 2) {
+        if (col >= n.back[0] && col < n.back[1]) void this.historyMenu(page, -1, n.back[0]);
+        else if (col >= n.fwd[0] && col < n.fwd[1]) void this.historyMenu(page, 1, n.fwd[0]);
+        return true;
+      }
+      if (ev.button !== 0) return true;
       if (col >= n.back[0] && col < n.back[1]) void this.history(page, -1);
       else if (col >= n.fwd[0] && col < n.fwd[1]) void this.history(page, 1);
       else if (col >= n.reload[0] && col < n.reload[1]) {
@@ -3959,10 +3965,14 @@ export class App {
     return s;
   }
 
-  private openMenu(entries: MenuEntry[], point: { col: number; row: number }, opts: { title?: string; align?: "left" | "right" } = {}): void {
+  private openMenu(
+    entries: MenuEntry[],
+    point: { col: number; row: number },
+    opts: { title?: string; align?: "left" | "right"; bounds?: Rect } = {},
+  ): void {
     if (!this.attached || this.covered()) return;
     if (this.mode !== "normal") this.setMode("normal");
-    this.menu = new Menu(entries, point, { col: 1, row: 1, cols: this.cols, rows: this.rows }, opts);
+    this.menu = new Menu(entries, point, opts.bounds ?? { col: 1, row: 1, cols: this.cols, rows: this.rows }, opts);
     this.menuTab = this.tab;
     // Pages under it are drawn around it from now on.
     this.fullRedraw();
@@ -4190,6 +4200,47 @@ export class App {
       ...(info.selection ? [{ label: "Copy", key: "Ctrl+C", run: live(() => void this.copySelection(page)) }] : []),
       { label: "Copy page address", run: live(() => this.copyText(page.url, "address")) },
     ], { col, row });
+  }
+
+  /** Right-click on ← or →: the tab's earlier (or later) pages, nearest first; a row goes straight there. */
+  private async historyMenu(page: Page, dir: -1 | 1, col: number): Promise<void> {
+    const seq = ++this.menuSeq;
+    const t = this.ticket();
+    let h: { currentIndex: number; entries: HistoryEntry[] };
+    try {
+      h = await this.cdp.send("Page.getNavigationHistory", {}, page.sessionId);
+    } catch (e) {
+      return this.opts.log(`history: ${e}`);
+    }
+    if (seq !== this.menuSeq || !t.valid() || this.menu || this.focused !== page || !this.pages.has(page.sessionId)) return;
+    // (A menu needs a title, a row and a bottom line: a shorter terminal has no room for one.)
+    if (this.rows < 3) return;
+    // The history may have changed since it was read (a pushState drops the forward entries): looked up again.
+    // (An entry keeps its id through replaceState: its address must match too.)
+    const go = (entryId: number, url: string) => async () => {
+      if (!this.pages.has(page.sessionId)) return;
+      try {
+        const now = await this.cdp.send("Page.getNavigationHistory", {}, page.sessionId);
+        const i = now.entries.findIndex((e: HistoryEntry) => e.id === entryId && e.url === url);
+        if (i < 0) return this.showToast("That page is no longer in this tab's history");
+        if (i !== now.currentIndex) await this.cdp.send("Page.navigateToHistoryEntry", { entryId }, page.sessionId);
+      } catch (e) {
+        this.opts.log(`history: ${e}`);
+      }
+    };
+    const rows = historyRows(h.entries, h.currentIndex, dir);
+    this.openMenu(
+      rows.length
+        ? rows.map((r): MenuEntry => ({ label: truncate(r.title, 40), key: r.host ? truncate(r.host, 30) : undefined, run: go(r.id, r.url) }))
+        : [{ label: dir < 0 ? "No earlier pages" : "No later pages", disabled: true, run: () => {} }],
+      { col, row: TOP_ROWS + 1 },
+      // Under the address bar: a long history scrolls rather than covering the bars (and their buttons).
+      // (A terminal too short for a menu there: the whole screen, as other menus.)
+      {
+        title: dir < 0 ? "Back" : "Forward",
+        bounds: this.rows - TOP_ROWS >= 3 ? { col: 1, row: TOP_ROWS + 1, cols: this.cols, rows: this.rows - TOP_ROWS } : undefined,
+      },
+    );
   }
 
   private copyText(text: string, what: string): void {
@@ -4571,6 +4622,27 @@ function pageTitle(page: Page): string {
   const blank = (s: string) => !s || s.includes(MARKER) || s === "about:blank";
   if (!blank(page.title)) return page.title;
   return blank(page.url) ? "New Tab" : page.url.replace(/^https?:\/\//, "");
+}
+
+export interface HistoryEntry {
+  id: number;
+  url: string;
+  title: string;
+}
+
+/**
+ * The ← / → history dropdown's rows: the entries before (dir -1) or after
+ * (dir 1) the current one, nearest first, each with a title and host.
+ */
+export function historyRows(entries: HistoryEntry[], current: number, dir: -1 | 1): { id: number; url: string; title: string; host: string }[] {
+  const blank = (s: string) => !s || s.includes(MARKER) || s === "about:blank";
+  const rows: { id: number; url: string; title: string; host: string }[] = [];
+  for (let i = current + dir; i >= 0 && i < entries.length; i += dir) {
+    const e = entries[i]!;
+    const title = !blank(e.title) ? e.title : blank(e.url) ? "New Tab" : e.url.replace(/^https?:\/\//, "");
+    rows.push({ id: e.id, url: e.url, title, host: blank(e.url) ? "" : hostOf(e.url) });
+  }
+  return rows;
 }
 
 function displayUrl(page: Page): string {
