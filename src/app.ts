@@ -2251,14 +2251,14 @@ export class App {
     const space = this.space;
     const tabs = space?.tabs ?? [];
     const active = space?.active ?? 0;
-    // A tab's label, its title cut to `max` columns (whole if 0).
+    // A tab's label, its title cut to `max` columns.
     const item = (i: number, max: number) => {
       const tab = tabs[i]!;
       const pages = leaves(tab.root);
       const title = pageTitle(tab.focused);
       const extra = pages.length > 1 ? ` ⊞${pages.length}` : "";
       const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
-      const cut = max ? (i === active ? clip(title, max, C.text, C.background) : clip(title, max, C.dim, C.backdrop)) : title;
+      const cut = i === active ? clip(title, max, C.text, C.background) : clip(title, max, C.dim, C.backdrop);
       return ` ${i + 1} ${dot}${cut}${extra} `;
     };
     const items = tabs.map((_, i) => item(i, 22));
@@ -2292,7 +2292,9 @@ export class App {
     if (last < first && items.length > 0) {
       // Not even the active tab fits whole: show it cut to the space there is.
       const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
-      const text = clip(item(active, 0), room, C.text, C.background);
+      // The title gives way first; the whole label is cut only if its number and pane count don't fit.
+      const frame = width(item(active, 0));
+      const text = room > frame ? item(active, Math.min(22, room - frame)) : clip(item(active, Infinity), room, C.text, C.background);
       s += bg(C.background) + fg(C.text) + BOLD + text + RESET + bg(C.backdrop);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
       used += width(text);
