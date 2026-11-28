@@ -916,7 +916,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       // What an answered command left under way in the browser (see Ctx.hold).
       let underWay: Promise<unknown> = Promise.resolve();
       const run = () =>
-        runCtl(a, d, { ...req, timeoutMs: deadline - Date.now() }, { devtools: browser?.devtools ?? null, log, hold: (p) => (underWay = p) });
+        runCtl(a, d, { ...req, timeoutMs: deadline - Date.now() }, { devtools: browser?.devtools ?? null, log, hold: (p) => (underWay = p), tmpDir: browserTmp });
       let result: unknown;
       if (ACTING.has(String(req?.cmd))) {
         // Its time covers waiting for its turn: one whose time runs out first

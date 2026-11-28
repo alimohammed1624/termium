@@ -9,6 +9,11 @@
 // every new document in the tab), so an id never names an element of
 // another document, even where the browser reuses node numbers.
 
+import { randomBytes } from "node:crypto";
+import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AgentTab, App, Page } from "./app";
 import type { DevToolsEndpoint } from "./browser";
 import type { CDP } from "./cdp";
@@ -29,7 +34,7 @@ export const EXIT = { ok: 0, failed: 1, usage: 2, noSession: 3, timeout: 4, part
 
 /** Commands that act on pages or tabs: a session runs these one at a time (see onCtl in server.ts). */
 // (Not `dialog`: answering one must work while an `open` waits on the page it blocks.)
-export const ACTING = new Set(["open", "select", "close", "click", "type", "key", "scroll"]);
+export const ACTING = new Set(["open", "select", "close", "click", "type", "key", "scroll", "show"]);
 
 export interface CtlRequest {
   cmd: string;
@@ -58,6 +63,12 @@ export interface CtlRequest {
   gone?: boolean;
   accept?: boolean;
   timeoutMs?: number;
+  /** show: the file to show (an absolute path), or the HTML itself (from stdin). */
+  path?: string;
+  html?: string;
+  /** show: the pane's name (calls with the same name reuse it); stacked below rather than beside. */
+  name?: string;
+  down?: boolean;
 }
 
 interface Ctx {
@@ -69,6 +80,8 @@ interface Ctx {
    * the session holds back the next acting command until it settles (bounded).
    */
   hold?: (underWay: Promise<unknown>) => void;
+  /** The session's own temp directory (removed when it ends): where piped HTML for `show` goes. */
+  tmpDir?: string | null;
 }
 
 const DEFAULT_TIMEOUT = 30_000;
@@ -255,6 +268,8 @@ class Agent {
         return this.wait(req, timeoutMs);
       case "dialog":
         return this.dialog(req);
+      case "show":
+        return this.show(req, timeoutMs);
       default:
         throw new CtlError(`unknown command "${req.cmd}"`, EXIT.usage);
     }
@@ -404,6 +419,75 @@ class Agent {
     return t;
   }
 
+
+  /**
+   * Shows a local file (an agent's plan or report), or HTML it pipes in, in
+   * a pane beside the focused one (or in a new tab); the person's focus
+   * stays where it is. Called again with the same name, it updates that
+   * pane instead of opening another. A file is reloaded whenever it changes.
+   */
+  private async show(req: CtlRequest, timeoutMs: number): Promise<unknown> {
+    const fromStdin = req.html !== undefined;
+    let path = String(req.path ?? "");
+    if (!fromStdin) {
+      if (!isAbsolute(path)) throw new CtlError("show needs a file (an absolute path) or HTML", EXIT.usage);
+      if (!fileStamp(path).startsWith("f")) throw new CtlError(`no such file: ${path}`);
+    }
+    const name = req.name || (fromStdin ? "stdin" : path);
+    const shown = shownPanes(this.app);
+    let entry = shown.get(name);
+    if (entry && !this.app.isOpen(entry.page)) {
+      stopShowing(shown, name);
+      entry = undefined;
+    }
+    // Piped HTML goes to a file of its own (the same one for the same name), loaded like any other.
+    if (fromStdin) path = entry?.temp ?? join(showDir(this.ctx.tmpDir), `${randomBytes(8).toString("hex")}.html`);
+    const url = pathToFileURL(path).href;
+    const label = fromStdin ? "piped HTML" : basename(path);
+    let page: Page;
+    const reused = !!entry;
+    if (entry) {
+      page = this.page(entry.page.num);
+      await this.personFree(page, timeoutMs, "not shown");
+      if (!this.app.isOpen(page)) throw new CtlError(`tab ${page.num} closed`);
+      this.step("not shown");
+      if (fromStdin) writeFileSync(path, req.html!, { mode: 0o600 });
+      // The same file is reloaded (keeping its scroll position); another one replaces it.
+      if (withoutHash(page.url) === url) this.app.agentReload(page);
+      else this.app.agentNavigate(page, url);
+      if (entry.temp && entry.temp !== path) rmSync(entry.temp, { force: true });
+      entry.temp = fromStdin ? path : undefined;
+      entry.url = url;
+      entry.path = path;
+      entry.stamp = fileStamp(path);
+      this.note(`updated ${label} in tab ${page.num}`);
+    } else {
+      this.step("nothing shown");
+      if (fromStdin) writeFileSync(path, req.html!, { mode: 0o600 });
+      // Beside the person's pane; a second one goes below the first (their pane keeps its width).
+      const tabs = this.app.agentTabs();
+      const mine = tabs.find((t) => t.active);
+      const sameTab = (p: Page) => tabs.some((t) => t.id === p.num && !t.active && t.space === mine?.space && t.tab === mine?.tab);
+      const near = [...shown.values()].map((e) => e.page).find(sameTab);
+      const created = req.newTab
+        ? await this.app.agentNewTab(url, true)
+        : await this.app.agentSplit(url, req.down || near ? "v" : "h", near);
+      if (!created) throw new CtlError(req.newTab ? "couldn't open a tab" : "couldn't open a pane");
+      page = created;
+      entry = { page, url, path, stamp: fileStamp(path), temp: fromStdin ? path : undefined };
+      shown.set(name, entry);
+      this.note(`showing ${label} in tab ${page.num}`);
+    }
+    clearInterval(entry.timer);
+    entry.timer = undefined;
+    try {
+      await this.waitLoad(page, this.deadline, true);
+    } finally {
+      // (Once it's on the file: till then the pane's address is still the one it had.)
+      if (shown.get(name) === entry) watchShown(this.app, shown, name, entry, this.ctx.log);
+    }
+    return { ...this.describe(page), name, reused };
+  }
 
   private async dialog(req: CtlRequest): Promise<unknown> {
     let page: Page | undefined;
@@ -1212,4 +1296,86 @@ export function parseKey(spec: string): Key {
   const cmd = EDIT_COMMANDS[[...combo, k.key.toLowerCase()].join("+")];
   if (cmd) k.commands = [cmd];
   return k;
+}
+
+// ---------------------------------------------------------------- show
+
+interface Shown {
+  page: Page;
+  /** What the pane shows: file:// address and path. */
+  url: string;
+  path: string;
+  /** The file's size and modification time when last loaded (see fileStamp). */
+  stamp: string;
+  /** Piped HTML's own file, removed with the pane. */
+  temp?: string;
+  timer?: ReturnType<typeof setInterval>;
+}
+
+/** Panes `show` opened, by name, for each session. */
+const shownBy = new WeakMap<App, Map<string, Shown>>();
+
+function shownPanes(app: App): Map<string, Shown> {
+  let m = shownBy.get(app);
+  if (!m) shownBy.set(app, (m = new Map()));
+  return m;
+}
+
+/** "f<size>:<mtime>" for a file, "" if there's none (a directory is "d"). */
+function fileStamp(path: string): string {
+  try {
+    const st = statSync(path);
+    return st.isFile() ? `f${st.size}:${st.mtimeMs}` : "d";
+  } catch {
+    return "";
+  }
+}
+
+const withoutHash = (url: string) => url.replace(/#.*$/, "");
+
+function showDir(tmp: string | null | undefined): string {
+  const dir = join(tmp || tmpdir(), "show");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+function stopShowing(shown: Map<string, Shown>, name: string): void {
+  const e = shown.get(name);
+  if (!e) return;
+  clearInterval(e.timer);
+  if (e.temp) rmSync(e.temp, { force: true });
+  shown.delete(name);
+}
+
+/** How often a shown file is checked for changes. */
+const WATCH_MS = 400;
+
+/**
+ * Reloads a shown file's pane when the file changes (an agent rewriting
+ * its plan). Polled: editors and agents often replace a file rather than
+ * write to it, which a file watcher loses track of. Ends with the pane, or
+ * once the pane has gone elsewhere (the person or an agent navigated it).
+ */
+function watchShown(app: App, shown: Map<string, Shown>, name: string, e: Shown, log: (msg: string) => void): void {
+  clearInterval(e.timer);
+  e.timer = undefined;
+  if (e.temp) return; // (piped HTML only changes by another show)
+  e.timer = setInterval(() => {
+    if (shown.get(name) !== e) return clearInterval(e.timer);
+    if (!app.isOpen(e.page)) return stopShowing(shown, name);
+    if (withoutHash(e.page.url) !== e.url) {
+      // Gone elsewhere (the person followed a link, say): not reloaded any more, until shown again.
+      if (e.page.url && !app.isPlaceholder(e.page.url)) {
+        clearInterval(e.timer);
+        e.timer = undefined;
+      }
+      return;
+    }
+    const now = fileStamp(e.path);
+    if (!now || now === e.stamp) return; // (gone for a moment while it's replaced: wait for it)
+    e.stamp = now;
+    log(`show: ${e.path} changed; reloading tab ${e.page.num}`);
+    app.agentReload(e.page);
+  }, WATCH_MS);
+  e.timer.unref?.();
 }

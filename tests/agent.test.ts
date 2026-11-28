@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CtlError, parseKey } from "../src/agent";
+import { resolve } from "node:path";
 import { parseCtl } from "../src/ctl";
 
 describe("parseKey", () => {
@@ -42,5 +43,11 @@ describe("parseCtl", () => {
     expect(parseCtl(["click", "--xy", "10,20.5"]).req).toMatchObject({ xy: [10, 20.5] });
     expect(parseCtl(["type", "1:2@1", "--", "-5"]).req).toMatchObject({ text: "-5" });
     expect(parseCtl(["shot", "-o", "a.png", "--full"])).toMatchObject({ out: "a.png", req: { full: true } });
+  });
+
+  test("show: a file made absolute, a name, where the pane goes", () => {
+    expect(parseCtl(["show", "plan.html"]).req).toMatchObject({ cmd: "show", path: resolve("plan.html"), newTab: false, down: false });
+    expect(parseCtl(["show", "/tmp/r.html", "--name", "report", "--down"]).req).toMatchObject({ path: "/tmp/r.html", name: "report", down: true });
+    expect(parseCtl(["show", "--new-tab", "/tmp/r.html"]).req).toMatchObject({ path: "/tmp/r.html", newTab: true });
   });
 });

@@ -1,6 +1,6 @@
 ---
 name: termium
-description: Drive a termium browser session (headless Chromium shown live in a person's terminal) from the shell - open pages, read an accessibility snapshot, click, type, wait, screenshot, eval - or attach Puppeteer, Playwright or chrome-devtools-mcp to it. Use when asked to browse, test or check a web page with termium, or to use a browser while a person watches it in their terminal (tmux, herdr).
+description: Drive a termium browser session (headless Chromium shown live in a person's terminal) from the shell - open pages, read an accessibility snapshot, click, type, wait, screenshot, eval, show an HTML plan or report you wrote - or attach Puppeteer, Playwright or chrome-devtools-mcp to it. Use when asked to browse, test or check a web page with termium, or to use a browser while a person watches it in their terminal (tmux, herdr).
 ---
 
 # termium for agents
@@ -71,6 +71,33 @@ machine-readable output, `--timeout SEC` (default 30). Exit status: 0 done,
 3 no such session, 4 timed out, 5 partly done (a `shot --full` of a page
 over 40 megapixels: the top part saved). Errors go to stderr in one line.
 
+## Showing your own HTML (plans, reports)
+
+Write a plan, a diff summary or a report as HTML and show it to the person
+in a pane beside the one they're on; their focus and keys stay where they
+are:
+
+```sh
+termium ctl -s default show plan.html            # opens a pane beside the focused one
+termium ctl -s default show plan.html            # again: updates that same pane
+generate-report | termium ctl show - --name report   # HTML from stdin
+```
+
+- `show FILE` reuses the pane it opened for that file; `--name NAME` names
+  the pane instead (the default name is the file, `stdin` for `-`), so
+  `show v2.html --name plan` replaces what the `plan` pane showed.
+- A shown file is reloaded whenever it changes: rewrite it and the pane
+  updates (it stops following the file if the pane goes elsewhere; `show`
+  it again). Relative links, images and stylesheets load next to the file;
+  piped HTML has no directory of its own, so inline them.
+- A second shown pane goes below the first, so the person's pane keeps
+  its width. `--down` puts the first one below instead of beside;
+  `--new-tab` opens it in a tab behind the person's (`select TAB` shows it).
+- The reply is the pane's tab (`--json`: plus `name` and `reused`); act on
+  it with `--tab N` like any other. Close it with `close TAB`.
+- The person's own session (`default`) is usually the one they're
+  looking at: show there, unless you were asked to use another.
+
 ## The DevTools endpoint (Puppeteer, Playwright, chrome-devtools-mcp)
 
 Every session's browser also listens for DevTools clients on loopback:
@@ -135,7 +162,7 @@ The port changes each time the session starts: ask `termium devtools`.
   Every command takes `--tab N` to act on another tab without showing it.
   `eval` isn't held back: it runs in the page as is, so don't use it to
   act on the person's tab while they're busy.
-- Commands that act (open, select, close, click, type, key, scroll) run
+- Commands that act (open, select, close, click, type, key, scroll, show) run
   one at a time per session, in order: several agents (or parallel calls)
   never interleave their typing. `--timeout` counts from when the session
   gets the command, waiting included; one whose time runs out while it
