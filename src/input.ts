@@ -265,7 +265,9 @@ export class InputParser {
       this.legacyChar(stalled[1]!, true);
       this.drain();
       this.watchStall();
-    }, 40);
+      // A color reply already past its number (ESC ] 11;) is no keypress: it
+      // may wait longer for the rest (a slow link splitting it).
+    }, /^\x1b\](?:1[01]|4;\d{1,3});/.test(stalled) ? 1000 : 40);
   }
 
   private drain(): void {

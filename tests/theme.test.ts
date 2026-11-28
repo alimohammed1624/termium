@@ -149,6 +149,13 @@ describe("input parser (legacy keys: ESC ] is also Alt+])", () => {
     for (const part of ["\x1b]", "11;rgb:fd", "fd/f6f6/e3e3\x1b", "\\x"]) p.feed(part);
     expect(evs.map((e) => e.type === "color" ? e.spec : e.key)).toEqual(["rgb:fdfd/f6f6/e3e3", "x"]);
   });
+  test("a color reply split by a pause is still read, not typed", async () => {
+    const { p, evs } = parser();
+    p.feed("\x1b]11;rgb:fd");
+    await Bun.sleep(150);
+    p.feed("fd/f6f6/e3e3\x1b\\x");
+    expect(evs.map((e) => (e.type === "color" ? e.spec : e.key))).toEqual(["rgb:fdfd/f6f6/e3e3", "x"]);
+  });
   test("a lone Alt+] is a key, after a moment", async () => {
     const { p, evs } = parser();
     p.feed("\x1b]");
