@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { bar, finished, holdsStop, mix, parsed, started, underline, type Load } from "./progress";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -62,6 +63,8 @@ export interface Page {
   url: string;
   title: string;
   loading: boolean;
+  /** Its loading bar (see progress.ts): kept after the load ends while the bar fills and fades. */
+  load?: Load;
   crashed: boolean;
   /** A pending JavaScript dialog, and the session (page or iframe) to answer it on. */
   dialog: { type: string; message: string; defaultPrompt: string; sessionId: string; edit?: LineEdit } | null;
@@ -423,6 +426,10 @@ export class App {
     });
     cdp.on("Page.frameStartedLoading", (p, sid) => this.setLoading(sid, p.frameId, true));
     cdp.on("Page.frameStoppedLoading", (p, sid) => this.setLoading(sid, p.frameId, false));
+    cdp.on("Page.domContentEventFired", (_p, sid) => {
+      const page = sid ? this.pages.get(sid) : undefined;
+      if (page) page.load = parsed(page.load, Date.now());
+    });
     const navigating = (on: boolean) => (p: any, sid?: string) => {
       const page = sid ? this.pages.get(sid) : undefined;
       if (page && (p.frameId ?? p.frame?.id) === page.targetId) page.navigating = on;
@@ -451,6 +458,7 @@ export class App {
       if (!page || page.crashed) return;
       page.crashed = true;
       page.loading = false;
+      page.load = undefined;
       this.showToast("Page crashed. Ctrl+R reloads it, or go to another address.");
     };
     cdp.on("Inspector.targetCrashed", (_p, sid) => crashed(sid ? this.pages.get(sid) : undefined));
@@ -1097,9 +1105,58 @@ export class App {
     const page = sid ? this.pages.get(sid) : undefined;
     if (!page || frameId !== page.targetId) return;
     page.loading = loading;
+    page.load = loading ? started(page.load, Date.now()) : finished(page.load, Date.now());
     if (loading) page.crashed = false;
     else void this.refreshInfo(page);
     this.queueChrome();
+    this.tickProgress();
+  }
+
+  private progressTimer: ReturnType<typeof setInterval> | null = null;
+  /** What the focused page's bar and stop button looked like when last drawn. */
+  private progressDrawn = "";
+
+  /** The focused page's bar, in whole cells of the address row, and its colour as it fades. */
+  private progressLook(page: Page | undefined, w: number): { cells: number; hex: string; stop: boolean } {
+    const now = Date.now();
+    const b = page && !page.crashed ? bar(page.load, now) : null;
+    // The fade is cut to a few steps: each one is a redraw of the row.
+    const alpha = b ? Math.ceil(b.alpha * 6) / 6 : 0;
+    return {
+      cells: b && alpha > 0 ? Math.round(b.fill * w) : 0,
+      hex: mix(C.base, C.mauve, alpha),
+      stop: !!page && (page.loading || holdsStop(page.load, now)),
+    };
+  }
+
+  /**
+   * Redraws the address row while any page's bar is moving, but only when
+   * what it shows has changed. Stops once every bar has faded.
+   */
+  private tickProgress(): void {
+    if (this.progressTimer) return;
+    this.progressTimer = setInterval(() => {
+      const now = Date.now();
+      let moving = false;
+      for (const page of this.pages.values()) {
+        if (page.load && !bar(page.load, now)) page.load = undefined;
+        else if (page.load) moving = true;
+      }
+      if (!moving || this.closingAll) {
+        clearInterval(this.progressTimer!);
+        this.progressTimer = null;
+      }
+      const mainCol = this.mainCol();
+      const look = this.progressLook(this.focused, this.cols - mainCol + 1);
+      if (`${look.cells} ${look.hex} ${look.stop}` !== this.progressDrawn) this.drawProgress();
+    }, 33);
+  }
+
+  /** Just the address row, with its bar. */
+  private drawProgress(): void {
+    if (!this.started || this.closingAll || !this.attached) return;
+    const mainCol = this.mainCol();
+    out(this.sync("\x1b[?25l" + this.drawUrlBar(mainCol, this.cols - mainCol + 1) + RESET + this.cursorSeq()));
   }
 
   private titlePoll: ReturnType<typeof setInterval> | null = null;
@@ -1164,6 +1221,8 @@ export class App {
   navigate(page: Page, url: string, attempt = 0): void {
     page.url = url;
     page.loading = true;
+    page.load = started(page.load, Date.now());
+    this.tickProgress();
     const seq = ++page.navSeq;
     page.navStarted = Date.now();
     this.cdp
@@ -2283,7 +2342,14 @@ export class App {
     }
   }
 
+  /** The address row, with the focused page's loading bar along its bottom edge. */
   private drawUrlBar(col: number, w: number): string {
+    const look = this.progressLook(this.focused, w);
+    this.progressDrawn = `${look.cells} ${look.hex} ${look.stop}`;
+    return underline(this.drawAddressRow(col, w, look.stop), look.cells, look.hex);
+  }
+
+  private drawAddressRow(col: number, w: number, stop: boolean): string {
     const page = this.focused;
     const barBg = bg(C.base);
     let s = at(2, col) + barBg;
@@ -2329,7 +2395,7 @@ export class App {
 
     const back = " ← ";
     const fwd = " → ";
-    const reload = page?.loading ? " ✕ " : " ⟳ ";
+    const reload = stop ? " ✕ " : " ⟳ ";
     const btnStyle = barBg + fg(C.subtext);
     s += btnStyle + back + fwd + reload + " ";
     const urlStart = col + width(back + fwd + reload) + 1;
@@ -3691,7 +3757,8 @@ export class App {
       if (col >= n.back[0] && col < n.back[1]) void this.history(page, -1);
       else if (col >= n.fwd[0] && col < n.fwd[1]) void this.history(page, 1);
       else if (col >= n.reload[0] && col < n.reload[1]) {
-        if (page.loading) this.cdp.send("Page.stopLoading", {}, page.sessionId).catch(() => {});
+        // The ✕ held up after a fast load (see MIN_STOP_MS) doesn't turn into a reload.
+        if (page.loading || holdsStop(page.load, Date.now())) this.cdp.send("Page.stopLoading", {}, page.sessionId).catch(() => {});
         else this.reload(page);
       } else if (col >= n.url[0] && col < n.url[1] && !this.prompt) this.openUrlPrompt(page);
       else if (this.noticeHit && col >= this.noticeHit[0] && col < this.noticeHit[1]) this.openUpdate();

@@ -225,6 +225,8 @@ class Term:
         # REP (CSI n b: repeat the previous character n times), which pyte lacks.
         if b"b" in cleaned:
             cleaned = _expand_rep(cleaned)
+        # Underline colour (the loading bar's), which pyte lacks: its numbers mustn't read as SGR codes.
+        cleaned = re.sub(rb"\x1b\[(?:58:[0-9:]*|59)m", b"", cleaned)
         # Colon-separated SGR (tmux writes 38:2:r:g:b) as pyte's semicolons.
         cleaned = re.sub(rb"\x1b\[[0-9:;]*:[0-9:;]*m", lambda m: m.group(0).replace(b"::", b":").replace(b":", b";"), cleaned)
         # 256-colour foregrounds kept exactly: pyte stores them as palette hex, where several
