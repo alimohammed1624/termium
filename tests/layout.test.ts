@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { computeLayout, enclosingSplit, leaf, leaves, neighbor, removeLeaf, splitLeaf, type Node } from "../src/layout";
+import { computeLayout, enclosingSplit, equalize, leaf, leaves, neighbor, removeLeaf, sideDir, splitLeaf, splitPreview, type Node, type Split } from "../src/layout";
 
 const area = { col: 1, row: 1, cols: 101, rows: 40 };
 
@@ -54,5 +54,50 @@ describe("layout", () => {
       expect(p.content.cols).toBeGreaterThanOrEqual(0);
       expect(p.content.rows).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  test("a split on the left or above puts the new pane first", () => {
+    expect(leaves(splitLeaf(leaf("a"), "a", "b", "h", true))).toEqual(["b", "a"]);
+    expect(sideDir("left")).toEqual({ dir: "h", before: true });
+    expect(sideDir("up")).toEqual({ dir: "v", before: true });
+    expect(sideDir("right")).toEqual({ dir: "h", before: false });
+    expect(sideDir("down")).toEqual({ dir: "v", before: false });
+  });
+
+  test("equalize gives panes in a row the same width", () => {
+    // a | (b | c), split right twice from the right pane: a half and two quarters.
+    let root: Node<string> = splitLeaf(leaf("a"), "a", "b", "h");
+    root = splitLeaf(root, "b", "c", "h");
+    equalize(root);
+    const widths = computeLayout(root, { col: 1, row: 1, cols: 92, rows: 40 }, true).panes.map((p) => p.rect.cols);
+    expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1);
+  });
+
+  test("equalize leaves splits the other way alone unless deep", () => {
+    // a | (b over c), with b over c at 0.8.
+    let root: Node<string> = splitLeaf(leaf("a"), "a", "b", "h");
+    root = splitLeaf(root, "b", "c", "v");
+    const outer = root as Split<string>;
+    const inner = outer.b as Split<string>;
+    outer.ratio = 0.2;
+    inner.ratio = 0.8;
+    equalize(outer);
+    expect(outer.ratio).toBe(0.5);
+    expect(inner.ratio).toBe(0.8);
+    equalize(outer, true);
+    expect(inner.ratio).toBe(0.5);
+  });
+
+  test("the split preview is where the new divider will be", () => {
+    for (const dir of ["h", "v"] as const) {
+      const { panes } = computeLayout(leaf("a"), area, true);
+      const p = panes[0]!;
+      const preview = splitPreview(p.rect, p.content, dir)!;
+      const after = computeLayout(splitLeaf(leaf("a"), "a", "b", dir), area, true);
+      const sep = after.seps[0]!.rect;
+      if (dir === "h") expect(preview).toEqual({ ...sep, row: p.content.row, rows: p.content.rows });
+      else expect(preview.row).toBe(sep.row);
+    }
+    expect(splitPreview({ col: 1, row: 1, cols: 2, rows: 1 }, { col: 1, row: 1, cols: 2, rows: 1 }, "h")).toBeNull();
   });
 });
