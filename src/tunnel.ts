@@ -88,14 +88,18 @@ export function freePort(): Promise<number> {
   });
 }
 
-function portOpen(port: number): Promise<boolean> {
+/** Whether a SOCKS5 proxy answers on loopback `port` (not merely something listening there). */
+function socksReady(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const s = createConnection({ host: "127.0.0.1", port });
     const done = (ok: boolean) => {
       s.destroy();
       resolve(ok);
     };
-    s.once("connect", () => done(true));
+    // Greeting: SOCKS5, one method, "no authentication"; ssh answers 05 00.
+    s.once("connect", () => s.write(Buffer.from([5, 1, 0])));
+    s.once("data", (b: Buffer) => done(b[0] === 5 && b[1] === 0));
+    s.once("close", () => done(false));
     s.once("error", () => done(false));
     s.setTimeout(1000, () => done(false));
   });
@@ -159,7 +163,7 @@ export class Tunnel {
       await Promise.race([reading, Bun.sleep(500)]);
       return lastLines(err) || (proc.signalCode || (proc.exitCode ?? 0) > 128 ? "ssh was stopped" : proc.exitCode === 0 ? "ssh ended" : `ssh exited with code ${proc.exitCode}`);
     });
-    // Ready once something answers on the port while this ssh still runs; given up
+    // Ready once its SOCKS proxy answers on the port while this ssh still runs; given up
     // on (ssh stopped) if it never does, past ssh's own ConnectTimeout and a login.
     const deadline = Date.now() + this.openTimeoutMs;
     for (;;) {
@@ -174,7 +178,7 @@ export class Tunnel {
         proc.kill();
         throw new Error("stopped");
       }
-      if (await portOpen(this.port)) break;
+      if (await socksReady(this.port)) break;
       if (Date.now() > deadline) {
         this.lastError = `ssh connected, but its SOCKS proxy never opened on 127.0.0.1:${this.port}`;
         if (this.proc === proc) this.proc = null;

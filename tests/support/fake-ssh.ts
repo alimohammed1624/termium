@@ -15,6 +15,8 @@ if (dest === "denied") {
 if (process.env.FAKE_SSH_PIDFILE) writeFileSync(process.env.FAKE_SSH_PIDFILE, String(process.pid));
 const port = Number(d.split(":").pop());
 if (dest === "noforward") setInterval(() => {}, 1000); // connected, but no proxy (ClearAllForwardings)
-else createServer((s) => s.end()).listen(port, "127.0.0.1");
+// "plain": something listens there, but it isn't a SOCKS proxy.
+else if (dest === "plain") createServer((s) => s.end()).listen(port, "127.0.0.1");
+else createServer((s) => s.once("data", () => s.end(Buffer.from([5, 0])))).listen(port, "127.0.0.1"); // SOCKS5: no auth
 const ms = Number(process.env.FAKE_SSH_EXIT_MS);
 if (ms > 0) setTimeout(() => process.exit(255), ms);

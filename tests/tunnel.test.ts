@@ -69,6 +69,13 @@ test("ssh that runs but never opens its proxy fails the start, and is stopped", 
   await t.stop();
 });
 
+test("something listening on the port that isn't a SOCKS proxy isn't taken for the tunnel", async () => {
+  const t = new Tunnel("plain", () => {});
+  t.openTimeoutMs = 700;
+  await expect(t.start()).rejects.toThrow(/SOCKS proxy never opened/);
+  await t.stop();
+});
+
 test("user ssh config can't send ssh to the background or drop the forward", () => {
   const a = sshArgv("h", 1);
   expect(a).toContain("ForkAfterAuthentication=no");
