@@ -104,7 +104,7 @@ function urlParts(url: string): { parts: string[]; extra: string[]; whole: strin
   if (!/^[\d.]+$|^\[/.test(host)) parts.push(...host.split(".").slice(0, -1));
   if (u.port) parts.push(`:${u.port}`, `${host}:${u.port}`);
   for (const seg of u.pathname.split("/")) parts.push(clean(seg));
-  const whole = clean(u.host + u.pathname.replace(/\/$/, "") + u.search + u.hash);
+  const whole = clean(u.host + u.pathname + u.search + u.hash);
   return { parts: parts.filter(Boolean), extra: [clean(u.search), clean(u.hash)].filter(Boolean), whole, id: u.href };
 }
 
@@ -141,6 +141,7 @@ export function distinctTitles(tabs: readonly { title: string; url: string }[], 
   const key = (s: string) => truncate(s, max);
   const groups = new Map<string, number[]>();
   tabs.forEach((t, i) => groups.set(key(t.title), [...(groups.get(key(t.title)) ?? []), i]));
+  const ids = tabs.map((t) => urlParts(t.url).id);
   // Each disambiguated tab's labels, best first.
   const options = new Map<number, string[]>();
   for (const group of groups.values()) {
@@ -162,21 +163,42 @@ export function distinctTitles(tabs: readonly { title: string; url: string }[], 
       out[i] = labels[0]!;
     });
   }
-  // Labels that still look alike (a part cut short, or another tab's title):
-  // those tabs move on together to the first labels that all look different.
-  const clashes = new Map<string, number[]>();
-  out.forEach((o, i) => clashes.set(key(o), [...(clashes.get(key(o)) ?? []), i]));
-  for (const clash of clashes.values()) {
-    const movers = clash.filter((i) => options.has(i));
-    if (clash.length < 2 || !movers.length) continue;
-    const rest = new Set(out.filter((_, i) => !movers.includes(i)).map(key));
-    const steps = Math.max(...movers.map((i) => options.get(i)!.length));
-    for (let step = 1; step < steps; step++) {
-      const labels = movers.map((i) => options.get(i)![Math.min(step, options.get(i)!.length - 1)]!);
-      const keys = labels.map(key);
-      if (new Set(keys).size < keys.length || keys.some((k) => rest.has(k))) continue;
-      movers.forEach((i, m) => (out[i] = labels[m]!));
-      break;
+  // Labels that still look alike (a part cut short, or another tab's title)
+  // move on: together to the first step where all look different, else each
+  // to its first label that no other tab shows. Again until nothing changes.
+  for (let pass = 0, changed = true; changed && pass < tabs.length; pass++) {
+    changed = false;
+    const clashes = new Map<string, number[]>();
+    out.forEach((o, i) => clashes.set(key(o), [...(clashes.get(key(o)) ?? []), i]));
+    for (const clash of clashes.values()) {
+      // Tabs on one URL can't differ: they move as one.
+      const movers = clash.filter((i, k) => options.has(i) && clash.findIndex((j) => options.has(j) && ids[j] === ids[i]) === k);
+      if (new Set(clash.map((i) => ids[i])).size < 2 || !movers.length) continue;
+      const taken = new Set(out.filter((_, i) => !clash.includes(i) || !options.has(i)).map(key));
+      const steps = Math.max(...movers.map((i) => options.get(i)!.length));
+      let next: string[] | undefined;
+      for (let step = 1; step < steps && !next; step++) {
+        const labels = movers.map((i) => options.get(i)![Math.min(step, options.get(i)!.length - 1)]!);
+        const keys = labels.map(key);
+        if (new Set(keys).size === keys.length && !keys.some((k) => taken.has(k))) next = labels;
+      }
+      if (!next) {
+        // The tab with the fewest labels left picks first.
+        const free = (i: number) => options.get(i)!.filter((l) => !taken.has(key(l))).length;
+        const picks = new Map<number, string>();
+        for (const i of [...movers].sort((a, b) => free(a) - free(b))) {
+          const pick = options.get(i)!.find((l) => !taken.has(key(l))) ?? out[i]!;
+          taken.add(key(pick));
+          picks.set(i, pick);
+        }
+        next = movers.map((i) => picks.get(i)!);
+      }
+      clash.forEach((i) => {
+        const m = movers.findIndex((j) => ids[j] === ids[i]);
+        if (m < 0 || !options.has(i) || out[i] === next[m]) return;
+        out[i] = next[m]!;
+        changed = true;
+      });
     }
   }
   return out;

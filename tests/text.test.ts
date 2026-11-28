@@ -166,6 +166,35 @@ describe("distinctTitles", () => {
     ]);
   });
 
+  test("labels that still look alike keep moving until they differ, whatever the tab order", () => {
+    const y = "y".repeat(24), t = "t".repeat(24);
+    const tabs = [
+      tab("Chain", `http://h/chain/a/${y}A${t}`),
+      tab("Chain", `http://h/chain/${y}B${t}b`),
+      tab("Chain", `http://h/chain/${y}C${t}c`),
+      tab("Chain · a", "http://h/l1"),
+      tab("Chain · …ttttttttttttt", "http://h/l2"),
+    ];
+    for (const order of [[0, 1, 2, 3, 4], [1, 2, 0, 3, 4], [3, 4, 2, 1, 0]]) {
+      const out = distinctTitles(order.map((i) => tabs[i]!), 22);
+      expect(new Set(out).size).toBe(5);
+      for (const s of out) expect(width(s)).toBeLessThanOrEqual(22);
+    }
+  });
+
+  test("tabs with fewer labels left choose first", () => {
+    const p = "p".repeat(24), y = "y".repeat(24), q = "q".repeat(35);
+    const out = distinctTitles(
+      [tab("Lock", `http://h/lock/${p}X${y}z/${q}D${y}`), tab("Lock", `http://h/lock/${p}Y${y}y/${q}E${y}`), tab("Lock", `http://h/lock/${p}Z${y}y`)],
+      22,
+    );
+    expect(new Set(out).size).toBe(3);
+  });
+
+  test("a trailing slash tells URLs apart", () => {
+    expect(new Set(distinctTitles([tab("R", "http://h/slash"), tab("R", "http://h/slash/")], 22)).size).toBe(2);
+  });
+
   test("tabs on the same URL, or with no URL, are left alone", () => {
     expect(distinctTitles([tab("T", "https://a.com/"), tab("T", "https://a.com/")], 22)).toEqual(["T", "T"]);
     expect(distinctTitles([tab("New Tab", ""), tab("New Tab", "")], 22)).toEqual(["New Tab", "New Tab"]);
