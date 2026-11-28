@@ -405,7 +405,7 @@ try:
     time.sleep(2)
     check("an opted-out takeover shows no box, notice or badge", not update_ui(c), (c.line(1), c.line(2)))
     c.key("ctrl+b"); c.key("shift+u")
-    check("...and Ctrl+B U says update news is off", c.wait_for(lambda: "Update news is off" in c.line(2), 5) and not box_open(c), c.line(2))
+    check("...and Ctrl+B U says update news is off", c.wait_for(lambda: "Update news is off" in c.text(), 5) and not box_open(c), c.text())
     check("...and it didn't check either", len(HITS) == n, HITS[n:])
     w = term(cur_bin, "attach", "offer", state="st-offer", cols=60, rows=24)
     check("taken back by a terminal that wants it: a narrow terminal still shows a (short) badge", w.wait_for(lambda: "↑" in w.line(1), 15), w.line(1))
@@ -475,7 +475,7 @@ try:
     time.sleep(2)
     check("...but no offer shows (the cached older one is withdrawn)", not notice(k), k.line(2))
     k.key("ctrl+b"); k.key("shift+u")
-    check("...and Ctrl+B U says it was skipped", k.wait_for(lambda: "was skipped" in k.line(2), 5) and not box_open(k), k.line(2))
+    check("...and Ctrl+B U says it was skipped", k.wait_for(lambda: "was skipped" in k.text(), 5) and not box_open(k), k.text())
     stop("skip2")
 
     # ------------------------------------------------ a release pulled since it was cached: the offer is withdrawn
@@ -753,7 +753,7 @@ try:
     sb = term(cur_bin, "attach", "sk2", "--no-update-check", state="st-sk2")
     sb.wait_text("termium test page", 20); holder.wait(); time.sleep(2)
     check("a skip saved after an opted-out terminal took over says nothing there (but is saved)",
-          "skipped" not in sb.line(2) and not update_ui(sb) and (cache("st-sk2") or {}).get("skipped") == f"v{NEXT}", (sb.line(2), cache("st-sk2")))
+          "skipped" not in sb.text() and not update_ui(sb) and (cache("st-sk2") or {}).get("skipped") == f"v{NEXT}", (sb.text(), cache("st-sk2")))
     stop("sk2")
 
     # ------------------------------------------------ a restart keeps the session's browser, profile and data dirs, not the restarting shell's
@@ -887,16 +887,16 @@ try:
     sk.wait_for(lambda: notice(sk), 40)
     holder = hold_lock(14)
     open_box(sk); sk.key("s")
-    check("skip, cache locked throughout: says it couldn't be saved", sk.wait_for(lambda: "couldn't save it" in sk.line(2), 16) and
-          (cache("st-sklock") or {}).get("skipped") is None, (sk.line(2), cache("st-sklock")))
+    check("skip, cache locked throughout: says it couldn't be saved", sk.wait_for(lambda: "couldn't save it" in sk.text(), 16) and
+          (cache("st-sklock") or {}).get("skipped") is None, (sk.text(), cache("st-sklock")))
     holder.wait()
     stop("sklock")
     sk = term(cur_bin, "-s", "sklock", "--incognito", PAGE, state="st-sklock")
     check("skip, not saved: offered again in the next session", sk.wait_for(lambda: notice(sk), 40))
     holder = hold_lock(3)
     open_box(sk); sk.key("s")
-    check("skip, cache locked a while: saved once free, then says so", sk.wait_for(lambda: "skipped: not offered again" in sk.line(2), 12) and
-          (cache("st-sklock") or {}).get("skipped") == f"v{NEXT}", (sk.line(2), cache("st-sklock")))
+    check("skip, cache locked a while: saved once free, then says so", sk.wait_for(lambda: "skipped: not offered again" in sk.text(), 12) and
+          (cache("st-sklock") or {}).get("skipped") == f"v{NEXT}", (sk.text(), cache("st-sklock")))
     holder.wait()
     stop("sklock")
 
