@@ -76,6 +76,14 @@ try:
     check("still marked while it types", tab_dot(2) and space_dot(1), (tab_bar(), space_row(1)))
     check("the mark clears after typing ends", h.wait_for(lambda: not tab_dot(2) and not space_dot(1), 6), (tab_bar(), space_row(1)))
 
+    # --- a click that opens a dialog: both its "!" and the agent's "●"
+    r = ctl("click", ref(snap, "button", "Alert"))
+    check("ctl clicks a button that alerts", r.returncode == 0, (r.returncode, r.stdout, r.stderr))
+    check("the tab shows the dialog and the agent together", h.wait_for(lambda: re.search(r" 2 !● ", tab_bar()) and space_dot(1), 3), tab_bar())
+    check("then only the dialog", h.wait_for(lambda: re.search(r" 2 ! ", tab_bar()) and not space_dot(1), 6), tab_bar())
+    r = ctl("dialog", "dismiss")
+    check("the agent dismisses it", r.returncode == 0 and h.wait_for(lambda: not re.search(r" 2 !", tab_bar()), 5), (r.stdout, r.stderr, tab_bar()))
+
     # --- a tab in a space the person isn't on
     h.key("ctrl+b"); h.key("shift+n"); time.sleep(0.8); h.key("escape"); time.sleep(0.5)
     check("the person moved to a new space", space_row(2).startswith(" ● 2"), space_row(2))
@@ -85,6 +93,18 @@ try:
     check("and the mark clears", h.wait_for(lambda: not space_dot(1), 6), space_row(1))
     val = json.loads(ctl("eval", "document.getElementById('inp').value", str(bg), "--json").stdout or "{}").get("value")
     check("the agent's typing landed", val == "hello again", val)
+
+    # --- a title that starts with "●" isn't taken for the agent's mark
+    def fg_at(text):
+        line = tab_bar(); col = line.find(text)
+        with h.lock:
+            return str(h.screen.buffer[0][col].fg).lower() if col >= 0 else None
+    ctl("select", "1")
+    check("the agent's own dot is in the accent colour", h.wait_for(lambda: fg_at("● Agent") == "cba6f7", 3), (tab_bar(), fg_at("● Agent")))
+    h.wait_for(lambda: "Agent fixture" in tab_bar() and not tab_dot(1), 6)
+    ctl("eval", "document.title = '● not an agent'", "1")
+    h.wait_text("● not an agent", 5); time.sleep(0.5)
+    check("an idle tab's own ● keeps the title's colour", fg_at("● not") not in (None, "cba6f7"), (tab_bar(), fg_at("● not")))
 finally:
     if h:
         h.stop_server(SESSION)
