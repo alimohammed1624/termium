@@ -76,6 +76,134 @@ export function fit(s: string, n: number): string {
   return t + " ".repeat(Math.max(0, n - width(t)));
 }
 
+/** Between a title and the part of its URL that tells it apart. */
+const TITLE_SEP = " · ";
+/** Columns of the title kept before a long distinguishing part is cut instead. */
+const MIN_TITLE = 8;
+
+/**
+ * Parts of a URL that can tell it apart: host (and its labels), port and path segments first,
+ * then query, fragment and scheme. `whole` is the URL as shown, `id` the URL itself.
+ */
+function urlParts(url: string): { parts: string[]; extra: string[]; whole: string; id: string } {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return { parts: [], extra: [], whole: "", id: "" };
+  }
+  const clean = (s: string) => {
+    try {
+      s = decodeURIComponent(s);
+    } catch {}
+    return s.replace(CONTROLS, "");
+  };
+  const host = u.hostname.replace(/^www\./, "");
+  const parts: string[] = [host, u.hostname];
+  // A name's labels (not the top-level one): "eu" in eu.example.com.
+  if (!/^[\d.]+$|^\[/.test(host)) parts.push(...host.split(".").slice(0, -1));
+  if (u.port) parts.push(`:${u.port}`, `${host}:${u.port}`);
+  for (const seg of u.pathname.split("/")) parts.push(clean(seg));
+  const whole = clean(u.host + u.pathname + u.search + u.hash);
+  return { parts: parts.filter(Boolean), extra: [clean(u.search), clean(u.hash), u.protocol].filter(Boolean), whole, id: u.href };
+}
+
+/** `title · suffix` in at most `max` columns; the title gives way first, down to MIN_TITLE. */
+function withSuffix(title: string, suffix: string, max: number, keepEnd: boolean): string {
+  const tw = width(title.replace(CONTROLS, " "));
+  const titleRoom = Math.max(Math.min(tw, MIN_TITLE), max - width(TITLE_SEP) - width(suffix));
+  const suffixRoom = max - width(TITLE_SEP) - titleRoom;
+  if (suffixRoom < Math.min(2, width(suffix))) return truncate(title, max);
+  let tail = suffix;
+  if (width(suffix) > suffixRoom) {
+    if (!keepEnd) tail = truncate(suffix, suffixRoom);
+    else {
+      const segs = [...segmenter.segment(suffix)].map((s) => s.segment);
+      tail = "";
+      while (segs.length && width(segs[segs.length - 1]! + tail) <= suffixRoom - 1) tail = segs.pop()! + tail;
+      tail = "…" + tail;
+    }
+  }
+  return truncate(title, titleRoom).replace(/\s+…$/, "…") + TITLE_SEP + tail;
+}
+
+/**
+ * Labels for a row of tabs whose titles are cut to `max` columns. Tabs that
+ * would look the same get the shortest part of their URL that no other of
+ * them has (host, port or path segment; else query or fragment; else the
+ * whole URL), after a " · ", all within `max` columns. If cutting that part
+ * makes two labels (or a label and another tab's title) look the same, the
+ * part's end or another part is shown instead. Every other title comes back
+ * unchanged; tabs on the very same URL can't be told apart by it.
+ */
+export function distinctTitles(tabs: readonly { title: string; url: string }[], max: number): string[] {
+  const out = tabs.map((t) => t.title);
+  const key = (s: string) => truncate(s, max);
+  const groups = new Map<string, number[]>();
+  tabs.forEach((t, i) => groups.set(key(t.title), [...(groups.get(key(t.title)) ?? []), i]));
+  const ids = tabs.map((t) => urlParts(t.url).id);
+  // Each disambiguated tab's labels, best first.
+  const options = new Map<number, string[]>();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const info = group.map((i) => urlParts(tabs[i]!.url));
+    group.forEach((i, k) => {
+      const mine = info[k]!;
+      const others = info.filter((o) => o.id !== mine.id);
+      if (!mine.whole || !others.length) return;
+      const taken = new Set(others.flatMap((o) => [...o.parts, ...o.extra]));
+      const byWidth = (ps: string[]) => ps.filter((p) => !taken.has(p)).sort((a, b) => width(a) - width(b));
+      const title = tabs[i]!.title;
+      const labels = [...byWidth(mine.parts), ...byWidth(mine.extra)].flatMap((p) => [
+        withSuffix(title, p, max, false),
+        withSuffix(title, p, max, true),
+      ]);
+      labels.push(withSuffix(title, mine.whole, max, true));
+      options.set(i, [...new Set(labels)]);
+      out[i] = labels[0]!;
+    });
+  }
+  // Labels that still look alike (a part cut short, or another tab's title)
+  // move on: together to the first step where all look different, else each
+  // to its first label that no other tab shows. Again until nothing changes.
+  for (let pass = 0, changed = true; changed && pass < tabs.length; pass++) {
+    changed = false;
+    const clashes = new Map<string, number[]>();
+    out.forEach((o, i) => clashes.set(key(o), [...(clashes.get(key(o)) ?? []), i]));
+    for (const clash of clashes.values()) {
+      // Tabs on one URL can't differ: they move as one.
+      const movers = clash.filter((i, k) => options.has(i) && clash.findIndex((j) => options.has(j) && ids[j] === ids[i]) === k);
+      if (new Set(clash.map((i) => (options.has(i) ? ids[i] : i))).size < 2 || !movers.length) continue;
+      const taken = new Set(out.filter((_, i) => !clash.includes(i) || !options.has(i)).map(key));
+      const steps = Math.max(...movers.map((i) => options.get(i)!.length));
+      let next: string[] | undefined;
+      for (let step = 1; step < steps && !next; step++) {
+        const labels = movers.map((i) => options.get(i)![Math.min(step, options.get(i)!.length - 1)]!);
+        const keys = labels.map(key);
+        if (new Set(keys).size === keys.length && !keys.some((k) => taken.has(k))) next = labels;
+      }
+      if (!next) {
+        // The tab with the fewest labels left picks first.
+        const free = (i: number) => options.get(i)!.filter((l) => !taken.has(key(l))).length;
+        const picks = new Map<number, string>();
+        for (const i of [...movers].sort((a, b) => free(a) - free(b))) {
+          const pick = options.get(i)!.find((l) => !taken.has(key(l))) ?? out[i]!;
+          taken.add(key(pick));
+          picks.set(i, pick);
+        }
+        next = movers.map((i) => picks.get(i)!);
+      }
+      clash.forEach((i) => {
+        const m = movers.findIndex((j) => ids[j] === ids[i]);
+        if (m < 0 || !options.has(i) || out[i] === next[m]) return;
+        out[i] = next[m]!;
+        changed = true;
+      });
+    }
+  }
+  return out;
+}
+
 export class LineEdit {
   cursor: number;
   selectAll: boolean;
