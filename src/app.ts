@@ -38,7 +38,8 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
-import { HIDE_PAGE_SCROLLBAR, barCells, offsetFor, scrollScript, thumb, type ScrollMetrics } from "./scrollbar";
+import { HIDE_PAGE_SCROLLBAR, barCells, markRow, offsetFor, scrollScript, thumb, type ScrollMetrics } from "./scrollbar";
+import { CLEAR_FIND, FIND_STYLE, findCount, findScript, type FindResult } from "./find";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -127,6 +128,8 @@ export interface Page {
   scroll?: ScrollMetrics;
   /** Document positions (CSS px from the top) marked in its scrollbar. */
   scrollMarks?: number[];
+  /** The selected one of those (the current find match). */
+  scrollCurrent?: number;
   /** A scroll query is running ("again": run another after it). */
   scrollQuery?: "busy" | "again";
   /** What its scrollbar shows now, to skip redrawing the same. */
@@ -177,6 +180,12 @@ type Prompt =
   | { kind: "file"; edit: LineEdit; page: Page; sessionId: string; backendNodeId: number; multiple: boolean }
   | { kind: "rename"; edit: LineEdit; space: Space }
   | { kind: "dialog"; edit: LineEdit; page: Page }
+  /**
+   * Find in page: `result` answers the latest search sent (`query`, number
+   * `seq`); `target` is the match asked for while that answer is on its way,
+   * `steps` the Enters (+1) and Shift+Enters (-1) pressed before a new search answered.
+   */
+  | { kind: "find"; edit: LineEdit; page: Page; query: string; seq: number; result?: FindResult; target?: number; steps?: number }
   | { kind: "confirm"; tag: "quit" | "close" | "restart"; edit: LineEdit; message: string; onYes: () => void };
 
 type Mode = "normal" | "prefix" | "resize" | "spaces" | "help" | "update";
@@ -295,6 +304,7 @@ const HELP: [string, string][] = [
   ["Ctrl+R / F5", "reload"],
   ["Alt+= / Alt+- / Alt+0", "zoom in / out / reset"],
   ["Ctrl+C", "copy selection to clipboard"],
+  ["Ctrl+F", "find in page (Enter / Shift+Enter, Esc)"],
   ["Ctrl+Q", "quit"],
   ["", ""],
   ["Ctrl+B then…", ""],
@@ -441,9 +451,14 @@ export class App {
     cdp.on("Page.frameStartedNavigating", navigating(true));
     cdp.on("Page.frameNavigated", navigating(false));
     // A new document (in the page or one of its frames): element ids handed out before are void.
-    cdp.on("Page.frameNavigated", (_p, sid) => {
+    cdp.on("Page.frameNavigated", (p, sid) => {
       const page = this.ownerOf(sid);
       if (page) page.docGen = (page.docGen ?? 0) + 1;
+      // A new document in the page: what find found there is gone.
+      if (page && this.prompt?.kind === "find" && this.prompt.page === page && p.frame?.id === page.targetId) {
+        this.prompt = null;
+        this.queueChrome();
+      }
     });
     cdp.on("Page.frameStoppedLoading", navigating(false));
     cdp.on("Page.navigatedWithinDocument", (p, sid) => {
@@ -823,6 +838,7 @@ export class App {
       this.cdp.send("Inspector.enable", {}, sid),
       this.ua ? this.cdp.send("Emulation.setUserAgentOverride", this.ua, sid) : null,
       this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: SELECT_POPUP, worldName: "termium", runImmediately: true }, sid),
+      this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: FIND_STYLE, worldName: "termium", runImmediately: true }, sid),
       // termium draws the page's scrollbar itself (TERMIUM_NATIVE_SCROLLBAR=1 keeps the browser's too).
       process.env.TERMIUM_NATIVE_SCROLLBAR === "1" ? null :
         this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: HIDE_PAGE_SCROLLBAR, worldName: "termium", runImmediately: true }, sid),
@@ -1473,7 +1489,7 @@ export class App {
     // page. (A page's own dialog or file chooser stays: the page waits on it.)
     this.resetInput();
     if (this.mode === "update" || this.mode === "help") this.mode = "normal";
-    if (this.prompt && (this.prompt.kind === "url" || this.prompt.kind === "rename" || this.prompt.kind === "confirm")) this.prompt = null;
+    if (this.prompt && (this.prompt.kind === "url" || this.prompt.kind === "rename" || this.prompt.kind === "find" || this.prompt.kind === "confirm")) this.prompt = null;
     this.terminalGen++;
     this.attached = true;
     this.pixelMouse = t.pixelMouse;
@@ -2169,6 +2185,7 @@ export class App {
     if (!this.started || this.closingAll || !this.attached) return;
     // A dialog or file chooser hidden by another prompt comes back once that's done.
     this.syncPrompt();
+    this.syncFind();
     let s = "\x1b[?25l";
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
@@ -2365,16 +2382,20 @@ export class App {
       url: [urlStart, urlStart + fieldW],
     };
 
-    if (prompt && (prompt.kind === "url" || prompt.kind === "rename" || prompt.kind === "file")) {
+    if (prompt && (prompt.kind === "url" || prompt.kind === "rename" || prompt.kind === "file" || prompt.kind === "find")) {
       const label =
         prompt.kind === "rename" ? "Rename space: " :
+        prompt.kind === "find" ? "Find: " :
         prompt.kind === "file" ? (prompt.multiple ? "Upload files (space-separated): " : "Upload file: ") : "";
-      const v = prompt.edit.view(fieldW - 2 - width(label));
+      // The match count, at the field's right end.
+      const count = prompt.kind === "find" && prompt.edit.text && prompt.result ? ` ${findCount(prompt.result)} ` : "";
+      const v = prompt.edit.view(fieldW - 2 - width(label) - width(count));
       const text = prompt.edit.selectAll
         ? `\x1b[7m${v.text}\x1b[27m`
         : v.text;
       s += bg(C.surface1) + fg(C.text) + " " + fg(C.overlay) + label + fg(C.text) + text +
-        " ".repeat(Math.max(0, fieldW - 1 - width(label) - width(v.text))) + RESET;
+        " ".repeat(Math.max(0, fieldW - 1 - width(label) - width(v.text) - width(count))) +
+        fg(prompt.kind === "find" && prompt.result?.total === 0 ? C.red : C.overlay) + count + RESET;
       this.promptCursor = prompt.edit.selectAll ? null : { row: 2, col: urlStart + 1 + width(label) + v.cursorCol };
     } else {
       this.promptCursor = null;
@@ -2443,8 +2464,12 @@ export class App {
         const v = m?.cssLayoutViewport;
         const total = m?.cssContentSize?.height;
         if (!v || typeof total !== "number") return;
+        const relaid = !!page.scroll && page.scroll.total !== total;
         page.scroll = { y: v.pageY, view: v.clientHeight, total };
         this.redrawScrollbar(page);
+        // The document's height changed: the matches may have moved.
+        const p = this.prompt;
+        if (relaid && p?.kind === "find" && p.page === page && p.query) this.runFind(p, "keep", p.result?.index ?? 0);
       })
       .catch(() => {})
       .finally(() => {
@@ -2464,12 +2489,12 @@ export class App {
 
   /** The page's scrollbar (an empty column when it doesn't scroll); "" if unchanged and not `always`. */
   private scrollbarSeq(page: Page, bar: Rect, always = true): string {
-    const cells = barCells(page.scroll, bar.rows, page.scrollMarks);
+    const cells = barCells(page.scroll, bar.rows, page.scrollMarks, page.scrollCurrent);
     const dragged = this.barDrag?.page === page;
     const key = `${bar.row},${bar.col},${bar.rows}:${dragged}:${cells?.map((c) => c.ch + c.fg + c.bg).join() ?? ""}`;
     if (!always && key === page.barDrawn) return "";
     page.barDrawn = key;
-    const colour = { thumb: dragged ? C.subtext : C.overlay, track: C.crust, mark: C.yellow };
+    const colour = { thumb: dragged ? C.subtext : C.overlay, track: C.crust, mark: C.yellow, current: C.peach };
     let s = "";
     for (let r = 0; r < bar.rows; r++) {
       const c = cells?.[r];
@@ -3052,6 +3077,7 @@ export class App {
         const p = this.prompt;
         if (p && p.kind !== "confirm" && (p.kind !== "dialog" || p.page.dialog?.type === "prompt")) {
           p.edit.insert(ev.text);
+          if (p.kind === "find") this.runFind(p, "near");
           this.queueChrome();
         } else if (p) {
           // A yes/no prompt or a page blocked on alert/confirm: nowhere for text to go.
@@ -3113,7 +3139,11 @@ export class App {
     if (!page) return;
     if (BROWSER_RESERVED.has(combo)) return;
     if (BROWSER_SHORTCUTS.has(combo)) {
-      this.domKey(page, ev, "keydown");
+      // Ctrl+F opens termium's find bar, unless the page handles it itself (as in Chrome).
+      const find = combo === "ctrl+f" ? (cancelled: boolean) => {
+        if (!cancelled && this.focused === page && !this.prompt && this.mode === "normal") this.openFind(page);
+      } : undefined;
+      this.domKey(page, ev, "keydown", find);
       this.syntheticDown.set(ev.code || ev.key, { page, ev });
       return;
     }
@@ -3226,6 +3256,9 @@ export class App {
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
+      case "f":
+        if (page) this.openFind(page);
+        return;
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
       case "shift+u": this.openUpdate(); return;
@@ -3310,7 +3343,13 @@ export class App {
       }
       return;
     }
+    if (prompt.kind === "find" && ev.key === "Enter") return this.stepFind(prompt, ev.mods.shift ? -1 : 1);
+    if (prompt.kind === "find" && comboOf(ev) === "ctrl+f") {
+      prompt.edit.selectAll = true;
+      return this.queueChrome();
+    }
     const result = prompt.edit.key(ev);
+    if (prompt.kind === "find" && !result && prompt.edit.text !== prompt.query) this.runFind(prompt, "near");
     if (result && prompt.kind === "file") prompt.page.fileChooser = null;
     if (result === "cancel" && prompt.kind === "file") this.cancelFileInput(prompt.sessionId, prompt.backendNodeId);
     if (result === "cancel") {
@@ -3394,6 +3433,93 @@ export class App {
     this.queueChrome();
   }
 
+  /** The last text searched for: the find bar opens with it (selected, so typing replaces it). */
+  private lastFind = "";
+  /** The page find has highlighted and marked (cleared by syncFind once its find bar is gone). */
+  private findShown: Page | null = null;
+
+  private openFind(page: Page): void {
+    if (page.dialog) return;
+    const prompt: Extract<Prompt, { kind: "find" }> = { kind: "find", edit: new LineEdit(this.lastFind, true), page, query: "", seq: 0 };
+    this.prompt = prompt;
+    if (this.lastFind) this.runFind(prompt, "near");
+    this.queueChrome();
+  }
+
+  /** Searches the find bar's text in its page; the answer updates the count and the scrollbar's marks. */
+  private runFind(prompt: Extract<Prompt, { kind: "find" }>, mode: "near" | "goto" | "keep", index = 0): void {
+    const { page } = prompt;
+    const query = prompt.edit.text;
+    const seq = ++prompt.seq;
+    prompt.target = mode === "goto" ? index : undefined;
+    if (query !== prompt.query) {
+      prompt.result = undefined;
+      prompt.steps = 0;
+    }
+    prompt.query = query;
+    if (query) this.lastFind = query;
+    this.findShown = page;
+    void this.cdp
+      .send("Runtime.evaluate", { expression: findScript(query, mode, index), returnByValue: true }, page.sessionId)
+      .then((r: any) => {
+        const res = r?.result?.value as FindResult | undefined;
+        // Only the latest answer, while its find bar is up.
+        if (!res || this.prompt !== prompt || seq !== prompt.seq) return;
+        prompt.result = res;
+        prompt.target = undefined;
+        // Steps taken while it was on its way go on from its match.
+        const steps = prompt.steps ?? 0;
+        prompt.steps = 0;
+        if (steps && res.total) this.runFind(prompt, "goto", (((res.index + steps) % res.total) + res.total) % res.total);
+        page.scrollMarks = res.ys;
+        page.scrollCurrent = res.index >= 0 ? res.ys[res.index] : undefined;
+        this.redrawScrollbar(page);
+        this.queueChrome();
+      })
+      .catch(() => {});
+  }
+
+  /** Enter / Shift+Enter in the find bar: the next or previous match. */
+  private stepFind(prompt: Extract<Prompt, { kind: "find" }>, dir: 1 | -1): void {
+    prompt.edit.selectAll = false;
+    const r = prompt.result;
+    // A search still on its way (or not sent yet): the step waits for its answer.
+    if (prompt.edit.text !== prompt.query || !r) {
+      if (prompt.edit.text !== prompt.query) this.runFind(prompt, "near");
+      prompt.steps = (prompt.steps ?? 0) + dir;
+    }
+    // From the match last asked for: quick presses each count.
+    else if (r.total) this.runFind(prompt, "goto", (((prompt.target ?? r.index) + dir) % r.total + r.total) % r.total);
+    this.queueChrome();
+  }
+
+  /** A click on a scrollbar mark off the thumb jumps to that match (the next one in the cell, if one there is current). */
+  private clickMark(page: Page, rows: number, row: number): boolean {
+    const p = this.prompt?.kind === "find" && this.prompt.page === page ? this.prompt : null;
+    const r = p?.result;
+    const cell = barCells(page.scroll, rows, page.scrollMarks, page.scrollCurrent)?.[row];
+    if (!p || !r?.total || !page.scroll || !cell || cell.bg !== "track" || (cell.fg !== "mark" && cell.fg !== "current")) return false;
+    const here = r.ys.flatMap((y, i) => (markRow(y, page.scroll!.total, rows) === row ? [i] : []));
+    if (!here.length) return false;
+    const at = here.indexOf(p.target ?? r.index);
+    this.runFind(p, "goto", here[at < 0 ? 0 : (at + 1) % here.length]!);
+    return true;
+  }
+
+  /** Once a page's find bar is gone, its highlights and scrollbar marks go too. */
+  private syncFind(): void {
+    const p = this.prompt;
+    const page = p?.kind === "find" ? p.page : null;
+    const shown = this.findShown;
+    if (!shown || shown === page) return;
+    this.findShown = null;
+    shown.scrollMarks = undefined;
+    shown.scrollCurrent = undefined;
+    if (this.pages.has(shown.sessionId)) {
+      this.cdp.send("Runtime.evaluate", { expression: CLEAR_FIND }, shown.sessionId).catch(() => {});
+    }
+  }
+
   private syntheticDown = new Map<string, { page: Page; ev: KeyEvent }>();
   /** Where the mouse buttons now down were pressed (to release them if the terminal goes). */
   private mousePressedAt: { page: Page; x: number; y: number } | null = null;
@@ -3423,8 +3549,11 @@ export class App {
     return page.sessionId;
   }
 
-  /** Delivers a key to the focused element as a DOM event only (see BROWSER_SHORTCUTS). */
-  private domKey(page: Page, ev: KeyEvent, type: "keydown" | "keyup"): void {
+  /**
+   * Delivers a key to the focused element as a DOM event only (see
+   * BROWSER_SHORTCUTS). `then` learns whether the page cancelled it (later input waits for it).
+   */
+  private domKey(page: Page, ev: KeyEvent, type: "keydown" | "keyup", then?: (cancelled: boolean) => void): void {
     const init = {
       key: ev.key, code: ev.code, keyCode: ev.vk, which: ev.vk, location: ev.location, repeat: ev.event === "repeat",
       ctrlKey: ev.mods.ctrl, shiftKey: ev.mods.shift, altKey: ev.mods.alt, metaKey: ev.mods.meta,
@@ -3440,13 +3569,14 @@ export class App {
         }
         break;
       }
-      (a || d.body || d.documentElement).dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, ${JSON.stringify(init)}));
+      return !(a || d.body || d.documentElement).dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, ${JSON.stringify(init)}));
     })()`;
     const hold = `domkey-${++this.pasteSeq}`;
     this.holdInput(hold);
     this.inputTail = (async () => {
       const sid = await this.focusedSession(page);
-      await this.cdp.send("Runtime.evaluate", { expression }, sid).catch(() => {});
+      const r = await this.cdp.send("Runtime.evaluate", { expression, returnByValue: !!then }, sid).catch(() => null);
+      then?.(r?.result?.value === true);
     })().finally(() => this.releaseInput(hold));
   }
 
@@ -3735,7 +3865,8 @@ export class App {
     const g = barPane ?? [...this.geom.values()].find((p) => inRect(p.content, col, row));
     if (!g) return;
     if (ev.action === "press") {
-      if (this.prompt?.kind === "url" || this.prompt?.kind === "rename") {
+      // (The find bar stays for a click on the scrollbar: its marks are the matches.)
+      if (this.prompt?.kind === "url" || this.prompt?.kind === "rename" || (this.prompt?.kind === "find" && !barPane)) {
         this.prompt = null;
         this.queueChrome();
       }
@@ -3840,6 +3971,7 @@ export class App {
     const t = thumb(m, bar.rows);
     if (!m || !t) return;
     const e = ((py - (bar.row - 1) * this.cellH) / this.cellH) * 8;
+    if (this.clickMark(page, bar.rows, Math.floor(e / 8))) return;
     if (e < t.top) this.scrollPage(page, scrollScript("pages", -1));
     else if (e >= t.top + t.len) this.scrollPage(page, scrollScript("pages", 1));
     else {

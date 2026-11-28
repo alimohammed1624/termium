@@ -21,11 +21,11 @@ export interface Thumb {
 /**
  * One cell of the bar. `fg` and `bg` name what the colours stand for
  * (the caller picks the colours). `mark` is a landmark, such as a
- * find-in-page match.
+ * find-in-page match; `current` is the one landmark that's selected.
  */
 export interface BarCell {
   ch: string;
-  fg: "thumb" | "track" | "mark";
+  fg: "thumb" | "track" | "mark" | "current";
   bg: "thumb" | "track";
 }
 
@@ -95,11 +95,22 @@ export function scrollScript(how: "to" | "by" | "pages", n: number): string {
 })()`;
 }
 
+/** The row (0-based) of a track `rows` cells tall where a landmark at document position `y` goes. */
+export function markRow(y: number, total: number, rows: number): number {
+  return Math.min(rows - 1, Math.max(0, Math.floor((y / total) * rows)));
+}
+
 /**
  * The bar's cells from top to bottom, or null if the page doesn't scroll.
- * `marks` are document positions (CSS px from the top) to show as landmarks.
+ * `marks` are document positions (CSS px from the top) to show as landmarks,
+ * `current` the selected one's (drawn over the others in its cell).
  */
-export function barCells(m: ScrollMetrics | null | undefined, rows: number, marks: readonly number[] = []): BarCell[] | null {
+export function barCells(
+  m: ScrollMetrics | null | undefined,
+  rows: number,
+  marks: readonly number[] = [],
+  current?: number,
+): BarCell[] | null {
   const t = thumb(m, rows);
   if (!t) return null;
   const end = t.top + t.len;
@@ -115,10 +126,12 @@ export function barCells(m: ScrollMetrics | null | undefined, rows: number, mark
     // lower part is track drawn over a thumb-coloured cell.
     else cells.push({ ch: LOWER[b - end]!, fg: "track", bg: "thumb" });
   }
-  for (const y of marks) {
-    const r = Math.min(rows - 1, Math.max(0, Math.floor((y / m!.total) * rows)));
+  const mark = (y: number, fg: "mark" | "current") => {
+    const r = markRow(y, m!.total, rows);
     const mid = r * 8 + 4;
-    cells[r] = { ch: "━", fg: "mark", bg: mid >= t.top && mid < end ? "thumb" : "track" };
-  }
+    cells[r] = { ch: "━", fg, bg: mid >= t.top && mid < end ? "thumb" : "track" };
+  };
+  for (const y of marks) mark(y, "mark");
+  if (current !== undefined) mark(current, "current");
   return cells;
 }
