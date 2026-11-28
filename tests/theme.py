@@ -123,7 +123,7 @@ try:
         ok = t.wait_for(lambda: accent_pixels(t, mauve) > before + 200, 8)
         t.shot(f"{OUT}/catppuccin-select.png")
         check("an open page's select popup follows the new theme", ok, (before, accent_pixels(t, mauve)))
-        t.key("escape")
+        # Left open, detached.
     t.key("ctrl+b"); t.key("d")
     t.wait_for(lambda: not t.alive, 10)
     t.close()
@@ -132,6 +132,12 @@ try:
     t = term(None, "attach", SESSION, env={"TERMIUM_THEME": "catppuccin-latte"})
     t.wait_frames(1, 30); t.wait_idle(1.0)
     check("TERMIUM_THEME=catppuccin-latte draws Latte", bar_bg(t) == "eff1f5", bar_bg(t))
+    if c:
+        latte = (0x88, 0x39, 0xef)
+        ok = t.wait_for(lambda: accent_pixels(t, latte) > 200, 8)
+        t.shot(f"{OUT}/latte-open-select.png")
+        check("a select menu left open takes the new terminal's colors", ok, accent_pixels(t, latte))
+        t.key("escape")
     t.key("ctrl+b"); t.key("d")
     t.wait_for(lambda: not t.alive, 10)
     t.close()
@@ -144,12 +150,25 @@ try:
     t.wait_for(lambda: not t.alive, 15)
     t.close()
 
-    # 6. A bad theme is refused.
+    # 6. A valid --theme wins over a bad $TERMIUM_THEME, starting a session too;
+    # commands that draw no chrome ignore $TERMIUM_THEME.
+    t = term(None, "-s", SESSION + "2", "--profile", profile + "2", "--theme", "catppuccin-latte", URL,
+             env={"TERMIUM_THEME": "bogus"})
+    t.wait_frames(1, 40); t.wait_idle(1.0)
+    check("--theme overrides a bad TERMIUM_THEME on a fresh session", bar_bg(t) == "eff1f5", bar_bg(t))
+    t.key("ctrl+q")
+    t.wait_for(lambda: not t.alive, 15)
+    t.close()
+    r = subprocess.run(MAIN + ["ls"], capture_output=True, text=True, env={**os.environ, **ENV, "TERMIUM_THEME": "bogus"})
+    check("ls ignores TERMIUM_THEME", r.returncode != 2 and "TERMIUM_THEME" not in r.stderr, (r.returncode, r.stderr))
+
+    # 7. A bad theme is refused.
     r = subprocess.run(MAIN + ["--theme", "nope", "ls"], capture_output=True, text=True, env={**os.environ, **ENV})
     check("unknown --theme is refused", r.returncode == 2 and "unknown theme" in r.stderr, (r.returncode, r.stderr))
 finally:
     srv.terminate()
-    subprocess.run(MAIN + ["kill", SESSION], env={**os.environ, **ENV}, capture_output=True)
+    for name in (SESSION, SESSION + "2"):
+        subprocess.run(MAIN + ["kill", name], env={**os.environ, **ENV}, capture_output=True)
     shutil.rmtree(root, ignore_errors=True)
 
 print(f"\nscreenshots in {OUT}")

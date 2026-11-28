@@ -189,7 +189,8 @@ function parseArgs(argv: string[]): Args {
         args.url = a;
     }
   }
-  if (!args.themeFromFlag && process.env.TERMIUM_THEME) {
+  // Only a terminal's client draws the chrome: other commands (the session server, ls…) ignore the theme.
+  if (!args.themeFromFlag && process.env.TERMIUM_THEME && (args.command === "open" || args.command === "attach")) {
     if (!isTheme(process.env.TERMIUM_THEME)) fail(`unknown TERMIUM_THEME "${process.env.TERMIUM_THEME}" (${THEMES.join(", ")})`);
     args.theme = process.env.TERMIUM_THEME;
   }

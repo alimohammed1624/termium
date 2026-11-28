@@ -38,7 +38,8 @@ export const SELECT_POPUP = String.raw`(() => {
     const root = host.attachShadow({ mode: "closed" });
     const css = (el, props) => { for (const k in props) el.style.setProperty(k, props[k], "important"); };
     // termium's chrome colors (selectPopupColors below), else light ones.
-    const k = Object.assign({ bg: "#fff", text: "#111", border: "#888", group: "#555", off: "#999", on: "#1a73e8", onText: "#fff" }, window.__termiumColors);
+    const colors = () => Object.assign({ bg: "#fff", text: "#111", border: "#888", group: "#555", off: "#999", on: "#1a73e8", onText: "#fff" }, window.__termiumColors);
+    let k = colors();
     const menu = document.createElement("div");
     css(menu, {
       position: "fixed", "z-index": "2147483647", "box-sizing": "border-box", background: k.bg, color: k.text,
@@ -49,7 +50,7 @@ export const SELECT_POPUP = String.raw`(() => {
       padding: "0 10px", height: itemH + "px", "line-height": itemH + "px", "white-space": "nowrap",
       overflow: "hidden", "text-overflow": "ellipsis", background: "transparent", color: k.text,
     }, extra));
-    const rows = [];
+    const rows = [], heads = [];
     let active = -1, lastGroup = null;
     const disabled = [];
     const paint = (i, on) => {
@@ -69,6 +70,7 @@ export const SELECT_POPUP = String.raw`(() => {
       if (g && g !== lastGroup) {
         const gh = document.createElement("div");
         rowCss(gh, { "font-weight": "600", color: k.group });
+        heads.push(gh);
         gh.textContent = g.label;
         menu.appendChild(gh);
       }
@@ -141,7 +143,15 @@ export const SELECT_POPUP = String.raw`(() => {
     addEventListener("wheel", outside, true);
     addEventListener("blur", close);
     addEventListener("resize", close);
+    // New colors (another terminal attached) apply to the open menu too.
+    window.__termiumRestyle = () => {
+      k = colors();
+      css(menu, { background: k.bg, color: k.text, border: "1px solid " + k.border });
+      heads.forEach((h) => css(h, { color: k.group }));
+      rows.forEach((_, i) => paint(i, i === active));
+    };
     cleanup = () => {
+      window.__termiumRestyle = null;
       removeEventListener("keydown", onKey, true);
       removeEventListener("mousedown", outside, true);
       removeEventListener("wheel", outside, true);
@@ -189,5 +199,5 @@ export const SELECT_POPUP = String.raw`(() => {
 export function selectPopupColors(p: Palette): string {
   const k = { bg: p.background, text: p.text, border: p.hover, group: p.muted, off: p.dim, on: p.accent, onText: p.onAccent };
   const css = Object.fromEntries(Object.entries(k).map(([name, hex]) => [name, `#${hex}`]));
-  return `window.__termiumColors = ${JSON.stringify(css)};`;
+  return `window.__termiumColors = ${JSON.stringify(css)}; if (window.__termiumRestyle) window.__termiumRestyle();`;
 }

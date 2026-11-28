@@ -334,6 +334,15 @@ export class InputParser {
         i = end + termLen;
         continue;
       }
+      // A color reply that came after we stopped waiting (a slow terminal or
+      // tmux): it arrives whole, in one write, and is dropped rather than typed.
+      if (n === "]") {
+        const late = /^\](?:1[01]|4;\d{1,3});(?:rgba?:[0-9a-f/]+|#[0-9a-f]+)(?:\x07|\x1b\\)/i.exec(buf.slice(i + 1));
+        if (late) {
+          i += 1 + late[0].length;
+          continue;
+        }
+      }
       // ESC followed by a character: Alt+key in legacy encoding.
       const cp = buf.codePointAt(i + 1)!;
       const ch = String.fromCodePoint(cp);

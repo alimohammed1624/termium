@@ -132,20 +132,27 @@ export function fromTerminal(t: TermColors): Palette | null {
     backdrop = mix(bgc, fgc, 0.12);
     panel = mix(bgc, fgc, 0.055);
   }
-  const read = (c: string, min = 3) => readable(c, background, fgc, min);
+  // Text on the chrome needs contrast, but never more than the terminal's own text has.
+  const most = contrast(fgc, background) * 0.9;
+  const read = (c: string, min = 3, on = background) => readable(c, on, fgc, Math.min(min, most));
+  // Fields and hovered items: shades of the background, kept light enough in a light theme for text to read on them.
+  const surface = mix(background, fgc, dark ? 0.12 : 0.08);
+  const hover = mix(background, fgc, dark ? 0.2 : 0.14);
   const red = read(ansi(9, 1) ?? (dark ? CATPPUCCIN_MOCHA.red : CATPPUCCIN_LATTE.red));
   const yellow = read(ansi(11, 3) ?? (dark ? CATPPUCCIN_MOCHA.yellow : CATPPUCCIN_LATTE.yellow));
-  const accent = read(ansi(12, 4) ?? (dark ? CATPPUCCIN_MOCHA.link : CATPPUCCIN_LATTE.link));
+  // The accent also carries text (the mode badge, the selected <select> item).
+  const accent = read(ansi(12, 4) ?? (dark ? CATPPUCCIN_MOCHA.link : CATPPUCCIN_LATTE.link), 4.5);
   const ink = (on: string) => [backdrop, background, fgc].reduce((a, b) => (contrast(b, on) > contrast(a, on) ? b : a));
   return {
     background,
     backdrop,
     panel,
-    surface: mix(background, fgc, 0.12),
-    hover: mix(background, fgc, 0.2),
+    surface,
+    hover,
     text: fgc,
     muted: read(mix(background, fgc, 0.75), 4.5),
-    dim: read(mix(background, fgc, 0.45)),
+    // Labels in fields (the address bar's "upload:" prompt) are dim on hover.
+    dim: read(mix(background, fgc, 0.45), 3, hover),
     accent,
     onAccent: ink(accent),
     link: read(ansi(4, 12) ?? accent),

@@ -28,17 +28,19 @@ const BLACK: TermColors = { fg: "c0c0c0", bg: "000000" };
  * terminal's own background is as readable as the terminal makes it
  * (Solarized's is 4.1:1); the chrome's shades keep most of that.
  */
-function checkReadable(p: Palette) {
+function checkReadable(p: Palette, derived = true) {
   const base = Math.min(4.5, contrast(p.text, p.background));
   const pairs: [string, string, string, number][] = [
     ["text/background", p.text, p.background, base],
     ["text/panel", p.text, p.panel, base * 0.9],
     ["text/surface", p.text, p.surface, base * 0.8],
     ["text/hover", p.text, p.hover, base * 0.7],
-    ["muted/background", p.muted, p.background, Math.min(4, base)],
+    ["muted/background", p.muted, p.background, Math.min(4, base * 0.9)],
     ["dim/background", p.dim, p.background, 2.8],
+    // (Catppuccin's own dim on its hover color is fainter: it's kept as it is.)
+    ["dim/hover", p.dim, p.hover, derived ? Math.min(2.8, base * 0.85) : 1],
     ["accent/background", p.accent, p.background, 2.8],
-    ["onAccent/accent", p.onAccent, p.accent, 2.8],
+    ["onAccent/accent", p.onAccent, p.accent, Math.min(4.4, base * 0.85)],
     ["onYellow/yellow", p.onYellow, p.yellow, 2.8],
     ["red/background", p.red, p.background, 2.8],
     ["green/background", p.green, p.background, 2.8],
@@ -103,8 +105,8 @@ describe("palettes", () => {
     checkReadable(p);
   });
   test("the Catppuccin palettes read too", () => {
-    checkReadable(CATPPUCCIN_MOCHA);
-    checkReadable(CATPPUCCIN_LATTE);
+    checkReadable(CATPPUCCIN_MOCHA, false);
+    checkReadable(CATPPUCCIN_LATTE, false);
   });
 });
 
@@ -142,5 +144,11 @@ describe("input parser", () => {
   test("afterwards ESC ] is Alt+] again", () => {
     const evs = parse("\x1b]", false);
     expect(evs[0]).toMatchObject({ type: "key", key: "]" });
+    const typed = parse("\x1b]1", false) as any[];
+    expect(typed.map((e) => e.key)).toEqual(["]", "1"]);
+  });
+  test("a color reply that comes late is dropped, not typed", () => {
+    const evs = parse("\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\\x1b]4;12;#839496\x07x", false) as any[];
+    expect(evs.map((e) => e.key)).toEqual(["x"]);
   });
 });
