@@ -392,7 +392,7 @@ export class App {
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
   private drag: { sep: SepGeom<Page>; moved: boolean } | null = null;
   /** A scrollbar thumb being dragged, held `grab` eighths of a cell below its top. */
-  private barDrag: { page: Page; grab: number } | null = null;
+  private barDrag: { page: Page; grab: number; sent?: number } | null = null;
   private hoverPage: Page | null = null;
   private chromeQueued = false;
   private started = false;
@@ -1157,6 +1157,12 @@ export class App {
       return;
     }
     page.dialog = { type: p.type, message: p.message, defaultPrompt: p.defaultPrompt ?? "", sessionId: sid };
+    // A dialog ends a drag of its page's scrollbar, and drops the scroll it
+    // had waiting (it would only run once the dialog is answered).
+    if (this.barDrag?.page === page) {
+      this.barDrag = null;
+      this.pendingMoves.delete(page);
+    }
     const loc = this.locate(page);
     // A page termium is closing asks "leave?": show it. Otherwise a dialog in
     // a page you're not looking at waits (marked "!") instead of grabbing focus.
@@ -2436,8 +2442,7 @@ export class App {
       .then((m: any) => {
         const v = m?.cssLayoutViewport;
         const total = m?.cssContentSize?.height;
-        // While its thumb is dragged, the bar follows the pointer instead.
-        if (!v || typeof total !== "number" || this.barDrag?.page === page) return;
+        if (!v || typeof total !== "number") return;
         page.scroll = { y: v.pageY, view: v.clientHeight, total };
         this.redrawScrollbar(page);
       })
@@ -3851,14 +3856,16 @@ export class App {
   }
 
   private dragBar(py: number): void {
-    const { page, grab } = this.barDrag!;
+    const d = this.barDrag!;
+    const { page, grab } = d;
     const bar = this.geom.get(page)?.bar;
     const m = page.scroll;
     if (!bar || !m) return;
     const y = offsetFor(m, bar.rows, ((py - (bar.row - 1) * this.cellH) / this.cellH) * 8 - grab);
-    if (y === m.y) return;
-    page.scroll = { ...m, y };
-    this.redrawScrollbar(page);
+    if (y === (d.sent ?? m.y)) return;
+    d.sent = y;
+    // The thumb moves when the page has (see trackScroll): a page that
+    // locked scrolling keeps it where it is.
     // Only the latest position matters: coalesced like pointer motion.
     const expression = scrollScript("to", y);
     this.queueMove(page, () => this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {}));
@@ -3866,6 +3873,10 @@ export class App {
 
   /** Runs a relative scroll (scrollScript) in the page; each one counts, so none is coalesced. */
   private scrollPage(page: Page, expression: string): void {
+    // A drag position still waiting goes first: it came first.
+    const waiting = this.pendingMoves.get(page);
+    this.pendingMoves.delete(page);
+    if (waiting) void waiting();
     this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {});
   }
 

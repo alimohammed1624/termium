@@ -84,8 +84,12 @@ export function scrollScript(how: "to" | "by" | "pages", n: number): string {
   const top = how === "to" ? `${n}` : how === "by" ? `scrollY + ${n}` : `scrollY + ${n} * innerHeight * 0.875`;
   return `(() => {
   const root = document.documentElement;
+  const body = document.body;
   const of = (e) => (e ? getComputedStyle(e).overflowY : "visible");
-  const v = of(root) === "visible" ? of(document.body) : of(root);
+  // The body's overflow is the viewport's only if the root leaves it and
+  // neither has layout or paint containment.
+  const contained = (e) => !!e && /layout|paint|content|strict/.test(getComputedStyle(e).contain);
+  const v = of(root) === "visible" && !contained(root) && !contained(body) ? of(body) : of(root);
   if (v === "hidden" || v === "clip") return;
   (document.scrollingElement || root).scrollTo({ top: ${top}, behavior: "instant" });
 })()`;

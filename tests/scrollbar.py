@@ -147,6 +147,19 @@ try:
     t.key("enter"); time.sleep(1.0)
     check("a dialog during a drag stops it", abs((scroll_y() or 0) - y0) <= 2, (y0, scroll_y()))
 
+    # ...also when the button is still held and the pointer only moves after the dialog
+    page_value("(scrollTo(0, 1500), 1)"); time.sleep(0.8)
+    t.wait_for(lambda: thumb_rows(), 3)
+    y0 = scroll_y()
+    t.mouse(x, thumb_y(), 0, "press")
+    page_value("(setTimeout(() => alert('HELD-ALERT'), 0), 1)")
+    check("alert during a held drag shown", t.wait_text("HELD-ALERT", 5))
+    t.key("enter"); time.sleep(0.6)
+    for py in range(thumb_y(), ROWS * CH, 20):
+        t.mouse(x, py, 0, "drag"); time.sleep(0.01)
+    t.mouse(x, ROWS * CH - 5, 0, "release"); time.sleep(0.8)
+    check("a dialog ends a held drag", abs((scroll_y() or 0) - y0) <= 2, (y0, scroll_y()))
+
     # track clicks each count, even when the page is slow to scroll
     page_value("(scrollTo(0, 0), window.addEventListener('scroll', () => { const t = Date.now(); while (Date.now() - t < 400); }), 1)")
     time.sleep(0.8)
@@ -154,6 +167,17 @@ try:
     for _ in range(3):
         t.click(x, (BOTTOM - 1) * CH + 10); time.sleep(0.1)
     check("three quick track clicks scroll three pages", t.wait_for(lambda: abs((scroll_y() or 0) - 3 * step) <= 3, 8), (scroll_y(), 3 * step))
+    # a drag still waiting to be sent goes before a click that follows it
+    time.sleep(1.5)
+    t.wait_for(lambda: thumb_rows(), 3)
+    t.mouse(x, thumb_y(), 0, "press")
+    for py in range(thumb_y(), ROWS * CH, 20):
+        t.mouse(x, py, 0, "drag"); time.sleep(0.01)
+    t.mouse(x, ROWS * CH - 5, 0, "release")
+    t.click(x, (TOP - 1) * CH + 2)
+    max_y = page_value("document.documentElement.scrollHeight - innerHeight")
+    check("a click after a drag on a slow page scrolls from where the drag left it",
+          t.wait_for(lambda: abs((scroll_y() or 0) - (max_y - step)) <= 3, 10), (scroll_y(), max_y - step))
     page_value("(location.reload(), 1)")
     t.wait_for(lambda: page_value("document.title") == "tall page", 15); t.wait_idle(1.0, 10)
 
@@ -162,7 +186,21 @@ try:
     t.scroll(x, 300, down=True, n=5); time.sleep(0.3)
     t.click(x, (BOTTOM - 1) * CH + 10); time.sleep(0.8)
     check("the bar doesn't scroll a locked page", scroll_y() == 0, scroll_y())
+    t.wait_for(lambda: thumb_rows(), 3)
+    before_rows = thumb_rows()
+    t.mouse(x, thumb_y(), 0, "press")
+    for py in range(thumb_y(), ROWS * CH, 20):
+        t.mouse(x, py, 0, "drag"); time.sleep(0.01)
+    time.sleep(0.6)
+    held_rows = thumb_rows()
+    t.mouse(x, ROWS * CH - 5, 0, "release"); time.sleep(0.4)
+    check("dragging on a locked page leaves the thumb with the page", scroll_y() == 0 and held_rows == before_rows, (scroll_y(), before_rows, held_rows))
     page_value("(document.documentElement.style.overflow = '', 1)")
+    # the body's overflow isn't the viewport's when the body has layout containment
+    page_value("(document.body.style.overflow = 'hidden', document.body.style.contain = 'layout', scrollTo(0, 0), 1)"); time.sleep(0.5)
+    t.click(x, (BOTTOM - 1) * CH + 10)
+    check("a contained body's overflow doesn't lock the bar", t.wait_for(lambda: (scroll_y() or 0) > 300, 5), scroll_y())
+    page_value("(document.body.style.overflow = '', document.body.style.contain = '', 1)")
 
     # the page stops scrolling (its content shrinks): the thumb goes away
     page_value("(document.body.innerHTML = '<p>short</p>', 1)")
