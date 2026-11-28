@@ -1125,6 +1125,8 @@ export class App {
       for (const info of targetInfos) {
         const page = this.byTarget.get(info.targetId);
         if (!page || (page.title === info.title && page.url === info.url)) continue;
+        // A script that changes the title may have changed the icon too (an unread count).
+        if (page.title !== info.title && !page.loading) void this.favicons.recheck(page, this.cellW * 2, this.cellH);
         page.title = info.title;
         page.url = info.url;
         changed = true;
@@ -2203,11 +2205,12 @@ export class App {
       const cursor = this.mode === "spaces" && i === this.spaceCursor;
       const marker = cursor ? "▸" : active ? "●" : " ";
       const count = `${space.tabs.length}`;
-      // The site of the space's current tab, before its name.
+      // The site of the space's current tab, before its name (the loading mark while it loads).
       const page = space.tabs[space.active]?.focused;
       const head = `${marker} ${i + 1} `;
-      const site = page && hasSite(page) ? page : null;
-      const name = truncate(`${head}${site ? "  " : ""}${space.name}`, w - count.length - 2);
+      const loading = !!page?.loading && hasSite(page);
+      const site = page && hasSite(page) && !loading ? page : null;
+      const name = truncate(`${head}${loading ? "◌ " : site ? "  " : ""}${space.name}`, w - count.length - 2);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
       const style = cursor
         ? bg(C.surface1) + fg(C.text) + BOLD
@@ -2307,7 +2310,7 @@ export class App {
    */
   private withIcon(text: string, row: number, col: number, style: string, icon?: { page: Page; at: number }): string {
     if (!icon || width(text) < icon.at + 3) return text;
-    const png = this.placeholders ? null : this.favicons.icon(icon.page, this.cellW * 2, this.cellH);
+    const png = this.placeholders ? null : this.favicons.icon(icon.page, icon.page.url, this.cellW * 2, this.cellH);
     const cells = png
       ? this.icons.cell(row, col + icon.at, 2, `${png.key} ${style}`, png.png)
       : fg(siteColour(icon.page.url)) + "●" + style + " ";

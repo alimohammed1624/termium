@@ -15,18 +15,17 @@ export interface IconPage {
 
 /** Icons bigger than this aren't icons. */
 const MAX_BYTES = 512 * 1024;
-const MAX_CACHED = 200;
 
-/** Icons of a page tried in turn, at most. */
+/** Icons of a page tried in turn, at most (/favicon.ico always among them). */
 const MAX_TRIES = 4;
 
 /**
  * Run in an isolated world of the page (its scripts can't interfere): the
- * page's <link rel=icon>s, best first, then /favicon.ico for http(s)
- * pages. An SVG (sizes="any") comes first; then the smallest bitmap of
- * 32px or more, then bigger-is-better smaller ones; on a tie the later
- * link, as browsers do. The later ones stand in when one can't be shown
- * (an SVG on a page whose CSP keeps images to its own origin, say).
+ * page's site, and its <link rel=icon>s, best first, then /favicon.ico for
+ * http(s) pages. An SVG (sizes="any") comes first; then the smallest
+ * bitmap of 32px or more, then bigger-is-better smaller ones; on a tie the
+ * later link, as browsers do. The later ones stand in when one can't be
+ * shown (an SVG on a page whose CSP keeps images to its own origin, say).
  */
 const FIND = `(() => {
   const found = [];
@@ -40,8 +39,8 @@ const FIND = `(() => {
     found.push({ href, score: svg ? 2000 : px >= 32 ? 1900 - px : px > 0 ? 1000 + px : 500, i: i++ });
   }
   const hrefs = found.sort((a, b) => b.score - a.score || b.i - a.i).map((f) => f.href);
-  if (/^https?:$/.test(location.protocol)) hrefs.push(location.origin + "/favicon.ico");
-  return [...new Set(hrefs)];
+  const fallback = /^https?:$/.test(location.protocol) ? location.origin + "/favicon.ico" : null;
+  return { href: location.href, hrefs: [...new Set(hrefs)].filter((h) => h !== fallback), fallback };
 })()`;
 
 /**
@@ -50,7 +49,7 @@ const FIND = `(() => {
  * Small bitmaps are scaled by whole steps without smoothing, so they stay
  * crisp; bigger ones (and SVG) are scaled down smoothly.
  */
-const RENDER = `async function (b64, type, w, h, side) {
+const RENDER = `async function (b64, type, w, h, side, url) {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -60,18 +59,24 @@ const RENDER = `async function (b64, type, w, h, side) {
     src = await createImageBitmap(blob);
     iw = src.width; ih = src.height;
   } catch {
-    // SVG: createImageBitmap won't take it from a blob.
-    const url = URL.createObjectURL(blob);
+    // SVG: createImageBitmap won't take it from a blob. An <img> will, as a
+    // blob: or data: URL, or from its own address: whichever the page's
+    // CSP allows (one of another origin taints the canvas: no icon).
+    const blobUrl = URL.createObjectURL(blob);
     try {
-      const img = new Image();
-      img.src = url;
-      await img.decode();
-      src = img; iw = img.naturalWidth || side; ih = img.naturalHeight || side;
+      for (const s of [blobUrl, "data:" + type + ";base64," + b64, /^(https?|file):/i.test(url) ? url : ""]) {
+        if (!s) continue;
+        const img = new Image();
+        img.src = s;
+        try { await img.decode(); } catch { continue; }
+        src = img; iw = img.naturalWidth || side; ih = img.naturalHeight || side;
+        break;
+      }
     } finally {
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(blobUrl);
     }
   }
-  if (!iw || !ih) return null;
+  if (!src || !iw || !ih) return null;
   const c = document.createElement("canvas");
   c.width = w; c.height = h;
   const g = c.getContext("2d");
@@ -85,84 +90,161 @@ const RENDER = `async function (b64, type, w, h, side) {
   return c.toDataURL("image/png").replace(/^data:image\\/png;base64,/, "");
 }`;
 
-function remember<V>(map: Map<string, V>, key: string, value: V): void {
-  map.delete(key);
-  map.set(key, value);
-  while (map.size > MAX_CACHED) map.delete(map.keys().next().value!);
-}
-
 /** The bytes of a data: URL, or null. */
 export function parseDataUrl(url: string): { data: string; type: string } | null {
   const m = url.match(/^data:([^,]*?)(;base64)?,(.*)$/is);
   if (!m) return null;
   const type = m[1]!.split(";")[0]!.trim() || "image/png";
   try {
-    const buf = m[2] ? Buffer.from(m[3]!, "base64") : Buffer.from(decodeURIComponent(m[3]!), "utf8");
+    let buf: Buffer;
+    if (m[2]) {
+      buf = Buffer.from(decodeURIComponent(m[3]!), "base64");
+    } else {
+      // %XX are bytes (binary data may be percent-encoded); other text is UTF-8.
+      const parts: Buffer[] = [];
+      for (const [, hex, text] of m[3]!.matchAll(/%([0-9a-f]{2})|([^%]+|%)/gi)) {
+        parts.push(hex ? Buffer.from([parseInt(hex, 16)]) : Buffer.from(text!, "utf8"));
+      }
+      buf = Buffer.concat(parts);
+    }
     return buf.length && buf.length <= MAX_BYTES ? { data: buf.toString("base64"), type } : null;
   } catch {
     return null;
   }
 }
 
-/** Finds, fetches and renders pages' icons, and caches them by icon URL. */
+/** The site of an address (its scheme and host): an icon belongs to one. */
+function siteOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return "";
+  }
+}
+
+/** A page's icon, rendered: for the pages of `site` only. */
+interface Icon {
+  site: string;
+  url: string;
+  png: string;
+  w: number;
+  h: number;
+  /** Names these very pixels (IconLayer replaces a picture when it changes). */
+  serial: number;
+}
+
+interface PageIcons {
+  /** Lookups started: only the latest one's answer counts. */
+  gen: number;
+  /** A lookup is under way. */
+  busy: boolean;
+  /** The candidates the last lookup found (a change means the page swapped its icon). */
+  candidates?: string;
+  icon: Icon | null;
+  /** A render at another cell size, under way. */
+  resizing?: string;
+}
+
+/**
+ * Finds, fetches and renders each page's icon. Each page keeps its own (an
+ * icon at the same address can change, as a site's unread count does), and
+ * shows it only while it's still on the site it came from.
+ */
 export class Favicons {
-  /** Each page's icon URL, once it rendered (null: it has none). */
-  private iconOf = new WeakMap<IconPage, string | null>();
-  /** Lookups started per page: only the latest one's answer counts. */
-  private gen = new WeakMap<IconPage, number>();
-  /** Rendered PNGs (base64) per "URL WxH". */
-  private rendered = new Map<string, string>();
-  private pending = new Set<string>();
+  private pages = new WeakMap<IconPage, PageIcons>();
+  private serial = 0;
 
   constructor(
     private cdp: CDP,
     private changed: () => void,
   ) {}
 
+  private state(page: IconPage): PageIcons {
+    let st = this.pages.get(page);
+    if (!st) this.pages.set(page, (st = { gen: 0, busy: false, icon: null }));
+    return st;
+  }
+
   /** Looks up the page's icon again (its document finished loading). */
   async refresh(page: IconPage, w: number, h: number): Promise<void> {
-    const g = (this.gen.get(page) ?? 0) + 1;
-    this.gen.set(page, g);
-    let url: string | null = null;
+    const st = this.state(page);
+    const g = ++st.gen;
+    st.busy = true;
+    let icon: Icon | null = null;
     try {
-      const ctx = await this.world(page);
-      const { result } = await this.cdp.send("Runtime.evaluate", { expression: FIND, contextId: ctx, returnByValue: true }, page.sessionId);
-      const found: unknown[] = Array.isArray(result?.value) ? result.value : [];
-      for (const href of found.slice(0, MAX_TRIES)) {
-        if (typeof href !== "string" || this.gen.get(page) !== g) break;
-        // One that can't be fetched or decoded: the next.
-        if (await this.render(page, href, w, h).catch(() => null)) {
-          url = href;
-          break;
+      const found = await this.find(page);
+      if (found && st.gen === g) {
+        st.candidates = found.key;
+        // The best links, and /favicon.ico in any case.
+        const tries = [...found.hrefs.slice(0, found.fallback ? MAX_TRIES - 1 : MAX_TRIES), ...(found.fallback ? [found.fallback] : [])];
+        for (const url of tries) {
+          if (st.gen !== g) break;
+          // One that can't be fetched or decoded: the next.
+          const png = await this.render(page, url, w, h).catch(() => null);
+          if (png) {
+            icon = { site: siteOf(found.href), url, png, w, h, serial: ++this.serial };
+            break;
+          }
         }
       }
     } catch {
       // Gone, navigating away, or the page refused: no icon.
     }
-    if (this.gen.get(page) !== g) return;
-    const before = this.iconOf.get(page);
-    this.iconOf.set(page, url);
-    if (before !== url) this.changed();
+    if (st.gen !== g) return;
+    st.busy = false;
+    const before = st.icon;
+    st.icon = icon;
+    if (before || icon) this.changed();
+  }
+
+  /** Looks up the page's icon again if it links other ones now (a script changed them). */
+  async recheck(page: IconPage, w: number, h: number): Promise<void> {
+    const st = this.state(page);
+    if (st.busy || st.candidates === undefined) return;
+    const found = await this.find(page).catch(() => null);
+    if (found && !st.busy && found.key !== st.candidates) await this.refresh(page, w, h);
   }
 
   /**
-   * The page's icon as a w x h PNG (base64), and a key that names it; null
-   * when it has none, or while it's being rendered at this size.
+   * The icon of the page, now at `pageUrl`, as a w x h PNG (base64) and a
+   * key naming it; null when it has none (or not yet for this site), or
+   * while it's being rendered at this size.
    */
-  icon(page: IconPage, w: number, h: number): { key: string; png: string } | null {
-    const url = this.iconOf.get(page);
-    if (!url) return null;
-    const key = `${url} ${w}x${h}`;
-    const png = this.rendered.get(key);
-    if (png) return { key, png };
+  icon(page: IconPage, pageUrl: string, w: number, h: number): { key: string; png: string } | null {
+    const st = this.pages.get(page);
+    const icon = st?.icon;
+    if (!st || !icon || icon.site !== siteOf(pageUrl)) return null;
+    if (icon.w === w && icon.h === h) return { key: String(icon.serial), png: icon.png };
     // A new cell size: render again, and redraw once that's done.
-    if (!this.pending.has(key)) {
-      this.pending.add(key);
-      void this.render(page, url, w, h)
-        .then((p) => p && this.changed(), () => {})
-        .finally(() => this.pending.delete(key));
+    const size = `${w}x${h}`;
+    if (st.resizing !== size) {
+      st.resizing = size;
+      const g = st.gen;
+      void this.render(page, icon.url, w, h)
+        .then((png) => {
+          if (!png || st.gen !== g || st.icon !== icon) return;
+          st.icon = { ...icon, png, w, h, serial: ++this.serial };
+          this.changed();
+        }, () => {})
+        .finally(() => {
+          if (st.resizing === size) st.resizing = undefined;
+        });
     }
     return null;
+  }
+
+  private async find(page: IconPage): Promise<{ href: string; hrefs: string[]; fallback: string | null; key: string } | null> {
+    const { result } = await this.cdp.send(
+      "Runtime.evaluate",
+      { expression: FIND, contextId: await this.world(page), returnByValue: true },
+      page.sessionId,
+    );
+    const v = result?.value;
+    if (!v || typeof v.href !== "string" || !Array.isArray(v.hrefs)) return null;
+    const hrefs = v.hrefs.filter((h: unknown): h is string => typeof h === "string");
+    const fallback = typeof v.fallback === "string" ? v.fallback : null;
+    return { href: v.href, hrefs, fallback, key: [...hrefs, fallback].join("\n") };
   }
 
   private async world(page: IconPage): Promise<number> {
@@ -175,9 +257,6 @@ export class Favicons {
   }
 
   private async render(page: IconPage, url: string, w: number, h: number): Promise<string | null> {
-    const key = `${url} ${w}x${h}`;
-    const hit = this.rendered.get(key);
-    if (hit) return hit;
     const src = await this.source(page, url);
     if (!src) return null;
     const side = Math.max(8, Math.round(Math.min(w, h) * 0.85));
@@ -186,15 +265,13 @@ export class Favicons {
       {
         functionDeclaration: RENDER,
         executionContextId: await this.world(page),
-        arguments: [{ value: src.data }, { value: src.type }, { value: w }, { value: h }, { value: side }],
+        arguments: [{ value: src.data }, { value: src.type }, { value: w }, { value: h }, { value: side }, { value: url }],
         returnByValue: true,
         awaitPromise: true,
       },
       page.sessionId,
     );
-    const png = typeof result?.value === "string" && result.value ? result.value : null;
-    if (png) remember(this.rendered, key, png);
-    return png;
+    return typeof result?.value === "string" && result.value ? result.value : null;
   }
 
   /** The icon file, fetched by the browser for the page (its cookies, its proxy). */

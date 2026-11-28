@@ -78,9 +78,16 @@ describe("parseDataUrl", () => {
     expect(Buffer.from(svg!.data, "base64").toString()).toBe('<svg xmlns="http://www.w3.org/2000/svg"/>');
   });
 
+  test("percent-encoded binary keeps its bytes", () => {
+    const png = parseDataUrl("data:image/png,%89PNG%0D%0A%1A%0A");
+    expect([...Buffer.from(png!.data, "base64")]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const text = parseDataUrl("data:image/svg+xml,<svg>é</svg>");
+    expect(Buffer.from(text!.data, "base64").toString()).toBe("<svg>é</svg>");
+  });
+
   test("empty or malformed: none", () => {
     expect(parseDataUrl("data:image/png;base64,")).toBeNull();
-    expect(parseDataUrl("data:,%E0%A4%A")).toBeNull();
+    expect(parseDataUrl("data:image/png;base64,%E0%A4%A")).toBeNull();
     expect(parseDataUrl("https://x/")).toBeNull();
   });
 });

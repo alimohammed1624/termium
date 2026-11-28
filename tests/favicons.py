@@ -40,8 +40,9 @@ PA, PB = free_port(), free_port()
 icon(os.path.join(A, "favicon.ico"), (60, 120, 230, 255), "ICO", [(16, 16), (32, 32), (48, 48)])
 icon(os.path.join(A, "green.png"), (60, 200, 90, 255))
 icon(os.path.join(B, "red.png"), (230, 60, 60, 255))
-with open(os.path.join(B, "star.svg"), "w") as f:
-    f.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#f5a623" d="M12 2l3 7h7l-5.5 4.5L18.5 21 12 16.5 5.5 21l2-7.5L2 9h7z"/></svg>')
+for d in (A, B):
+    with open(os.path.join(d, "star.svg"), "w") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#f5a623" d="M12 2l3 7h7l-5.5 4.5L18.5 21 12 16.5 5.5 21l2-7.5L2 9h7z"/></svg>')
 PAGES = {
     "png": (B, PB, '<link rel="icon" href="/red.png">'),
     "svg": (B, PB, '<link rel="icon" type="image/svg+xml" href="/star.svg">'),
@@ -50,8 +51,14 @@ PAGES = {
     "none": (B, PB, ""),
     # An inline (data:) SVG icon.
     "data": (B, PB, '<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 8 8%22%3E%3Crect width=%228%22 height=%228%22 fill=%22%23a040e0%22/%3E%3C/svg%3E">'),
-    # Its CSP keeps images to its own origin: the SVG can't be drawn, the png can.
-    "cspsvg": (B, PB, '<meta http-equiv="Content-Security-Policy" content="img-src \'self\'"><link rel="icon" href="/star.svg?csp"><link rel="icon" sizes="32x32" href="/red.png?alt">'),
+    # Its CSP keeps images to its own origin: the other origin's SVG can't be drawn, the png can.
+    "cspsvg": (B, PB, f'<meta http-equiv="Content-Security-Policy" content="img-src \'self\'"><link rel="icon" href="http://127.0.0.1:{PA}/star.svg?csp"><link rel="icon" sizes="32x32" href="/red.png?alt">'),
+    # Same-origin SVG only, under a CSP that keeps images to the page's origin.
+    "svgself": (B, PB, '<meta http-equiv="Content-Security-Policy" content="img-src \'self\'"><link rel="icon" href="/star.svg?self">'),
+    # A binary PNG percent-encoded in a data: URL.
+    "pctpng": (B, PB, '<link rel="icon" href="data:image/png,' + __import__("urllib.parse").parse.quote(open(os.path.join(A, "green.png"), "rb").read(), safe="") + '">'),
+    # A script swaps the icon (and the title) after the page has loaded.
+    "swap": (B, PB, '<link rel="icon" href="/red.png?swap"><script>setTimeout(() => { document.querySelector("link").href = "/star.svg?swap"; document.title = "swapped page"; }, 2500)</script>'),
     # A page whose CSP lets nothing load: a dot, and no harm done.
     "csp": (B, PB, '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'"><link rel="icon" href="/red.png?csp">'),
 }
@@ -84,9 +91,12 @@ def colour_of(png):
     return tuple(sum(p[i] for p in px) // len(px) for i in range(3))
 
 
+FIRST = ("png", "svg", "ico", "cross", "data", "cspsvg", "csp", "none")
+
+
 def open_tabs(t):
     t.type(url("png")); t.key("enter")
-    for name in ("svg", "ico", "cross", "data", "cspsvg", "csp", "none"):
+    for name in FIRST[1:]:
         time.sleep(0.4)
         t.key("ctrl+t"); time.sleep(0.4); t.type(url(name)); t.key("enter")
     t.wait_for(lambda: "none page" in t.line(1), 15)
@@ -138,6 +148,46 @@ try:
               (sorted(icons_on_row(t, 1)), sorted(icons_on_row(t, 3))))
         check("no unsynchronized clears meanwhile", not t.unsynced_clears(mark), t.unsynced_clears(mark))
 
+    # Same-origin SVG under a strict CSP, percent-encoded data:, a swapped icon, navigation.
+    with Term(["bun", os.path.join(ROOT, "src/main.ts"), "--incognito"], cols=200, rows=40) as t:
+        t.type(url("svgself")); t.key("enter")
+        for name in ("pctpng", "swap"):
+            time.sleep(0.4)
+            t.key("ctrl+t"); time.sleep(0.4); t.type(url(name)); t.key("enter")
+        t.wait_for(lambda: "swap page" in t.line(1), 15)
+        time.sleep(1.5); t.wait_idle(0.6, 5)
+
+        def tab_icon(name):
+            line = t.line(1)
+            col = line.find(f"{name} page") - 1
+            png = icons_on_row(t, 1).get(col)
+            return (colour_of(png) if png else None), line[col - 1] if col > 0 else ""
+        near = lambda got, rgb: got is not None and all(abs(a - b) < 40 for a, b in zip(got, rgb))
+        for name, rgb in (("svgself", (245, 166, 35)), ("pctpng", (60, 200, 90)), ("swap", (230, 60, 60))):
+            got, _ = tab_icon(name)
+            check(f"{name} icon in its tab", near(got, rgb), (got, t.line(1)))
+        t.wait_for(lambda: "swapped page" in t.line(1), 8); time.sleep(2.5); t.wait_idle(0.6, 5)
+        got, _ = tab_icon("swapped")
+        check("a script's new icon replaces the old one", near(got, (245, 166, 35)), (got, t.line(1)))
+
+        # Same site, no icon: the old one goes, a dot shows (tab and sidebar).
+        t.key("ctrl+l"); time.sleep(0.3); t.type(url("none")); t.key("enter")
+        t.wait_for(lambda: "none page" in t.line(1), 10); time.sleep(2); t.wait_idle(0.6, 5)
+        got, ch = tab_icon("none")
+        check("navigating to a page without an icon: a dot", got is None and ch == "●", (got, ch, t.line(1)))
+        check("...and the sidebar shows no picture", not icons_on_row(t, 3) and "●" in t.line(3)[3:8], t.line(3))
+        # Another site: its own icon, in the tab and the sidebar.
+        t.key("ctrl+l"); time.sleep(0.3); t.type(url("ico")); t.key("enter")
+        t.wait_for(lambda: "ico page" in t.line(1), 10); time.sleep(2); t.wait_idle(0.6, 5)
+        got, _ = tab_icon("ico")
+        side = list(icons_on_row(t, 3).values())
+        check("navigating to another site: its icon", near(got, (60, 120, 230)), (got, t.line(1)))
+        check("...in the sidebar too", len(side) == 1 and near(colour_of(side[0]), (60, 120, 230)), len(side))
+        with t.lock:
+            n = len(t.placements)
+        check("no picture left behind", n == 3 + 1 + 1, n)  # 3 tab icons, 1 sidebar icon, 1 page
+        t.shot(f"{OUT}/03-navigation.png")
+
     # Through tmux (unicode placeholders), no pictures in the chrome: dots.
     with Term(["bun", os.path.join(ROOT, "src/main.ts"), "--incognito"], cols=200, rows=40,
               env={"TERMIUM_GRAPHICS": "placeholders"}) as t:
@@ -146,9 +196,9 @@ try:
         print("tab bar (placeholders):", line.rstrip())
         with t.lock:
             chrome = [p for p in t.placements.values() if p[0] <= 2]
-        dots = [line[line.find(f"{n} page") - 2] for n in PAGES]
-        check("placeholders: dots, no pictures in the chrome", not chrome and dots == ["●"] * len(PAGES), (chrome, dots))
-        t.shot(f"{OUT}/03-placeholders.png")
+        dots = [line[line.find(f"{n} page") - 2] for n in FIRST]
+        check("placeholders: dots, no pictures in the chrome", not chrome and dots == ["●"] * len(FIRST), (chrome, dots))
+        t.shot(f"{OUT}/04-placeholders.png")
 finally:
     for s in servers:
         s.terminate()
