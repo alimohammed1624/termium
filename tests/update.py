@@ -1002,7 +1002,7 @@ try:
     o.key("ctrl+b"); o.key("d"); exit_code(o)
     r = cli(os.path.join(inst2, "termium"), "update", state="st-shell")
     check("termium update: updates a release binary (exit 0)", r.returncode == 0 and f"Updated to termium {NEXT}" in r.stdout and "downloading" in r.stdout, (r.returncode, r.stdout, r.stderr))
-    check("termium update: says running sessions keep the old version until restarted", "shell" in r.stdout and "keep" in r.stdout and "Ctrl+B U, then r" in r.stdout, r.stdout)
+    check("termium update: says running sessions keep the old version until restarted", "shell" in r.stdout and "keep" in r.stdout and "U after the leader key" in r.stdout, r.stdout)
     r2 = subprocess.run([os.path.join(inst2, "termium"), "--version"], capture_output=True, text=True)
     check("termium update: the new binary reports the new version", r2.stdout.strip() == f"termium {NEXT}", r2.stdout)
     r = cli(os.path.join(inst2, "termium"), "update", state="st-shell")

@@ -12,7 +12,7 @@ import { runCtl, runDevtools, startSession } from "./ctl";
 import { SKILL } from "./skill";
 import { runServer, stateDir, type LaunchOptions } from "./server";
 import { DEFAULT_SESSION, readRestore, savedLaunch, validSessionName } from "./session";
-import { chooseLeader, hostPrefixes, leaderLabel, parseLeader } from "./leader";
+import { parseLeader } from "./leader";
 import { restoreTerminal } from "./terminal";
 import { DEFAULT_SEARCH } from "./text";
 import {
@@ -69,7 +69,7 @@ Options:
   --skill               print a SKILL.md that teaches an agent to use termium
 
 --browser, --profile, --incognito, --scale and --search apply when a session starts.
-Ctrl+B d (the leader, then d) detaches (the browser keeps running); Ctrl+Q ends the session.
+The leader then d detaches (the browser keeps running); Ctrl+Q ends the session.
 Needs a terminal with the kitty graphics protocol, such as Ghostty, kitty or WezTerm
 (inside tmux: set -g allow-passthrough on). Press the leader then ? inside termium for keys.`;
 
@@ -246,7 +246,7 @@ async function checkUpdate(): Promise<never> {
 }
 
 /** `termium update`: replaces this termium with the latest release. */
-async function update(args: Args): Promise<never> {
+async function update(): Promise<never> {
   const r = await checkAndCache(cachePath(stateDir()), VERSION);
   if (!r.ok) {
     console.error(`termium: could not check for updates: ${r.error}`);
@@ -285,7 +285,7 @@ async function update(args: Args): Promise<never> {
     const names = old.map((s) => s.name).join(", ");
     console.log(
       `Running session${old.length === 1 ? "" : "s"} (${names}) keep${old.length === 1 ? "s" : ""} running the old termium until restarted: ` +
-        `attach (termium attach NAME) and press ${leaderLabel(chooseLeader(args.leader, hostPrefixes()))} U, then r (offered even with update checks off), which reopens its spaces and tabs; ` +
+        `attach (termium attach NAME) and press U after the leader key its sidebar shows (^B, or ^Space in tmux or herdr), then r (offered even with update checks off), which reopens its spaces and tabs; ` +
         `or end it with termium kill NAME.`,
     );
   }
@@ -302,7 +302,7 @@ async function main(): Promise<void> {
     case "check-update":
       return checkUpdate();
     case "update":
-      return update(args);
+      return update();
     case "ls":
       return listSessions();
     case "kill":

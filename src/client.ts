@@ -316,6 +316,7 @@ export async function runClient(o: ClientOptions): Promise<void> {
           if (info.profile === "(incognito)") argv.push("--incognito");
           else if (typeof info.profile === "string" && info.profile.startsWith("/")) argv.push("--profile", info.profile);
           if (!o.updateCheck) argv.push("--no-update-check");
+          if (o.leader) argv.push("--leader", o.leader);
           if (o.url) argv.push(o.url);
           try {
             process.execve!(argv[0]!, argv, process.env);

@@ -58,6 +58,12 @@ describe("hostPrefixes: herdr", () => {
     writeFileSync(other, '[keys]\nprefix = "ctrl+space"\n');
     expect(hostPrefixes(env({ HERDR_PANE_ID: "p1", HERDR_CONFIG_PATH: other }))).toEqual([{ host: "herdr", keys: ["ctrl+space"] }]);
   });
+  test("a prefix that isn't Ctrl and a letter (F12) leaves Ctrl+B to termium", () => {
+    writeFileSync(join(dir, "cfg", "herdr", "config.toml"), '[keys]\nprefix = "f12"\n');
+    const hosts = hostPrefixes(env({ HERDR_ENV: "1" }));
+    expect(hosts).toEqual([{ host: "herdr", keys: ["f12"] }]);
+    expect(chooseLeader(undefined, hosts)).toBe("ctrl+b");
+  });
   test("a config it can't read counts as herdr's default", () => {
     writeFileSync(join(dir, "cfg", "herdr", "config.toml"), "[keys\nprefix=");
     expect(hostPrefixes(env({ HERDR_ENV: "1" }))).toEqual([{ host: "herdr", keys: ["ctrl+b"] }]);
@@ -81,6 +87,11 @@ describe.skipIf(!Bun.which("tmux"))("hostPrefixes: tmux", () => {
       expect(chooseLeader(undefined, hostPrefixes(env))).toBe("ctrl+b");
       tmux("set", "-t", "s", "prefix2", "C-b");
       expect(chooseLeader(undefined, hostPrefixes(env))).toBe("ctrl+space");
+      // keys termium wouldn't take as a leader still count as the host's
+      tmux("set", "-t", "s", "prefix", "F12");
+      tmux("set", "-t", "s", "prefix2", "C-t");
+      expect(hostPrefixes(env)).toEqual([{ host: "tmux", keys: ["f12", "ctrl+t"] }]);
+      expect(chooseLeader(undefined, hostPrefixes(env))).toBe("ctrl+b");
     } finally {
       tmux("kill-server");
       rmSync(dir, { recursive: true, force: true });

@@ -84,7 +84,7 @@ termium ls               # list sessions (attached or detached, pages, profile)
 termium kill [name]      # end a session and its browser
 ```
 
-- `Ctrl+B d` detaches: the terminal gets its shell back, the browser and
+- `Ctrl+B d` (the [leader](#tmux-and-herdr), then `d`) detaches: the terminal gets its shell back, the browser and
   every page keep running. Attaching again, from
   this terminal or another of any size, redraws everything at the new
   size.
@@ -209,7 +209,7 @@ Browser keys work directly; layout keys follow the leader, `Ctrl+B`
 | Alt+= / Alt+- / Alt+0 | zoom in / out / reset |
 | Ctrl+C | copy the selection to the clipboard |
 | Ctrl+Q | quit (works everywhere, even mid-prompt) |
-| **Ctrl+B then** | |
+| **the leader (Ctrl+B) then** | |
 | `c`, `n` / `p`, `1`-`9`, `X` | new / next / previous / go to / close tab |
 | `v` / `-` | split right / down |
 | `h` `j` `k` `l` (or arrows) | focus the pane in that direction |
@@ -259,7 +259,7 @@ termium update           # update to it (a release binary only)
   terminal stays attached, never while detached, and offers each release
   once in a session's life.
 - **What you see.** A newer release shows `↑ vX.Y.Z` at the right end of
-  the tab bar (just `↑` in a narrow terminal), and `Ctrl+B ?` shows the
+  the tab bar (just `↑` in a narrow terminal), and `Ctrl+B ?` (the [leader](#tmux-and-herdr), then `?`) shows the
   upgrade command. It's offered once, as a notice at the right of the
   address line, "termium X is available (you have Y) · Ctrl+B U", shown
   while nothing else is open there (no dialog, address editing, help).

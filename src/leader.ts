@@ -46,6 +46,19 @@ export function leaderLabel(combo: string, short = false): string {
   return short ? `^${name}` : `Ctrl+${name}`;
 }
 
+/**
+ * A multiplexer's key as a combo ("C-b", "ctrl+b" → "ctrl+b"), to compare
+ * with leaders; any other key (F12, M-a, a backtick) as written: it can't
+ * collide with a leader. null for none.
+ */
+function hostKey(s: string): string | null {
+  const raw = s.trim().toLowerCase();
+  if (!raw || raw === "none") return null;
+  const m = raw.match(/^(?:ctrl|control|c)[-+](.+)$/) ?? raw.match(/^\^(.+)$/);
+  if (!m) return raw;
+  return m[1] === "spc" || m[1] === "space" ? "ctrl+space" : `ctrl+${m[1]}`;
+}
+
 /** The tmux prefix keys (prefix, prefix2) for this pane, as combos; [] if tmux can't say. */
 function tmuxPrefixes(env: NodeJS.ProcessEnv): string[] {
   const args = ["tmux", "display-message", "-p"];
@@ -54,33 +67,30 @@ function tmuxPrefixes(env: NodeJS.ProcessEnv): string[] {
   try {
     const r = Bun.spawnSync(args, { stdout: "pipe", stderr: "ignore", env });
     if (!r.success) return [];
-    return r.stdout.toString().trim().split("\t").flatMap((k) => {
-      const p = k && k.toLowerCase() !== "none" ? parseLeader(k) : null;
-      return p && "combo" in p ? [p.combo] : [];
-    });
+    return r.stdout.toString().trim().split("\t").flatMap((k) => hostKey(k) ?? []);
   } catch {
     return [];
   }
 }
 
 /** herdr's prefix from its config.toml (herdr's own default, Ctrl+B, if it doesn't set one or can't be read). */
-function herdrPrefix(env: NodeJS.ProcessEnv): string {
+function herdrPrefix(env: NodeJS.ProcessEnv): string[] {
   const path = env.HERDR_CONFIG_PATH || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config"), "herdr", "config.toml");
   try {
     const prefix = (Bun.TOML.parse(readFileSync(path, "utf8")) as { keys?: { prefix?: unknown } }).keys?.prefix;
     if (typeof prefix === "string") {
-      const p = parseLeader(prefix);
-      return "combo" in p ? p.combo : DEFAULT_LEADER;
+      const k = hostKey(prefix);
+      return k ? [k] : [];
     }
   } catch {}
-  return DEFAULT_LEADER;
+  return [DEFAULT_LEADER];
 }
 
 /** The keys the multiplexer(s) this terminal runs in take for themselves. */
 export function hostPrefixes(env: NodeJS.ProcessEnv = process.env): { host: string; keys: string[] }[] {
   const hosts: { host: string; keys: string[] }[] = [];
   if (env.TMUX) hosts.push({ host: "tmux", keys: tmuxPrefixes(env) });
-  if (env.HERDR_ENV === "1" || env.HERDR_PANE_ID) hosts.push({ host: "herdr", keys: [herdrPrefix(env)] });
+  if (env.HERDR_ENV === "1" || env.HERDR_PANE_ID) hosts.push({ host: "herdr", keys: herdrPrefix(env) });
   return hosts;
 }
 
