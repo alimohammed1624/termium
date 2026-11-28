@@ -87,8 +87,9 @@ generate-report | termium ctl show - --name report   # HTML from stdin
   the pane instead (the default name is the file, `stdin` for `-`), so
   `show v2.html --name plan` replaces what the `plan` pane showed.
 - A shown file is reloaded whenever it changes: rewrite it and the pane
-  updates (it stops following the file if the pane goes elsewhere; `show`
-  it again). Relative links, images and stylesheets load next to the file;
+  updates (not while the person is typing in it; a reload loses whatever
+  they typed into the page). It stops following the file if the pane goes
+  elsewhere: `show` it again. Relative links, images and stylesheets load next to the file;
   piped HTML has no directory of its own, so inline them.
 - A second shown pane goes below the first, so the person's pane keeps
   its width. `--down` puts the first one below instead of beside;

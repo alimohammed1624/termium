@@ -440,6 +440,13 @@ class Agent {
       stopShowing(shown, name);
       entry = undefined;
     }
+    // A pane showing this file that isn't tracked (the session restarted since): that one, not another.
+    if (!entry && !fromStdin) {
+      const fileUrl = pathToFileURL(path).href;
+      const tracked = new Set([...shown.values()].map((e) => e.page));
+      const page = [...this.app.pages.values()].find((p) => !tracked.has(p) && withoutHash(p.url) === fileUrl);
+      if (page) shown.set(name, (entry = { page, url: fileUrl, path, stamp: "" }));
+    }
     // Piped HTML goes to a file of its own (the same one for the same name), loaded like any other.
     if (fromStdin) path = entry?.temp ?? join(showDir(this.ctx.tmpDir), `${randomBytes(8).toString("hex")}.html`);
     const url = pathToFileURL(path).href;
@@ -1321,11 +1328,11 @@ function shownPanes(app: App): Map<string, Shown> {
   return m;
 }
 
-/** "f<size>:<mtime>" for a file, "" if there's none (a directory is "d"). */
+/** "f<inode>:<size>:<mtime>:<ctime>" for a file (another file renamed over it differs too), "" if none, "d" if not a file. */
 function fileStamp(path: string): string {
   try {
     const st = statSync(path);
-    return st.isFile() ? `f${st.size}:${st.mtimeMs}` : "d";
+    return st.isFile() ? `f${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}` : "d";
   } catch {
     return "";
   }
@@ -1353,16 +1360,19 @@ const WATCH_MS = 400;
 /**
  * Reloads a shown file's pane when the file changes (an agent rewriting
  * its plan). Polled: editors and agents often replace a file rather than
- * write to it, which a file watcher loses track of. Ends with the pane, or
- * once the pane has gone elsewhere (the person or an agent navigated it).
+ * write to it, which a file watcher loses track of. Ends with the pane
+ * (removing piped HTML's file), or once the pane has gone elsewhere (the
+ * person or an agent navigated it). Waits while the person is busy on it.
  */
 function watchShown(app: App, shown: Map<string, Shown>, name: string, e: Shown, log: (msg: string) => void): void {
   clearInterval(e.timer);
   e.timer = undefined;
-  if (e.temp) return; // (piped HTML only changes by another show)
   e.timer = setInterval(() => {
     if (shown.get(name) !== e) return clearInterval(e.timer);
     if (!app.isOpen(e.page)) return stopShowing(shown, name);
+    if (e.temp) return; // (piped HTML only changes by another show; watched only to go with its pane)
+    // The person is typing in it (or editing its address): not now, it would wipe what they typed.
+    if (app.humanBusy() && app.activePage() === e.page) return;
     if (withoutHash(e.page.url) !== e.url) {
       // Gone elsewhere (the person followed a link, say): not reloaded any more, until shown again.
       if (e.page.url && !app.isPlaceholder(e.page.url)) {

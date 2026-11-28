@@ -94,6 +94,23 @@ try:
     os.replace(plan + ".new", plan)
     check("a file replaced (renamed over) reloads too", wait_until(lambda: page_text(tab) == "Plan v4, replaced", 10))
 
+    # Another file renamed over it with the same size and modification time: still noticed.
+    st = os.stat(plan)
+    write(plan + ".new", "Plan v5, replaced")  # (same length as v4)
+    os.utime(plan + ".new", ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(plan + ".new", plan)
+    check("a file renamed over it with the same size and time reloads too", wait_until(lambda: page_text(tab) == "Plan v5, replaced", 10))
+
+    # --- the person typing in that pane: no reload under their keys, one once they stop
+    ctl("select", str(tab))
+    write(plan, "Plan v6, while typing")
+    t0 = time.time()
+    while time.time() - t0 < 2.5:
+        h.type("x"); time.sleep(0.25)
+    check("no reload while the person types in the pane", page_text(tab) == "Plan v5, replaced")
+    check("it reloads once they stop", wait_until(lambda: page_text(tab) == "Plan v6, while typing", 10))
+    ctl("select", str(person))
+
     # --- --name: another file into the same pane
     other = os.path.join(work, "report.html")
     write(other, "Report")
@@ -117,6 +134,9 @@ try:
     check("piped HTML's file is readable only by you, in the session's temp dir",
           os.path.exists(tmpfile) and (os.stat(tmpfile).st_mode & 0o777) == 0o600 and tmpfile.startswith(TMPD), tmpfile)
 
+    ctl("close", str(piped))
+    check("closing a piped pane removes its file", wait_until(lambda: not os.path.exists(tmpfile), 5), tmpfile)
+
     # --- --new-tab
     r = ctl_json("show", other, "--new-tab")
     check("--new-tab opens it in a tab behind", r.get("tab") == 2 and r.get("pane") == 1 and not r.get("active"), r)
@@ -124,7 +144,16 @@ try:
     # --- closed pane: a new one next time
     ctl("close", str(tab))
     r = ctl_json("show", plan)
-    check("after its pane is closed, show opens a new one", r.get("id") not in (None, tab) and page_text(r.get("id")) == "Plan v4, replaced", r)
+    check("after its pane is closed, show opens a new one", r.get("id") not in (None, tab) and page_text(r.get("id")) == "Plan v6, while typing", r)
+
+    # --- a pane already showing the file, not from show (as after a restart): adopted, not duplicated
+    lone = os.path.join(work, "lone.html")
+    write(lone, "Lone")
+    opened = ctl_json("open", "file://" + lone, "--new-tab", "--background").get("id")
+    r = ctl_json("show", lone)
+    check("show adopts a pane already showing that file", opened and r.get("id") == opened and r.get("reused") is True, (opened, r))
+    write(lone, "Lone, rewritten")
+    check("and follows the file from then on", wait_until(lambda: page_text(opened) == "Lone, rewritten", 10))
 
     # --- errors
     r = ctl("show", "nope.html")
