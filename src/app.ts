@@ -2282,7 +2282,7 @@ export class App {
       const text = items[i]!;
       const tw = width(text);
       const more = i < items.length - 1 ? 1 : 0; // room for a "›" if tabs follow
-      if (used + tw + width(plus) + more > w) break;
+      if (used + tw + 1 + width(plus) + more > w) break; // the tab, its "│", "+" and maybe "›"
       last = i;
       const style = i === active ? bg(C.background) + fg(C.text) + BOLD : bg(C.backdrop) + fg(C.dim);
       s += style + text + RESET + bg(C.backdrop) + fg(C.hover) + "│";

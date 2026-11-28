@@ -50,6 +50,8 @@ describe("fade", () => {
   });
   test("wide characters and short fields", () => {
     expect(width(fade("日本語テキスト", 5, "ffffff", "000000"))).toBe(4);
+    // Wide letters: the fade covers about 3 columns, not 3 letters.
+    expect(fade("日本語テキスト", 8, "ffffff", "000000")).toBe(`日本${sgr(170, 170, 170)}語${sgr(85, 85, 85)}テ${sgr(255, 255, 255)}`);
     expect(fade("abc", 2, "ffffff", "000000")).toBe(`a${sgr(128, 128, 128)}b${sgr(255, 255, 255)}`);
     expect(fade("abc", 0, "ffffff", "000000")).toBe("");
   });

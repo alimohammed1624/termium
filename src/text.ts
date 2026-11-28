@@ -94,8 +94,10 @@ export function fade(s: string, max: number, from: string, to: string): string {
   }
   // Fade letters, not the blank a cut can end on.
   while (cells.length > 1 && !cells.at(-1)!.trim()) cells.pop();
-  // The first cell stays readable.
-  const n = Math.min(FADE_CELLS, Math.max(1, cells.length - 1), cells.length);
+  // The last FADE_CELLS columns (fewer letters when they're wide); the first letter stays readable.
+  let n = 0;
+  for (let tw = 0; n < cells.length - 1 && tw < FADE_CELLS; n++) tw += width(cells[cells.length - 1 - n]!);
+  n = Math.max(n, 1);
   const head = cells.slice(0, cells.length - n).join("");
   const tail = cells.slice(cells.length - n).map((c, i) => fgHex(mix(from, to, (i + 1) / (n + 1))) + c);
   return head + tail.join("") + fgHex(from);
