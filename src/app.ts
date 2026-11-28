@@ -36,9 +36,10 @@ import {
   setClipboard,
   transmitVirtual,
 } from "./terminal";
+import { Hover } from "./hover";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP, selectPopupColors } from "./select-popup";
-import { CATPPUCCIN_MOCHA, resolvePalette, type Palette, type TermColors } from "./theme";
+import { CATPPUCCIN_MOCHA, mix, resolvePalette, type Palette, type TermColors } from "./theme";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -355,6 +356,20 @@ export class App {
   private navHits: { back: [number, number]; fwd: [number, number]; reload: [number, number]; url: [number, number] } | null = null;
   private spaceHits: { row: number; index: number }[] = [];
   private newSpaceRow = -1;
+  /** Clickable chrome under the pointer lights up, and flashes when clicked. */
+  readonly hover = new Hover(
+    (s) => {
+      if (!this.started || this.closingAll || !this.attached) return false;
+      out(this.sync("\x1b[?25l" + s + this.cursorSeq()));
+      return true;
+    },
+    () => ({
+      // The text brightens too: dim labels would hardly read on the hover color.
+      hover: bg(C.hover) + fg(C.text),
+      hoverLit: bg(mix(C.hover, C.text, 0.25)) + fg(C.text),
+      press: bg(C.accent) + fg(C.onAccent),
+    }),
+  );
 
   private nextImage = 100;
   private nextTabId = 1;
@@ -1563,6 +1578,7 @@ export class App {
    * pages (their keyup/mouseup would otherwise never come).
    */
   private resetInput(): void {
+    this.hover.reset();
     if (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces") this.mode = "normal";
     for (const { page, ev } of this.pageKeysDown.values()) {
       if (this.pages.has(page.sessionId)) this.sendKey(page, { ...ev, event: "release" });
@@ -2179,22 +2195,28 @@ export class App {
     // A dialog or file chooser hidden by another prompt comes back once that's done.
     this.syncPrompt();
     let s = "\x1b[?25l";
+    this.hover.begin();
     const mainCol = this.mainCol();
     const mainW = this.cols - mainCol + 1;
     if (mainCol > 1) s += this.drawSidebar();
     s += this.drawTabBar(mainCol, mainW);
     s += this.drawUrlBar(mainCol, mainW);
     if (this.mode === "help") {
-      out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
+      out(this.sync(s + RESET + this.helpOverlay() + this.hover.end(false) + this.cursorSeq()));
       return;
     }
     if (this.mode === "update") {
-      out(this.sync(s + RESET + this.updateOverlay() + this.cursorSeq()));
+      out(this.sync(s + RESET + this.updateOverlay() + this.hover.end(false) + this.cursorSeq()));
       return;
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
-    out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
+    out(this.sync(s + RESET + this.hover.end() + this.takeStale() + this.cursorSeq()));
+  }
+
+  /** Records a clickable span just drawn, so it lights up under the pointer. */
+  private zone(id: string, row: number, col: number, text: string, style: string, normalBg: string, w?: number): void {
+    this.hover.add({ id, row, col, text, style, width: w, lit: normalBg === C.hover });
   }
 
   private drawSidebar(): string {
@@ -2219,17 +2241,19 @@ export class App {
       const count = `${space.tabs.length}`;
       const name = truncate(`${marker} ${i + 1} ${space.name}`, w - count.length - 2);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
-      const style = cursor
-        ? bg(C.hover) + fg(C.text) + BOLD
-        : active
-          ? bg(C.surface) + fg(C.text) + BOLD
-          : base;
+      const rowBg = cursor ? C.hover : active ? C.surface : C.panel;
+      const style = cursor || active ? bg(rowBg) + fg(C.text) + BOLD : base;
       line(row, text, style);
+      this.zone(`space:${space.id}`, row, 1, fit(text, w), style, rowBg, w);
       this.spaceHits.push({ row, index: i });
       row++;
     });
     this.newSpaceRow = row <= this.rows - 1 ? row : -1;
-    if (this.newSpaceRow > 0) line(row++, " + new space", base + fg(C.dim));
+    if (this.newSpaceRow > 0) {
+      line(row, " + new space", base + fg(C.dim));
+      this.zone("newspace", row, 1, fit(" + new space", w), base + fg(C.dim), C.panel, w);
+      row++;
+    }
     for (; row < this.rows; row++) line(row, "", base);
     const hint = this.mode === "spaces" ? " j/k Enter Esc" : " ^B ? for keys";
     line(this.rows, hint, base + fg(C.dim));
@@ -2277,6 +2301,7 @@ export class App {
       const style = i === active ? bg(C.background) + fg(C.text) + BOLD : bg(C.backdrop) + fg(C.dim);
       s += style + text + RESET + bg(C.backdrop) + fg(C.hover) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
+      this.zone(`tab:${tabs[i]!.id}`, 1, col + used, text, style, i === active ? C.background : C.backdrop, tw);
       used += tw + 1;
     }
     if (last < first && items.length > 0) {
@@ -2285,6 +2310,7 @@ export class App {
       const text = truncate(items[active]!, room);
       s += bg(C.background) + fg(C.text) + BOLD + text + RESET + bg(C.backdrop);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
+      this.zone(`tab:${tabs[active]!.id}`, 1, col + used, text, bg(C.background) + fg(C.text) + BOLD, C.background);
       used += width(text);
       last = active;
     }
@@ -2295,13 +2321,20 @@ export class App {
     }
     this.newTabHit = { start: col + used, end: col + used + width(plus) };
     s += bg(C.backdrop) + fg(C.muted) + plus;
+    // (The "+" can run a column into the update badge, which is drawn over it.)
+    const plusW = Math.max(0, Math.min(width(plus), w - used));
+    this.zone("newtab", 1, col + used, plus.slice(0, plusW), bg(C.backdrop) + fg(C.muted), C.backdrop);
     used += width(plus);
     const label = this.space ? ` ${this.space.name} ` : "";
     const pad = w - used;
     if (pad > 0) {
       s += bg(C.backdrop) + fg(C.dim) + (pad > width(label) + 1 ? " ".repeat(pad - width(label)) + label : " ".repeat(pad));
     }
-    if (badge && bw) s += RESET + at(1, col + w) + badge.style + truncate(badge.text, bw);
+    if (badge && bw) {
+      s += RESET + at(1, col + w) + badge.style + truncate(badge.text, bw);
+      // Its color goes in the text, so it keeps it when hovered.
+      this.zone("badge", 1, col + w, badge.style.replace(bg(C.backdrop), "") + truncate(badge.text, bw), bg(C.backdrop), C.backdrop);
+    }
     return s + RESET;
   }
 
@@ -2373,6 +2406,11 @@ export class App {
       reload: [col + 6, col + 9],
       url: [urlStart, urlStart + fieldW],
     };
+    if (page) {
+      this.zone("nav:back", 2, col, back, btnStyle, C.background);
+      this.zone("nav:forward", 2, col + 3, fwd, btnStyle, C.background);
+      this.zone("nav:reload", 2, col + 6, reload, btnStyle, C.background);
+    }
 
     if (prompt && (prompt.kind === "url" || prompt.kind === "rename" || prompt.kind === "file")) {
       const label =
@@ -2392,11 +2430,16 @@ export class App {
       const shown = url.replace(/^https:\/\//, "");
       const icon = page?.crashed ? fg(C.red) + "✖ " : secure ? fg(C.green) + "🔒" : fg(C.dim) + "  ";
       s += bg(C.surface) + " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2) + RESET;
+      if (page && !prompt) this.zone("url", 2, urlStart, " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2), bg(C.surface), C.surface, fieldW);
     }
     s += barBg + " ";
     const rightCol = urlStart + fieldW + 1;
     this.noticeHit = notice.text && rightW > 0 ? [rightCol, rightCol + Math.min(width(notice.text), rightW)] : null;
     if (rightW > 0) s += barBg + (notice.text ? notice.style : fg(C.orange)) + fit(right, rightW);
+    if (this.noticeHit) {
+      const nw = this.noticeHit[1] - this.noticeHit[0];
+      this.zone("notice", 2, rightCol, notice.style + fit(notice.text, nw), barBg, C.background, nw);
+    }
     if (modeW) s += bg(C.accent) + fg(C.onAccent) + BOLD + mode;
     const used = (urlStart - col) + fieldW + 1 + rightW + modeW;
     if (used < w) s += RESET + barBg + " ".repeat(w - used);
@@ -2424,6 +2467,8 @@ export class App {
       const flag = page.dialog ? "! " : page.loading ? "◌ " : "";
       const text = ` ${flag}${title}${title && host ? " — " : ""}${host}`;
       s += at(g.header.row, g.header.col) + style + fit(text, g.header.cols) + RESET;
+      this.zone(`pane:${page.sessionId}`, g.header.row, g.header.col, fit(text, g.header.cols), style,
+        focused ? C.hover : C.panel, g.header.cols);
     }
     for (const sep of this.seps) {
       if (sep.split.dir !== "h") continue;
@@ -3641,6 +3686,19 @@ export class App {
     const col = Math.floor(px / this.cellW) + 1;
     const row = Math.floor(py / this.cellH) + 1;
 
+    // Chrome under the pointer lights up, except while a button drags a page or a divider.
+    if (ev.action === "move") {
+      if (this.drag || this.mouseCapture) this.hover.leave();
+      else this.hover.move(col, row);
+    }
+
+    // A button let go under an overlay still ends its drag, or the page's hold on the pointer.
+    if (ev.action === "release" && this.covered()) {
+      if (this.drag) this.drag = null;
+      else if (this.mouseCapture) this.pageMouse(this.mouseCapture, ev, px, py);
+      this.hover.move(col, row);
+    }
+
     if (this.mode === "help") {
       if (ev.action === "press") {
         this.mode = "normal";
@@ -3659,6 +3717,7 @@ export class App {
       if (ev.action === "release") {
         this.drag = null;
         this.relayoutAndRedraw();
+        this.hover.move(col, row);
       }
       return;
     }
@@ -3672,10 +3731,19 @@ export class App {
     const captured = this.mouseCapture;
     if (captured && (ev.action === "move" || ev.action === "release")) {
       this.pageMouse(captured, ev, px, py);
+      if (!this.mouseCapture) this.hover.move(col, row);
       return;
     }
 
-    if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
+    if (ev.action === "press") {
+      // Looked up first: the click may redraw the chrome.
+      const zone = ev.button === 0 ? this.hover.at(col, row) : undefined;
+      if (this.chromeClick(ev, col, row)) {
+        // (Not a divider about to be dragged: its flash would move with it.)
+        if (!this.drag) this.hover.press(zone);
+        return;
+      }
+    }
 
     const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
     if (!g) return;
