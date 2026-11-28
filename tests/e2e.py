@@ -61,10 +61,11 @@ def blue_pixels():
 def frame_matches_pane():
     """The newest image is exactly the size of the pane it's drawn in (cells x cell size)."""
     with t.lock:
-        if not t.placements:
+        frames = {i: p for i, p in t.placements.items() if t.zindex.get(i, 0) == 0}
+        if not frames:
             return None
-        i = max(t.placements)
-        row, col, c, r = t.placements[i]
+        i = max(frames)
+        row, col, c, r = frames[i]
         data = t.images[i]
     from PIL import Image
     import io
@@ -525,8 +526,7 @@ try:
     t.key("ctrl+b"); t.key("x")
     check("prefix+x closes the other pane", t.wait_for(lambda: len(pages("1")) == before - 2, 5))
     time.sleep(1.2)
-    with t.lock:
-        placed = list(t.placements.values())
+    placed = list(t.frame_placements().values())
     full_w = t.cols - 22
     check("survivor fills the pane area after closes", len(placed) == 1 and placed[0][2] == full_w, placed)
     t.shot(f"{OUT}/09-after-close.png")

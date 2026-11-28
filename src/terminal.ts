@@ -151,7 +151,7 @@ const CHUNK = 4096;
 /**
  * Transmits a base64 PNG as image `id`, places it at (row, col) scaled to
  * cols x rows cells, then frees the image `replaces` so the swap has no
- * visible gap.
+ * visible gap. A patch (a changed region over the frame) goes at z=1, above it.
  */
 export function drawImage(
   base64Png: string,
@@ -161,13 +161,14 @@ export function drawImage(
   col: number,
   cols: number,
   rows: number,
+  z = 0,
 ): string {
   const parts: string[] = [`${ESC}[${row};${col}H`];
   for (let i = 0; i < base64Png.length; i += CHUNK) {
     const chunk = base64Png.slice(i, i + CHUNK);
     const more = i + CHUNK < base64Png.length ? 1 : 0;
     const ctrl =
-      i === 0 ? `a=T,f=100,i=${id},p=1,q=2,C=1,c=${cols},r=${rows},m=${more}` : `m=${more}`;
+      i === 0 ? `a=T,f=100,i=${id},p=1,q=2,C=1,c=${cols},r=${rows}${z ? `,z=${z}` : ""},m=${more}` : `m=${more}`;
     parts.push(`${ESC}_G${ctrl};${chunk}${ST}`);
   }
   if (replaces !== null) parts.push(`${ESC}_Ga=d,d=I,i=${replaces},q=2${ST}`);

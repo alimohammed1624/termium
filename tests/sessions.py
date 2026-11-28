@@ -92,9 +92,10 @@ def at_address_bar(t, timeout=25):
 
 def newest_image(t):
     with t.lock:
-        if not t.placements:
+        frames = {i: p for i, p in t.placements.items() if t.zindex.get(i, 0) == 0}
+        if not frames:
             return None, None
-        i = max(t.placements)
+        i = max(frames)
         from PIL import Image
         import io
         return t.placements[i], Image.open(io.BytesIO(t.images[i])).size

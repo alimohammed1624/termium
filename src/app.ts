@@ -37,6 +37,7 @@ import {
   transmitVirtual,
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
+import { changedTiles, pngSize, tileCount } from "./dirty";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
@@ -96,6 +97,17 @@ export interface Page {
   phIds: number[];
   /** Where its image currently sits, so a stale placement can be redrawn. */
   placed: Rect | null;
+  /**
+   * What its pane shows (direct placement only): the frame's pixels, the
+   * full frame's image id, and the patch over each changed tile (tile
+   * index -> image id). Only valid while that full frame is imageIds[0].
+   */
+  shown?: { raster: Raster; base: number; patches: Map<number, number> };
+  /**
+   * Its changes last cost about a full frame (a video playing): how many
+   * tiles changed then (not tried again until fewer do), and frames since.
+   */
+  costly?: { tiles: number; frames: number };
   /** Restart the screencast even if its size is unchanged (a terminal attached). */
   restartCast?: boolean;
   /** When its viewport or screencast last changed: frames of another size just after are stale. */
@@ -1873,6 +1885,7 @@ export class App {
       page.imageIds = [];
       page.placed = null;
     }
+    page.shown = undefined;
     this.releasePlaceholder(page);
   }
 
@@ -2035,14 +2048,78 @@ export class App {
     const r = g.content;
     if (r.cols < 1 || r.rows < 1) return false;
     if (this.placeholders) return this.paintPlaceholders(page, r, done);
-    const id = this.nextImage++;
-    if (this.nextImage > 0xfffffff0) this.nextImage = 1;
-    // New picture placed first, old one deleted after, in one synchronized update.
+    // Decoded (to compare with the next) only when it fits the cell grid exactly: patches need that.
+    // While changes cost about a full frame (a video), only one frame in four is kept to compare
+    // the next with, to notice when they get small again: decoding every one slows the frame rate.
+    const size = pngSize(page.lastFrame);
+    const fits = size?.w === r.cols * this.cellW && size?.h === r.rows * this.cellH;
+    const probe = !page.costly || page.costly.frames++ % 4 === 0;
+    const raster = fits && (probe || page.shown) ? decodePng(Buffer.from(page.lastFrame, "base64")) : null;
+    const patches = this.paintChanges(page, r, raster);
+    if (patches !== null) {
+      // Nothing changed (a screenshot's frame, say): nothing to send.
+      if (!patches && !this.staleImages.length) done?.();
+      else out(this.sync(patches + this.takeStale() + this.cursorSeq()), done);
+      return true;
+    }
+    const id = this.newImageId();
+    // New picture placed first, old one (and the patches over it) deleted after, in one synchronized update.
     const replaces = page.imageIds[0] ?? null;
+    this.staleImages.push(...page.imageIds.slice(1));
     out(this.sync(drawImage(page.lastFrame, id, replaces, r.row, r.col, r.cols, r.rows) + this.takeStale() + this.cursorSeq()), done);
     page.imageIds = [id];
     page.placed = { ...r };
+    page.shown = raster && probe ? { raster, base: id, patches: new Map() } : undefined;
     return true;
+  }
+
+  private newImageId(): number {
+    const id = this.nextImage++;
+    if (this.nextImage > 0xfffffff0) this.nextImage = 1;
+    return id;
+  }
+
+  /**
+   * Only what changed (issue #5): each tile of the frame that differs from
+   * what the pane shows goes as a small picture over the full frame, one
+   * per tile (replacing that tile's earlier one). Null when a full frame
+   * should go instead: nothing to compare with (another size or place, a
+   * pane redrawn), or so much changed (scrolling, a new page) that it costs
+   * about as much and the patches would pile up.
+   */
+  private paintChanges(page: Page, r: Rect, raster: Raster | null): string | null {
+    const shown = page.shown;
+    const p = page.placed;
+    if (!raster || !shown || shown.base !== page.imageIds[0]) return null;
+    if (!p || p.row !== r.row || p.col !== r.col || p.cols !== r.cols || p.rows !== r.rows) return null;
+    const tiles = changedTiles(shown.raster, raster, r.cols, r.rows, this.cellW, this.cellH);
+    if (!tiles) return null;
+    const total = tileCount(r.cols, r.rows, this.cellW, this.cellH);
+    const fresh = tiles.filter((t) => !shown.patches.has(t.index)).length;
+    if (tiles.length > total / 2 || shown.patches.size + fresh > (total * 3) / 4) return null;
+    if (page.costly && tiles.length >= page.costly.tiles * 0.75) return null;
+    // (Small pictures: worth compressing harder than a whole frame.)
+    const data = tiles.map((t) => encodeRegion(raster, t.x, t.y, t.w, t.h, 6).toString("base64"));
+    if (data.reduce((n, d) => n + d.length, 0) > page.lastFrame!.length / 2) {
+      page.costly = { tiles: tiles.length, frames: 1 };
+      return null;
+    }
+    page.costly = undefined;
+    let s = "";
+    tiles.forEach((t, i) => {
+      const id = this.newImageId();
+      s += drawImage(data[i]!, id, null, r.row + t.row, r.col + t.col, t.cols, t.rows, 1);
+      const old = shown.patches.get(t.index);
+      if (old !== undefined) {
+        this.staleImages.push(old);
+        const k = page.imageIds.indexOf(old);
+        if (k > 0) page.imageIds.splice(k, 1);
+      }
+      shown.patches.set(t.index, id);
+      page.imageIds.push(id);
+    });
+    shown.raster = raster;
+    return s;
   }
 
   /**

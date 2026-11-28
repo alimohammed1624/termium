@@ -47,34 +47,61 @@ export function decodePng(buf: Uint8Array): Raster | null {
   if (raw.length < height * (stride + 1)) return null;
   const data = new Uint8Array(height * stride);
   const bpp = channels;
+  // Rows start on a 4-byte boundary when the stride is a multiple of 4.
+  const words = stride % 4 === 0 ? new Uint32Array(data.buffer, data.byteOffset, data.byteLength >> 2) : null;
+  // One loop per filter type (a switch per byte made this the slow part).
+  // Stores into the Uint8Array wrap mod 256 by themselves.
   for (let y = 0; y < height; y++) {
     const filter = raw[y * (stride + 1)]!;
     const src = y * (stride + 1) + 1;
     const dst = y * stride;
     const prev = dst - stride;
-    for (let x = 0; x < stride; x++) {
-      const v = raw[src + x]!;
-      const a = x >= bpp ? data[dst + x - bpp]! : 0;
-      const up = y > 0 ? data[prev + x]! : 0;
-      let out: number;
-      switch (filter) {
-        case 0: out = v; break;
-        case 1: out = v + a; break;
-        case 2: out = v + up; break;
-        case 3: out = v + ((a + up) >> 1); break;
-        case 4: {
-          const c = x >= bpp && y > 0 ? data[prev + x - bpp]! : 0;
+    const top = y === 0;
+    switch (filter) {
+      case 0:
+        data.set(raw.subarray(src, src + stride), dst);
+        break;
+      case 1:
+        for (let x = 0; x < bpp; x++) data[dst + x] = raw[src + x]!;
+        for (let x = bpp; x < stride; x++) data[dst + x] = raw[src + x]! + data[dst + x - bpp]!;
+        break;
+      case 2:
+        data.set(raw.subarray(src, src + stride), dst);
+        if (top) break;
+        if (words) {
+          // Four bytes at a time, each added mod 256 on its own (the usual case: Chromium uses this filter).
+          for (let i = dst >> 2, j = prev >> 2, end = (dst + stride) >> 2; i < end; i++, j++) {
+            const v = words[i]!;
+            const u = words[j]!;
+            words[i] = (((v & 0x7f7f7f7f) + (u & 0x7f7f7f7f)) ^ ((v ^ u) & 0x80808080)) >>> 0;
+          }
+        } else {
+          for (let x = 0; x < stride; x++) data[dst + x] = data[dst + x]! + data[prev + x]!;
+        }
+        break;
+      case 3:
+        for (let x = 0; x < stride; x++) {
+          const a = x >= bpp ? data[dst + x - bpp]! : 0;
+          const up = top ? 0 : data[prev + x]!;
+          data[dst + x] = raw[src + x]! + ((a + up) >> 1);
+        }
+        break;
+      case 4:
+        // Left of the first pixel a and c are 0, so the predictor is up.
+        for (let x = 0; x < bpp; x++) data[dst + x] = raw[src + x]! + (top ? 0 : data[prev + x]!);
+        for (let x = bpp; x < stride; x++) {
+          const a = data[dst + x - bpp]!;
+          const up = top ? 0 : data[prev + x]!;
+          const c = top ? 0 : data[prev + x - bpp]!;
           const p = a + up - c;
           const pa = Math.abs(p - a);
           const pb = Math.abs(p - up);
           const pc = Math.abs(p - c);
-          out = v + (pa <= pb && pa <= pc ? a : pb <= pc ? up : c);
-          break;
+          data[dst + x] = raw[src + x]! + (pa <= pb && pa <= pc ? a : pb <= pc ? up : c);
         }
-        default:
-          return null;
-      }
-      data[dst + x] = out & 0xff;
+        break;
+      default:
+        return null;
     }
   }
   return { width, height, channels, data };
@@ -105,8 +132,8 @@ function chunk(type: string, body: Buffer): Buffer {
   return Buffer.concat([head, body, crc]);
 }
 
-/** Encodes the w x h region of `r` at (x, y) as a PNG (clamped to the image). */
-export function encodeRegion(r: Raster, x: number, y: number, w: number, h: number): Buffer {
+/** Encodes the w x h region of `r` at (x, y) as a PNG (clamped to the image), at a zlib level. */
+export function encodeRegion(r: Raster, x: number, y: number, w: number, h: number, level = 1): Buffer {
   x = Math.max(0, Math.min(r.width - 1, x));
   y = Math.max(0, Math.min(r.height - 1, y));
   w = Math.max(1, Math.min(r.width - x, w));
@@ -124,5 +151,5 @@ export function encodeRegion(r: Raster, x: number, y: number, w: number, h: numb
   ihdr.writeUInt32BE(h, 4);
   ihdr[8] = 8;
   ihdr[9] = ch === 4 ? 6 : 2;
-  return Buffer.concat([SIGNATURE, chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level: 1 })), chunk("IEND", Buffer.alloc(0))]);
+  return Buffer.concat([SIGNATURE, chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level })), chunk("IEND", Buffer.alloc(0))]);
 }
