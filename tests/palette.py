@@ -120,6 +120,26 @@ try:
     t.key("down"); t.key("enter"); time.sleep(1)
     check("choosing it switches to that tab", t.wait_for(lambda: "third=1" in t.line(2), 5), t.line(2))
 
+    # A click runs the row as drawn, even if keys just changed the list.
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.type(">zoom"); t.wait_idle(0.4, 5)
+    r = row_with("Zoom in"); col = t.line(r).find("Zoom in") + 3
+    x, y = (col - 1) * t.cell_w + 5, (r - 1) * t.cell_h + 5
+    t.write(f"\x1b[200~ out\x1b[201~\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m")
+    check("a click runs the row it landed on (Zoom in), not what the list became", t.wait_for(lambda: "110%" in t.line(2), 5), t.line(2))
+    t.key("alt+0"); time.sleep(0.5)
+
+    # The exact shortcut of an action picks it first.
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.type(">Ctrl+B X"); t.wait_idle(0.4, 5)
+    check("'Ctrl+B X' lists Close tab first", t.wait_for(lambda: row_with("Close tab") and (not row_with("Close pane") or row_with("Close tab") < row_with("Close pane")), 3), t.text())
+    t.key("escape"); time.sleep(0.3)
+
+    # A click on another tab while the box is open switches at once; a click on the address keeps the draft.
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.type("draft here"); t.wait_idle(0.4, 5)
+    t.click_cell(t.line(2).find("draft here") + 2, 2)
+    check("a click on the address keeps the box and its draft", t.wait_for(lambda: popup_open() and "draft here" in t.text(), 2), t.text())
+    t.click_cell(t.line(1).find(" 2 ") + 2, 1)
+    check("a click on another tab switches to it in one click", t.wait_for(lambda: not popup_open() and "anim" in t.line(2), 5), (t.line(1), t.line(2)))
+
     # Paste goes into the box.
     t.key("ctrl+l"); t.wait_for(popup_open, 3); t.paste(">reset zoom")
     check("a paste lands in the box", t.wait_for(lambda: row_with("Reset zoom") and not row_with("Split right"), 3), t.text())

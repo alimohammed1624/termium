@@ -42,12 +42,13 @@ const ORDER: PaletteKind[] = ["action", "tab", "history"];
 /**
  * The rows for `query`: `go` (open or search the typed text) first, so
  * Enter does what the address bar always did; then the actions, tabs and
- * history that match, in that order, each group's matches at the start of
- * their text first.
+ * history that match, in that order. In each group, an exact shortcut
+ * (`Ctrl+B X`, not `Ctrl+B x`) comes first, then matches at the start of the text.
  */
 export function paletteRows(query: string, go: PaletteItem | null, items: PaletteItem[]): PaletteItem[] {
-  const q = query.trim().toLowerCase();
-  const starts = (it: PaletteItem) => (q && it.text.toLowerCase().startsWith(q) ? 0 : 1);
+  const exact = query.trim();
+  const q = exact.toLowerCase();
+  const starts = (it: PaletteItem) => (exact && it.hint === exact ? 0 : q && it.text.toLowerCase().startsWith(q) ? 1 : 2);
   const found = items
     .filter((it) => itemMatches(it, q))
     .map((it, i) => ({ it, i }))

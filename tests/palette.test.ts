@@ -35,6 +35,12 @@ describe("palette", () => {
     expect(paletteRows("", null, items).map((r) => r.text)).toEqual(["Close space", "Switch space", "Space bar"]);
   });
 
+  test("a shortcut typed exactly picks its action over ones that only match it ignoring case", () => {
+    const items = [action("Close pane", "Ctrl+W", "Ctrl+B x"), action("Close tab", "Ctrl+B X")];
+    expect(paletteRows("Ctrl+B X", null, items)[0]!.text).toBe("Close tab");
+    expect(paletteRows("Ctrl+B x", null, items).map((r) => r.text)).toEqual(["Close pane", "Close tab"]);
+  });
+
   test("nothing typed: everything, no go row", () => {
     const items = [seen("Old", "https://old.example/"), action("Reload", "Ctrl+R")];
     expect(paletteRows("  ", null, items).map((r) => r.kind)).toEqual(["action", "history"]);

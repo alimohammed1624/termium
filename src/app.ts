@@ -2536,7 +2536,7 @@ export class App {
   }
 
   /** Where the popup address bar is, and which list entry each of its rows shows. */
-  private paletteHits: { box: Rect; rows: { row: number; index: number }[] } | null = null;
+  private paletteHits: { box: Rect; rows: { row: number; item: PaletteItem }[] } | null = null;
 
   /**
    * The popup address bar and command palette (Ctrl+L), centred over the
@@ -2551,7 +2551,7 @@ export class App {
     const compact = area.rows < 7;
     const listRows = Math.max(0, Math.min(12, area.rows - (compact ? 1 : 4)));
     const boxH = Math.min(area.rows, listRows + (compact ? 1 : 4));
-    const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 3));
+    const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 2));
     const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
     if (p.sel >= 0 && p.sel < p.first) p.first = p.sel;
     if (p.sel >= p.first + listRows) p.first = p.sel - listRows + 1;
@@ -2571,7 +2571,7 @@ export class App {
     this.promptCursor = p.edit.selectAll ? null : { row, col: left + width(label) + v.cursorCol };
     row++;
     if (!compact) s += at(row++, left) + panel + fit("", boxW);
-    const hits: { row: number; index: number }[] = [];
+    const hits: { row: number; item: PaletteItem }[] = [];
     const icons: Record<PaletteItem["kind"], string> = { go: "→", action: "▸", tab: "▣", history: "↺" };
     for (let i = 0; i < listRows && row < top + boxH; i++, row++) {
       const index = p.first + i;
@@ -2585,7 +2585,7 @@ export class App {
       const textW = Math.max(1, boxW - 4 - (hint ? width(hint) + 2 : 0));
       s += at(row, left) + style + fg(index === p.sel ? C.mauve : C.overlay) + ` ${icons[item.kind]} ` +
         fg(C.text) + fit(item.text, textW) + RESET + style + "\x1b[22m" + dim + (hint ? `  ${hint}` : "") + " " + RESET;
-      hits.push({ row, index });
+      hits.push({ row, item });
     }
     if (!compact && row < top + boxH) {
       const where = list.length ? `${p.sel >= 0 ? p.sel + 1 : "–"}/${list.length}` : "no matches";
@@ -2653,7 +2653,7 @@ export class App {
     for (const [url, title] of [...this.visited].reverse()) {
       if (open.has(url)) continue;
       items.push({
-        kind: "history", text: title || url, hint: hostOf(url), keywords: url,
+        kind: "history", text: title || url, hint: url.replace(/^https?:\/\//, ""), keywords: url,
         run: () => {
           if (this.pages.has(page.sessionId)) this.go(page, url);
         },
@@ -3559,14 +3559,21 @@ export class App {
     }
     if (ev.action !== "press") return;
     if (!inside) {
+      // A click on the address keeps the draft (as it always did).
+      const n = this.navHits;
+      if (row === 2 && n && col >= n.url[0] && col < n.url[1]) return;
+      // Anywhere else closes it; a click on the bars (a tab, a space, a button) also does what it says there.
       this.prompt = null;
       this.queueChrome();
+      if (!inRect(this.paneArea(), col, row)) this.chromeClick(ev, col, row);
       return;
     }
+    // The row as drawn (the list may have changed since, with keys not yet drawn).
     const hit = hits.rows.find((h) => h.row === row);
     if (hit && ev.button === 0) {
-      p.sel = hit.index;
-      this.runPaletteItem(p);
+      this.prompt = null;
+      hit.item.run();
+      this.queueChrome();
     }
   }
 
