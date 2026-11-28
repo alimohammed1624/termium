@@ -37,6 +37,7 @@ import {
   transmitVirtual,
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
+import { HOVER_DWELL_MS, PREVIEW_COLS, THUMB_Z, ThumbCache, fitCells, makeThumb, sheetLayout, thumbsMode, type Thumb } from "./thumbs";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
@@ -984,6 +985,7 @@ export class App {
     if (!page) return;
     this.clearForeign(page);
     if (this.hoverPage === page) this.hoverPage = null;
+    this.thumbs.delete(page);
     this.pages.delete(page.sessionId);
     this.byTarget.delete(page.targetId);
     this.staleImages.push(...page.imageIds);
@@ -1553,6 +1555,7 @@ export class App {
     this.mouseButtons = 0;
     this.drag = null;
     this.hoverPage = null;
+    this.forgetThumbs();
     this.pageKeysDown.clear();
     this.syntheticDown.clear();
   }
@@ -1927,7 +1930,7 @@ export class App {
    * robin, so cells still showing a page that just went away don't pick up
    * the next page's picture before they're redrawn.
    */
-  private placeholderIds(page: Page, n: number): number[] | null {
+  private placeholderIds(page: Pick<Page, "phIds">, n: number): number[] | null {
     while (page.phIds.length > n) this.phReleasing.push(page.phIds.pop()!);
     while (page.phIds.length < n) {
       let found = 0;
@@ -1944,7 +1947,7 @@ export class App {
     return page.phIds;
   }
 
-  private releasePlaceholder(page: Page): void {
+  private releasePlaceholder(page: Pick<Page, "phIds">): void {
     // Freed once their pictures are deleted (see takeStale).
     this.phReleasing.push(...page.phIds);
     page.phIds = [];
@@ -2123,6 +2126,9 @@ export class App {
     // back the text, so deleting them here would show as empty panes; and
     // the terminal may show other programs' pictures (other tmux panes),
     // so nothing is ever deleted wholesale.
+    // A tab preview goes; a contact sheet is drawn again from scratch.
+    this.preview = null;
+    this.dropThumbs();
     const s = SYNC_START + RESET + this.takeStale();
     for (const page of this.pages.values()) page.placed = null;
     out(s + "\x1b[2J");
@@ -2136,9 +2142,9 @@ export class App {
     }
   }
 
-  /** The pane area shows an overlay (help, the update box), not the pages. */
+  /** The pane area shows an overlay (help, the update box, a contact sheet), not the pages. */
   private covered(): boolean {
-    return this.mode === "help" || this.mode === "update";
+    return this.mode === "help" || this.mode === "update" || this.sheetSpace() !== null;
   }
 
   private drawChrome(): void {
@@ -2159,8 +2165,14 @@ export class App {
       out(this.sync(s + RESET + this.updateOverlay() + this.cursorSeq()));
       return;
     }
+    const sheet = this.sheetSpace();
+    if (sheet) {
+      out(this.sync(s + RESET + this.sheetOverlay(sheet) + this.takeStale() + this.cursorSeq()));
+      return;
+    }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
+    s += this.previewDraw();
     out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
@@ -3001,6 +3013,7 @@ export class App {
       if (synthetic && this.pages.has(synthetic.page.sessionId)) this.domKey(synthetic.page, ev, "keyup");
       return;
     }
+    if (this.preview || this.hoverSheet || this.dwell) this.hideHover();
     if (isModifier(ev)) {
       if (!this.prompt && this.mode === "normal" && this.focused) this.sendKey(this.focused, ev);
       return;
@@ -3209,7 +3222,9 @@ export class App {
   private setMode(mode: Mode, wasSpaces = this.mode === "spaces"): void {
     this.mode = mode;
     const sidebarChanged = !this.sidebar && wasSpaces !== (mode === "spaces");
-    if (sidebarChanged) this.relayoutAndRedraw();
+    // The picker's contact sheet covers the panes: leaving it puts them back.
+    const sheetClosed = wasSpaces && mode !== "spaces" && thumbsMode() !== "off";
+    if (sidebarChanged || sheetClosed) this.relayoutAndRedraw();
     else this.queueChrome();
   }
 
@@ -3630,6 +3645,8 @@ export class App {
       return;
     }
 
+    if (this.thumbMouse(ev, col, row)) return;
+
     if (ev.action === "move" && this.hoverPage && !this.mouseCapture &&
         ![...this.geom.values()].some((p) => p.item === this.hoverPage && inRect(p.content, col, row))) {
       this.leaveHover();
@@ -3833,6 +3850,364 @@ export class App {
 
   private movesInFlight = new Set<Page>();
   private pendingMoves = new Map<Page, () => Promise<unknown>>();
+
+  // ---------------------------------------------------------- thumbnails
+  //
+  // After a pause over a tab, a small picture of its page shows under it;
+  // over a space in the sidebar, a contact sheet of its tabs (the spaces
+  // picker, Ctrl+B w, shows the same). A click on a picture switches to its
+  // tab. Pictures stack above the pages' own; a sheet's titles need the
+  // panes cleared, so it covers them as the key reference does.
+
+  private thumbs = new ThumbCache<Page>();
+  private thumbCapturing = new Set<Page>();
+  /** Thumbnail pictures on screen, by slot ("preview", "sheet:N"). */
+  private thumbSlots = new Map<string, { id: number; phIds: number[]; png: string; rect: Rect }>();
+  /** What the pointer rests on, until its preview shows. */
+  private dwell: { key: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** The tab preview shown: its label on row 2, its picture below. */
+  private preview: { tab: Tab; rect: Rect } | null = null;
+  /** The space whose contact sheet the pointer opened. */
+  private hoverSheet: Space | null = null;
+  /** The preview or sheet on screen, and the tabs in it. */
+  private thumbPanel: Rect | null = null;
+  private thumbHits: { rect: Rect; space: Space; tab: Tab }[] = [];
+
+  /** The space whose contact sheet covers the panes, if any. */
+  private sheetSpace(): Space | null {
+    if (thumbsMode() === "off") return null;
+    if (this.mode === "spaces") return this.spaces[this.spaceCursor] ?? null;
+    return this.hoverSheet && this.spaces.includes(this.hoverSheet) ? this.hoverSheet : null;
+  }
+
+  /**
+   * A page's thumbnail, from its last frame or (a page not on screen, or
+   * never drawn) a screenshot, taken in the background: a redraw follows.
+   */
+  private thumbOf(page: Page): Thumb | null {
+    if (thumbsMode() !== "on") return null;
+    const shown = this.geom.has(page);
+    let t = this.thumbs.get(page);
+    if (page.lastFrame && (!t || (t.seq === -1 ? shown : t.seq !== page.frameSeq))) {
+      const made = makeThumb(page.lastFrame);
+      // A hidden page's last frame may be old: a screenshot replaces it.
+      if (made) this.thumbs.set(page, (t = { ...made, seq: page.frameSeq, at: shown ? Date.now() : 0 }));
+    }
+    if ((!shown || !page.lastFrame) && (!t || Date.now() - t.at > 5000)) this.captureThumb(page);
+    return t ?? null;
+  }
+
+  private captureThumb(page: Page): void {
+    if (this.thumbCapturing.has(page) || page.crashed || !this.pages.has(page.sessionId)) return;
+    this.thumbCapturing.add(page);
+    void this.serial(page, async () => {
+      const { data } = await this.cdp.send("Page.captureScreenshot", { format: "png", optimizeForSpeed: true }, page.sessionId);
+      const made = this.pages.has(page.sessionId) ? makeThumb(data) : null;
+      if (!made) return;
+      this.thumbs.set(page, { ...made, seq: -1, at: Date.now() });
+      if (!this.attached) return;
+      if (this.preview?.tab.focused === page) out(this.sync(this.previewDraw() + this.cursorSeq()));
+      else if (this.sheetSpace()?.tabs.some((t) => t.focused === page)) this.drawChrome();
+    }).finally(() => this.thumbCapturing.delete(page));
+  }
+
+  /** Places a thumbnail in slot `key` (unchanged ones aren't sent again); null if it can't be shown. */
+  private placeThumb(key: string, png: string, r: Rect): string | null {
+    const slot = this.thumbSlots.get(key) ?? { id: 0, phIds: [], png: "", rect: r };
+    const p = slot.rect;
+    const same = slot.png === png && p.row === r.row && p.col === r.col && p.cols === r.cols && p.rows === r.rows;
+    if (this.placeholders) {
+      const ph = this.placeholderIds(slot, 1);
+      if (!ph) return null;
+      const id = placeholderImageId(this.phHigh, this.phColour(ph[0]!));
+      const cols = Math.min(r.cols, PLACEHOLDER_MAX);
+      const rows = Math.min(r.rows, PLACEHOLDER_MAX);
+      // Cells always: the text drawn around them may have overwritten them.
+      const s = (same && slot.id === id ? "" : transmitVirtual(png, id, cols, rows)) +
+        placeholderCells(this.phHigh, this.phColour(ph[0]!), this.phRgb, r.row, r.col, cols, rows);
+      this.thumbSlots.set(key, { id, phIds: slot.phIds, png, rect: { ...r } });
+      return s;
+    }
+    if (same && slot.id) return "";
+    const id = this.nextImage++;
+    if (this.nextImage > 0xfffffff0) this.nextImage = 1;
+    this.thumbSlots.set(key, { id, phIds: [], png, rect: { ...r } });
+    return drawImage(png, id, slot.id || null, r.row, r.col, r.cols, r.rows, THUMB_Z);
+  }
+
+  /** Deletes thumbnails (with the next update), all but those `keep` names. */
+  private dropThumbs(keep: (key: string) => boolean = () => false): void {
+    for (const [key, slot] of this.thumbSlots) {
+      if (keep(key)) continue;
+      this.thumbSlots.delete(key);
+      if (slot.id) this.staleImages.push(slot.id);
+      if (slot.phIds.length) this.releasePlaceholder(slot);
+    }
+  }
+
+  /** A terminal came or went: what was on the last one means nothing now. */
+  private forgetThumbs(): void {
+    if (this.dwell) clearTimeout(this.dwell.timer);
+    this.dwell = null;
+    this.preview = null;
+    this.hoverSheet = null;
+    this.thumbPanel = null;
+    this.thumbHits = [];
+    this.thumbSlots.clear();
+  }
+
+  /** The tab preview: title and address on row 2, its picture under them. */
+  private previewDraw(): string {
+    const p = this.preview;
+    const space = this.space;
+    if (!p) return "";
+    if (!space || this.prompt || this.mode !== "normal") {
+      // Row 2 is wanted for something else (a page's dialog, say).
+      this.dropPreview();
+      return "";
+    }
+    const page = p.tab.focused;
+    const { col, cols } = p.rect;
+    let s = at(2, col) + bg(C.surface1) + fg(C.text) + fit(` ${pageTitle(page)} — ${displayUrl(page)}`, cols) + RESET;
+    let rows = 1;
+    const t = this.thumbOf(page);
+    const room = Math.min(16, this.rows - 3);
+    if (t && room >= 2) {
+      const r = fitCells({ col, row: 3, cols, rows: room }, t.w, t.h, this.cellW, this.cellH);
+      const placed = this.placeThumb("preview", t.png, r);
+      if (placed !== null) {
+        s += placed + this.reanchorPlaceholders(r);
+        rows += r.rows;
+      }
+    }
+    p.rect = { col, row: 2, cols, rows };
+    this.thumbPanel = p.rect;
+    this.thumbHits = [{ rect: p.rect, space, tab: p.tab }];
+    return s;
+  }
+
+  /**
+   * With placeholders, a page's cells right of `r` count their place in the
+   * picture on from the cell to their left, now a thumbnail's: the rest of
+   * each of those rows is written again from an explicit row and column.
+   */
+  private reanchorPlaceholders(r: Rect): string {
+    if (!this.placeholders) return "";
+    let s = "";
+    const x = r.col + r.cols;
+    for (const [page, g] of this.geom) {
+      const c = g.content;
+      const nx = Math.ceil(c.cols / PLACEHOLDER_MAX);
+      const ny = Math.ceil(c.rows / PLACEHOLDER_MAX);
+      if (x <= c.col || x >= c.col + c.cols || page.phIds.length !== nx * ny) continue;
+      // The tile holding column x (as paintPlaceholders cut the pane).
+      const edge = (i: number, n: number, len: number) => Math.floor((i * len) / n);
+      let tx = 0;
+      while (tx < nx - 1 && edge(tx + 1, nx, c.cols) <= x - c.col) tx++;
+      const c0 = edge(tx, nx, c.cols);
+      const c1 = edge(tx + 1, nx, c.cols);
+      for (let y = Math.max(r.row, c.row); y < Math.min(r.row + r.rows, c.row + c.rows); y++) {
+        let ty = 0;
+        while (ty < ny - 1 && edge(ty + 1, ny, c.rows) <= y - c.row) ty++;
+        const r0 = edge(ty, ny, c.rows);
+        const index = page.phIds[ty * nx + tx]!;
+        const dx = x - c.col - c0; // column within the tile
+        const cols = Math.min(c1 - c0, PLACEHOLDER_MAX) - dx;
+        const dy = y - c.row - r0;
+        if (cols > 0 && dy < PLACEHOLDER_MAX) s += placeholderCells(this.phHigh, this.phColour(index), this.phRgb, y, x, cols, 1, dy, dx);
+      }
+    }
+    return s;
+  }
+
+  /** A space's tabs as pictures with titles (or, without pictures, a list), over the panes. */
+  private sheetOverlay(space: Space): string {
+    const area = this.paneArea();
+    // (With placeholders the sheet's text replaces the cells showing pages.)
+    let s = this.placeholders ? "" : this.deleteOwnImages();
+    for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
+    const si = this.spaces.indexOf(space);
+    const anchor = this.spaceHits.find((h) => h.index === si)?.row ?? area.row;
+    const n = space.tabs.length;
+    const head = ` ${si + 1} ${space.name} · ${n} tab${n === 1 ? "" : "s"}`;
+    const panelBg = bg(C.base);
+    const hits: typeof this.thumbHits = [];
+    const used = new Set<string>();
+    const lay = thumbsMode() === "on" ? sheetLayout(area, n, this.cellW, this.cellH, anchor) : null;
+    let panel: Rect;
+    if (lay) {
+      panel = lay.panel;
+      for (let r = 0; r < panel.rows; r++) s += at(panel.row + r, panel.col) + panelBg + " ".repeat(panel.cols);
+      lay.cells.forEach((cell, i) => {
+        const tab = space.tabs[i]!;
+        const page = tab.focused;
+        const t = this.thumbOf(page);
+        const placed = t ? this.placeThumb(`sheet:${i}`, t.png, fitCells(cell, t.w, t.h, this.cellW, this.cellH)) : null;
+        if (placed !== null) {
+          s += placed;
+          used.add(`sheet:${i}`);
+        } else {
+          // No picture (yet): a card with the address.
+          for (let r = 0; r < cell.rows; r++) s += at(cell.row + r, cell.col) + bg(C.surface0) + " ".repeat(cell.cols);
+          s += at(cell.row + Math.floor((cell.rows - 1) / 2), cell.col) + bg(C.surface0) + fg(C.overlay) + fit(` ${hostOf(page.url) || displayUrl(page)}`, cell.cols);
+        }
+        const style = i === space.active ? fg(C.text) + BOLD : fg(C.subtext);
+        s += at(cell.row + cell.rows, cell.col) + panelBg + style + fit(`${i + 1} ${pageTitle(page)}`, cell.cols) + RESET;
+        hits.push({ rect: { ...cell, rows: cell.rows + 1 }, space, tab });
+      });
+      if (lay.more) s += at(panel.row + panel.rows - 1, panel.col) + panelBg + fg(C.overlay) + fit(`  +${lay.more} more`, panel.cols) + RESET;
+    } else {
+      // Text only: a line per tab.
+      const shown = Math.min(n, Math.max(1, area.rows - 2));
+      const rows = shown + 2;
+      panel = {
+        col: area.col,
+        row: Math.max(area.row, Math.min(anchor - 1, area.row + area.rows - rows)),
+        cols: Math.min(area.cols, 64),
+        rows: Math.min(rows, area.rows),
+      };
+      for (let r = 0; r < panel.rows; r++) s += at(panel.row + r, panel.col) + panelBg + " ".repeat(panel.cols);
+      for (let i = 0; i < shown && 2 + i < panel.rows; i++) {
+        const tab = space.tabs[i]!;
+        const page = tab.focused;
+        const rect = { col: panel.col, row: panel.row + 2 + i, cols: panel.cols, rows: 1 };
+        const host = hostOf(page.url);
+        const style = i === space.active ? fg(C.text) + BOLD : fg(C.subtext);
+        s += at(rect.row, rect.col) + panelBg + style + fit(`  ${i + 1} ${pageTitle(page)}${host ? ` — ${host}` : ""}`, rect.cols) + RESET;
+        hits.push({ rect, space, tab });
+      }
+    }
+    s += at(panel.row, panel.col) + panelBg + fg(C.mauve) + BOLD + fit(head, panel.cols) + RESET;
+    this.dropThumbs((k) => used.has(k));
+    this.thumbPanel = panel;
+    this.thumbHits = hits;
+    return s + RESET;
+  }
+
+  /** What a pointer at (col, row) would preview: a tab other than the shown one, or a space. */
+  private hoverTarget(col: number, row: number): { key: string; tab?: Tab; space?: Space } | null {
+    if (thumbsMode() === "off" || this.mode !== "normal" || this.prompt || this.mouseButtons) return null;
+    if (col < this.mainCol()) {
+      const hit = this.spaceHits.find((h) => h.row === row);
+      const space = hit ? this.spaces[hit.index] : undefined;
+      return space && space.tabs.length ? { key: `space:${space.id}`, space } : null;
+    }
+    const space = this.space;
+    const hit = row === 1 && space ? this.tabHits.find((h) => col >= h.start && col < h.end) : undefined;
+    const tab = hit && space && hit.index !== space.active ? space.tabs[hit.index] : undefined;
+    return tab ? { key: `tab:${tab.id}`, tab } : null;
+  }
+
+  /**
+   * Pointer events for previews: rests on a tab or space start the pause
+   * before its preview, moves off put it away, and clicks on a preview
+   * switch tabs. True if the event goes no further.
+   */
+  private thumbMouse(ev: MouseEvent, col: number, row: number): boolean {
+    if (this.mouseCapture) return false;
+    const inside = !!this.thumbPanel && (this.preview !== null || this.sheetSpace() !== null) && inRect(this.thumbPanel, col, row);
+    // The picker's sheet hides the pages: the pointer there is the picker's.
+    const picker = this.mode === "spaces" && this.sheetSpace() !== null && inRect(this.paneArea(), col, row);
+    if (ev.action === "press") {
+      if (inside) {
+        const hit = this.thumbHits.find((h) => inRect(h.rect, col, row));
+        if (hit && ev.button === 0) this.openThumb(hit.space, hit.tab);
+        return true;
+      }
+      this.hideHover();
+      if (picker) this.setMode("normal");
+      return picker;
+    }
+    if (ev.action !== "move") return inside || picker;
+    if (inside) {
+      if (this.hoverPage) this.leaveHover();
+      if (this.dwell) clearTimeout(this.dwell.timer);
+      this.dwell = null;
+      return true;
+    }
+    if (picker) return true;
+    const target = this.hoverTarget(col, row);
+    const key = target?.key ?? "";
+    const shown = this.preview ? `tab:${this.preview.tab.id}` : this.hoverSheet ? `space:${this.hoverSheet.id}` : "";
+    if (shown && key !== shown) this.hideHover();
+    if (key === shown || key === this.dwell?.key) return false;
+    if (this.dwell) clearTimeout(this.dwell.timer);
+    this.dwell = !target ? null : {
+      key,
+      timer: setTimeout(() => {
+        this.dwell = null;
+        this.showHover(target);
+      }, HOVER_DWELL_MS),
+    };
+    return false;
+  }
+
+  private showHover(target: { tab?: Tab; space?: Space }): void {
+    if (!this.attached || this.covered() || this.mode !== "normal" || this.prompt || this.closingAll) return;
+    if (target.tab) {
+      const space = this.space;
+      const i = space ? space.tabs.indexOf(target.tab) : -1;
+      const hit = this.tabHits.find((h) => h.index === i);
+      if (!hit || i === space!.active) return;
+      const cols = Math.min(PREVIEW_COLS, this.cols - this.mainCol() + 1);
+      const col = Math.max(this.mainCol(), Math.min(hit.start, this.cols - cols + 1));
+      this.preview = { tab: target.tab, rect: { col, row: 2, cols, rows: 1 } };
+      out(this.sync(this.previewDraw() + this.cursorSeq()));
+    } else if (target.space && this.spaces.includes(target.space)) {
+      this.hoverSheet = target.space;
+      if (this.hoverPage) this.leaveHover();
+      this.drawChrome();
+    }
+  }
+
+  /** Puts the hover preview or sheet away (the picker's sheet stays with the picker). */
+  private hideHover(): void {
+    if (this.dwell) clearTimeout(this.dwell.timer);
+    this.dwell = null;
+    const preview = this.preview;
+    const sheet = this.hoverSheet;
+    if (!preview && !sheet) return;
+    this.hoverSheet = null;
+    if (sheet) {
+      this.preview = null;
+      this.thumbPanel = null;
+      this.thumbHits = [];
+      this.dropThumbs();
+      if (this.mode !== "spaces") this.fullRedraw();
+      return;
+    }
+    this.dropPreview();
+    this.drawChrome();
+  }
+
+  /** Takes the tab preview away (its label goes with the next chrome drawing). */
+  private dropPreview(): void {
+    const r = this.preview?.rect;
+    this.preview = null;
+    this.thumbPanel = null;
+    this.thumbHits = [];
+    this.dropThumbs();
+    // With placeholders the picture was cells over the panes: write theirs again.
+    if (!r || !this.placeholders) return;
+    for (const [page, g] of this.geom) {
+      const c = g.content;
+      if (c.col < r.col + r.cols && r.col < c.col + c.cols && c.row < r.row + r.rows && r.row < c.row + c.rows) {
+        page.placed = null;
+        this.paint(page);
+      }
+    }
+  }
+
+  /** A click on a thumbnail: show that tab of that space. */
+  private openThumb(space: Space, tab: Tab): void {
+    const si = this.spaces.indexOf(space);
+    const ti = space.tabs.indexOf(tab);
+    if (si < 0 || ti < 0) return;
+    this.hideHover();
+    space.active = ti;
+    this.mode = "normal";
+    this.switchSpace(si);
+  }
 
   // ---------------------------------------------------------- agents
   //

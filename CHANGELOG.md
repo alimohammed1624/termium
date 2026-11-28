@@ -6,6 +6,14 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Hover previews: resting the pointer on a tab shows a small picture of its
+  page under it, and on a space a contact sheet of its tabs; the spaces
+  picker (Ctrl+B w) shows the same sheet, and clicking a picture switches to
+  that tab. Tabs never drawn get one from a screenshot. Thumbnails are
+  scaled down and cached (bounded in count and size).
+  `TERMIUM_THUMBNAILS=text` shows titles instead, `off` turns them off.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added

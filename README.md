@@ -225,6 +225,12 @@ The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
 divider between panes.
 
+Rest the pointer on a tab and a small preview of its page shows under it;
+on a space in the sidebar, a contact sheet of its tabs (the spaces picker,
+Ctrl+B w, shows the same). Click a preview to switch to that tab.
+`TERMIUM_THUMBNAILS=text` shows titles and addresses instead of pictures,
+and `TERMIUM_THUMBNAILS=off` turns previews off.
+
 ### Updates
 
 ```sh
