@@ -513,6 +513,8 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       });
       // Whoever is attached by now (a takeover may have happened meanwhile).
       app.setUpdatesShown((lastHello ?? h).updateCheck === true && !!client);
+      // (Set before anything is drawn; set again once a restart snapshot, which has its own, is reopened.)
+      if ((lastHello ?? h).chromeless === true) app.chromeless = true;
       app.attach(terminalOf(lastHello ?? h));
       if (!client) app.detach();
       log(`start ${bin} dsf=${app.dsf}`);
@@ -837,8 +839,9 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
       } else {
         // Whether this terminal shows update news is settled before anything is drawn for it.
         app.setUpdatesShown(h.updateCheck === true);
-        app.attach(terminalOf(h));
+        // (Before attaching: the first thing drawn is chromeless.)
         if (h.chromeless === true && appReady) app.setChromeless(true);
+        app.attach(terminalOf(h));
         if (h.url) {
           if (appReady) app.openTab(h.url);
           else pendingUrls.push(h.url);

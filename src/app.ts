@@ -288,6 +288,7 @@ const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 const DETACHED_VIEWPORT = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false, screenWidth: 1920, screenHeight: 1080 };
 
 const SIDEBAR_W = 22;
+const CHROMELESS_HINT = "Chromeless: Ctrl+L for the address, Ctrl+B f shows the bars";
 const TOP_ROWS = 2;
 /** URL fragment that marks pages termium created; random so real URLs never match. */
 const MARKER = `#termium-${crypto.randomUUID().slice(0, 8)}-`;
@@ -374,7 +375,7 @@ export class App {
   private mode: Mode = "normal";
   private prompt: Prompt | null = null;
   private spaceCursor = 0;
-  /** `nav`: only says a page is loading or loaded (any other toast outranks it). */
+  /** `nav`: only says a page is loading or loaded, or gives a hint (any other toast outranks it). */
   private toast: { text: string; until: number; nav?: boolean } | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1628,8 +1629,9 @@ export class App {
     const next = on ?? !this.chromeless;
     if (next !== this.chromeless) {
       this.chromeless = next;
-      // (The toast first: one redraw shows it.)
-      if (next) this.showToast("Chromeless: Ctrl+L for the address, Ctrl+B f shows the bars", 2500);
+      // (The toast first: one redraw shows it. Only a hint: any other toast, or a page's loading, outranks it.)
+      if (next) this.navToast(CHROMELESS_HINT, 2500);
+      else if (this.toast?.text === CHROMELESS_HINT) this.toast = null;
       this.relayoutAndRedraw();
     }
     return this.chromeless;
@@ -3232,7 +3234,7 @@ export class App {
     return s + RESET;
   }
 
-  /** A loading / loaded toast: never in place of another toast still showing. */
+  /** A loading / loaded toast (or a hint): never in place of another toast still showing. */
   private navToast(text: string, ms: number): void {
     const t = this.toast;
     if (t && !t.nav && t.until > Date.now()) return;
