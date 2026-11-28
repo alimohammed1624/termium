@@ -52,8 +52,8 @@ export interface Page {
   docGen?: number;
   /** Element ids `termium ctl snapshot` handed out for the document of generation `gen`. */
   agentIds?: { gen: number; nodes: Set<number> };
-  /** The labels `termium ctl hints` handed out for the document of generation `gen`, and their elements. */
-  agentHints?: { gen: number; labels: Map<string, number> };
+  /** The labels `termium ctl hints` handed out for the document of generation `gen`: their elements, and where they were clicked. */
+  agentHints?: { gen: number; labels: Map<string, { node: number; x: number; y: number }> };
   /** The isolated world link hints run in (see PageHints). */
   hintWorld?: number | null;
   /** A size check waiting for the once-a-second limit (see trailingSizeCheck). */
@@ -1101,6 +1101,8 @@ export class App {
         multiple: fc.multiple,
       };
     }
+    // Link hints give way to anything that asks the person something.
+    if (this.prompt && this.hintState) this.endHints();
   }
 
   private locate(page: Page): { space: Space; tab: Tab } | null {
@@ -3038,6 +3040,8 @@ export class App {
       this.fullRedraw();
       return;
     }
+    // Something that asks the person (a page's dialog or file chooser) came up meanwhile: its keys go to it.
+    if (this.mode === "hints" && this.prompt) this.endHints();
     if (this.mode === "hints") return this.hintKey(ev, combo);
     if (this.mode === "prefix") {
       this.mode = "normal";
@@ -3254,7 +3258,7 @@ export class App {
    */
   private async startHints(): Promise<void> {
     const page = this.focused;
-    if (!page || page.dialog || !this.hintShape(page)) return;
+    if (!page || page.dialog || this.prompt || !this.hintShape(page)) return;
     const h: NonNullable<App["hintState"]> = {
       page,
       hints: new PageHints((m, p, s) => this.cdp.send(m, p, s), page),
@@ -3270,7 +3274,7 @@ export class App {
     this.mode = "hints";
     this.queueChrome();
     try {
-      const found = await h.hints.collect("person");
+      const found = await h.hints.collect();
       if (this.hintState !== h) return void h.hints.clear();
       if (!found.length) {
         this.endHints();
@@ -3352,9 +3356,13 @@ export class App {
     if (newTab) this.lastMiddlePress = Date.now();
     const send = (p: object) =>
       this.cdp.send("Input.dispatchMouseEvent", { x: t.x, y: t.y, modifiers, ...p }, page.sessionId).catch(() => {});
-    await send({ type: "mouseMoved", button: "none", buttons: 0 });
-    await send({ type: "mousePressed", button: "left", buttons: 1, clickCount: 1 });
-    await send({ type: "mouseReleased", button: "left", buttons: 0, clickCount: 1 });
+    // Not while a screenshot of the page is being taken (see captureSharp): input sent
+    // meanwhile is placed as if at a pixel ratio of 1 (at HiDPI, half way to the corner).
+    await this.serial(page, async () => {
+      await send({ type: "mouseMoved", button: "none", buttons: 0 });
+      await send({ type: "mousePressed", button: "left", buttons: 1, clickCount: 1 });
+      await send({ type: "mouseReleased", button: "left", buttons: 0, clickCount: 1 });
+    });
   }
 
   private promptKey(ev: KeyEvent): void {

@@ -79,6 +79,11 @@ person sees when they press `Ctrl+B o` on the same view, so "click SA"
 means the same to both of you. `click SA` (or the id) clicks it; labels,
 like ids, go stale when the tab loads a new document. They also change
 when the page scrolls or changes: take `hints` again before using one.
+`click LABEL` clicks where `hints` found the element on top, and exits 1
+if something else is there now. Hints cover the page, its open shadow
+roots and same-site frames; an element made clickable only by a script's
+listener (no link, button, role, tabindex or onclick) isn't listed: use
+`snapshot` or `click --xy` for it.
 
 ## The DevTools endpoint (Puppeteer, Playwright, chrome-devtools-mcp)
 

@@ -130,6 +130,8 @@ try:
           all(x in texts for x in ("shadow button", "role button", "A field")) and any(h["tag"] == "select" for h in hints), texts)
     check("a focusable span inside a link doesn't get a second label",
           sum(1 for h in hints if "nested span" in h["text"]) == 1, [h for h in hints if "nested" in h["text"]])
+    check("a button in a same-origin frame gets a label", "frame button" in texts, texts)
+    check("a button covered at its centre but not at its edge gets a label", "half covered" in texts, texts)
     check("the mode shows in the address line", "HINTS" in t.line(2), t.line(2))
 
     # Typing a label clicks its element (the label from ctl hints: the person's and the agent's agree).
@@ -140,6 +142,24 @@ try:
     clicked = t.wait_for(lambda: (page(s, "window.clicks") or [{}])[-1:] == [{"id": "b7", "ctrl": False, "meta": False, "trusted": True}], 10)
     check(f"typing {b7['label'].upper()} clicks button 7 (a trusted click)", clicked, page(s, "window.clicks"))
     check("...and the labels are gone", t.wait_for(lambda: overlay_count(s) == 0, 5) and "HINTS" not in t.line(2), t.line(2))
+
+    # Typing the label of the button in the frame clicks it (its labels line up: checked above).
+    fb = by_id(hints, "frame button")
+    t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s) == 1, 10)
+    page(s, "window.clicks = []")
+    for ch in fb["label"]:
+        t.key(ch)
+    check(f"typing {fb['label'].upper()} clicks the button in the frame",
+          t.wait_for(lambda: [c.get("id") for c in page(s, "window.clicks") or []] == ["fb"], 10), page(s, "window.clicks"))
+
+    # A dialog coming up while the labels are up takes the keys (they don't go to the labels).
+    t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s) == 1, 10)
+    page(s, "setTimeout(() => { window.answer = prompt('pr18 question', 'base'); }, 300)")
+    shown = t.wait_for(lambda: "pr18 question" in t.line(2), 10)
+    check("a prompt() opening puts the labels away", shown and "HINTS" not in t.line(2), t.line(2))
+    t.type("xy"); t.key("enter")
+    check("...and what's typed then answers it", t.wait_for(lambda: page(s, "window.answer") == "xy", 10), page(s, "window.answer"))
+    check("...with the labels gone from the page", overlay_count(s) == 0)
 
     # Narrowing: the first letter of a two-letter label leaves the labels open, Backspace takes it back, Esc ends.
     two = next(h for h in hints if len(h["label"]) == 2)
@@ -186,6 +206,17 @@ try:
           (r.returncode, r.stdout, r.stderr, page(s, "window.clicks")))
     check("ctl hints gives ids that click works with",
           ctl(s, "click", by_id(hints, "button 2")["id"]).returncode == 0 and (page(s, "window.clicks") or [{}])[-1].get("id") == "b2")
+    page(s, "window.clicks = []")
+    half = by_id(hints, "half covered")
+    r = ctl(s, "click", half["label"])
+    check("ctl click LABEL clicks where the hint was found (an element covered at its centre)",
+          r.returncode == 0 and [c.get("id") for c in page(s, "window.clicks") or []] == ["half"], (r.returncode, r.stderr, page(s, "window.clicks")))
+    # Several agents listing at once: each gets the whole, consistent list.
+    procs = [subprocess.Popen(["bun", main, "ctl", "-s", s, "hints", "--json"], cwd=ROOT, env=dict(os.environ, **ENV), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(4)]
+    outs = [json.loads(p.communicate(timeout=60)[0] or "{}").get("hints") for p in procs]
+    check("ctl hints run at once give the same list", all(o == outs[0] for o in outs) and len(outs[0] or []) > 60
+          and all(h.get("id") for h in outs[0]), [len(o or []) for o in outs])
     r = ctl(s, "click", "zzz")
     check("an unknown label is exit 1, saying where labels come from", r.returncode == 1 and "ctl hints" in r.stderr, (r.returncode, r.stderr))
     human = ctl(s, "hints").stdout
@@ -205,16 +236,18 @@ try:
     check("HiDPI: the page shows", t.wait_frames(1, 40) and t.wait_text("Hints fixture", 30))
     t.wait_idle(1, 10)
     check("HiDPI: devicePixelRatio is 2", page(s2, "devicePixelRatio") == 2, page(s2, "devicePixelRatio"))
-    # (For a few seconds after a HiDPI page is first sized, the browser puts any click,
-    # a plain mouse click too, at twice its distance from the corner: not a hints matter.)
-    time.sleep(5)
     hints = labels_line_up(t, s2, "hidpi")
-    b3 = by_id(hints, "button 3")
-    page(s2, "window.clicks = []")
-    for ch in b3["label"]:
-        t.key(ch)
-    check("HiDPI: typing a label clicks its element",
-          t.wait_for(lambda: (page(s2, "window.clicks") or [{}])[-1:][0].get("id") == "b3", 10), page(s2, "window.clicks"))
+    # Each click right after its labels go (a new frame, and a screenshot of it, under way).
+    for want in ("button 3", "link 21", "button 20"):
+        h = by_id(hints, want)
+        if want != "button 3":
+            t.key("ctrl+b"); t.key("o"); t.wait_for(lambda: overlay_count(s2) == 1, 10)
+        page(s2, "window.clicks = []")
+        for ch in h["label"]:
+            t.key(ch)
+        check(f"HiDPI: typing {h['label'].upper()} clicks {want}",
+              t.wait_for(lambda: [c.get("id") for c in page(s2, "window.clicks") or []] == [want.replace("button ", "b").replace("link ", "l")], 10),
+              page(s2, "window.clicks"))
     t.close()
 finally:
     for s in sessions:

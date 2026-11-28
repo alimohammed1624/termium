@@ -320,16 +320,18 @@ class Agent {
     this.app.showToast(`agent: ${clip(what, 70)}`, 2500);
   }
 
-  /** The element an id (or a label from `hints`, on tab `tab`) names: its page and backend node id. */
-  private element(ref: string | undefined, tab?: number): { page: Page; node: number } {
+  /**
+   * The element an id (or a label from `hints`, on tab `tab`) names: its
+   * page and backend node id (and for a label, the point it was listed at).
+   */
+  private element(ref: string | undefined, tab?: number): { page: Page; node: number; at?: { x: number; y: number } } {
     if (/^[a-z]{1,4}$/i.test(ref ?? "")) {
       const page = this.page(tab);
-      const label = ref!.toLowerCase();
       const hints = page.agentHints;
-      const node = hints?.labels.get(label);
-      if (!hints || node === undefined) throw new CtlError(`no hint "${ref}" on tab ${page.num}: labels come from \`termium ctl hints\``);
+      const hint = hints?.labels.get(ref!.toLowerCase());
+      if (!hints || !hint) throw new CtlError(`no hint "${ref}" on tab ${page.num}: labels come from \`termium ctl hints\``);
       if (hints.gen !== (page.docGen ?? 0)) throw new CtlError(`stale hint ${ref}: the page changed since those hints; take new ones`);
-      return { page, node };
+      return { page, node: hint.node, at: { x: hint.x, y: hint.y } };
     }
     const m = /^(\d+):(\d+)@(\d+)$/.exec(ref ?? "");
     if (!m) throw new CtlError(`bad element id "${ref ?? ""}": ids look like 3:142@2 (take them from \`termium ctl snapshot\`)`, EXIT.usage);
@@ -505,13 +507,18 @@ class Agent {
   private async hints(page: Page): Promise<unknown> {
     const gen = page.docGen ?? 0;
     const hints = new PageHints((m, p, s) => this.cdp.send(m, p, s), page);
-    const found = await hints.collect("agent");
-    const nodes = await hints.agentNodes();
+    let found, nodes;
+    try {
+      found = await hints.collect();
+      nodes = await hints.nodes();
+    } finally {
+      void hints.clear();
+    }
     const labels = hintLabels(found.length);
-    const byLabel = new Map<string, number>();
+    const byLabel = new Map<string, { node: number; x: number; y: number }>();
     const list = found.map((h, i) => {
       const node = nodes[i] ?? 0;
-      if (node) byLabel.set(labels[i]!, node);
+      if (node) byLabel.set(labels[i]!, { node, x: h.x, y: h.y });
       return {
         label: labels[i]!,
         ...(node ? { id: `${page.num}:${node}@${gen}` } : {}),
@@ -527,8 +534,9 @@ class Agent {
     // Unless the page moved on to another document meanwhile: then they'd name the wrong elements.
     if ((page.docGen ?? 0) === gen) {
       page.agentHints = { gen, labels: byLabel };
-      if (page.agentIds?.gen === gen) for (const n of byLabel.values()) page.agentIds.nodes.add(n);
-      else page.agentIds = { gen, nodes: new Set(byLabel.values()) };
+      const ids = [...byLabel.values()].map((h) => h.node);
+      if (page.agentIds?.gen === gen) for (const n of ids) page.agentIds.nodes.add(n);
+      else page.agentIds = { gen, nodes: new Set(ids) };
     }
     const t = this.describe(page);
     return { tab: page.num, url: t.url, title: t.title, hints: list };
@@ -678,10 +686,11 @@ class Agent {
       this.note(`clicked at ${Math.round(x)},${Math.round(y)}`);
       return { tab: page.num, x, y, ...(dialog ? { dialog } : {}) };
     }
-    const { page, node } = this.element(req.ref, req.tab);
+    const { page, node, at } = this.element(req.ref, req.tab);
     await this.personFree(page, Number(req.timeoutMs) || DEFAULT_TIMEOUT, "not clicked");
     this.step("not clicked");
-    const { x, y } = await this.centre(page, node);
+    // A label: where `hints` found the element on top (its centre may be covered); an id: its centre.
+    const { x, y } = at ?? (await this.centre(page, node));
     // Something else on top (a cookie banner, an overlay, also one over the
     // frame the element is in) would take the click: then nothing is clicked,
     // and the agent is told what covers it.
@@ -693,6 +702,7 @@ class Agent {
     ).catch(() => false);
     if (disabled) throw new CtlError(`element ${req.ref} is disabled; not clicked`);
     const cover = await this.coverAt(page, node, objectId, x, y);
+    if (cover && at) throw new CtlError(`hint ${req.ref} isn't where it was listed (${cover} is there now: the page scrolled or changed); not clicked. Take hints again`);
     if (cover) throw new CtlError(`element ${req.ref} is covered by ${cover} at its centre; not clicked (click that, or --xy)`);
     this.step("not clicked");
     const dialog = await this.untilDialog(page, this.mouseClick(page, x, y, button, count));
