@@ -85,8 +85,8 @@ def shows_page(t, rect, path):
     return all(abs(a - b) < 12 for a, b in zip(px, BG)), px
 
 def newest_placement(t):
-    with t.lock:
-        return t.placements[max(t.placements)] if t.placements else None
+    frames = t.frame_placements()
+    return frames[max(frames)] if frames else None
 
 def run_in(t, cmd):
     """Types a shell command into the focused pane."""

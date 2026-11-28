@@ -102,6 +102,9 @@ class Term:
         self.stream = pyte.ByteStream(self.screen)
         self.images: dict[int, bytes] = {}
         self.placements: dict[int, tuple[int, int, int, int]] = {}
+        # z-index of each placement: termium places a page's full frame at 0
+        # and patches (changed regions, issue #5) over it at z > 0.
+        self.zindex: dict[int, int] = {}
         # Virtual placements (U=1, shown through unicode placeholder cells): id -> (cols, rows)
         self.virtual: dict[int, tuple[int, int]] = {}
         # Graphics commands that arrived in the middle of a chunked transfer
@@ -112,6 +115,8 @@ class Term:
         # Temporary files pictures came in: (name, permission bits, symlink?)
         self.graphics_files: list[tuple[str, int, bool]] = []
         self.frames = 0
+        # Patches (z > 0) count as one frame per synchronized update, however many there are.
+        self._patch_counted = False
         self.last_output = time.time()
         self.lock = threading.Lock()
         self.raw = bytearray()
@@ -207,10 +212,15 @@ class Term:
         elif buf.endswith(b"\x1b"):
             # Could be the start of an APC split across reads.
             buf, hold = buf[:-1], b"\x1b"
+        elif m := re.search(rb"\x1b\[[?0-9;]*$", buf):
+            # A cursor move split across reads: whole, or a picture after it lands at the old cursor.
+            buf, hold = buf[:m.start()], buf[m.start():]
         self._answer_queries(buf)
         text = bytearray()
         pos = 0
         for m in APC_RE.finditer(buf):
+            if b"\x1b[?2026h" in buf[pos:m.start()]:
+                self._patch_counted = False
             text += buf[pos:m.start()]
             self._track_cursor(bytes(text))
             try:
@@ -218,6 +228,8 @@ class Term:
             except Exception:
                 pass  # an image command this driver doesn't model
             pos = m.end()
+        if b"\x1b[?2026h" in buf[pos:]:
+            self._patch_counted = False
         text += buf[pos:]
         self._track_cursor(bytes(text))
         # Sequences pyte can't parse (or chokes on, like tmux's CSI ? n) are dropped.
@@ -283,11 +295,13 @@ class Term:
                 if d in ("A", "a"):
                     self.images.clear()
                     self.placements.clear()
+                    self.zindex.clear()
                     self.virtual.clear()
                 elif d in ("I", "i"):
                     i = int(kv.get("i", "0"))
                     self.images.pop(i, None)
                     self.placements.pop(i, None)
+                    self.zindex.pop(i, None)
                     self.virtual.pop(i, None)
             return
         if self._loading and not (a is None and set(kv) <= {"m", "q"}):
@@ -318,6 +332,7 @@ class Term:
                     os.remove(path)
             self._pending_apc[key] = payload
             self._pending_meta = (int(kv["i"]), self._cursor, int(kv.get("c", "0")), int(kv.get("r", "0")))
+            self._pending_z = int(kv.get("z", "0"))
             self._pending_kind = "virtual" if kv.get("U") == "1" else "place" if a == "T" else "store"
             self._pending_format = (kv.get("f", "32"), int(kv.get("s", "0")), int(kv.get("v", "0")))
         else:
@@ -340,8 +355,11 @@ class Term:
                     self.frames += 1
                 elif self._pending_kind == "place":
                     self.placements[i] = (row, col, c, r)
+                    self.zindex[i] = self._pending_z
                     self.virtual.pop(i, None)
-                    self.frames += 1
+                    if self._pending_z == 0 or not self._patch_counted:
+                        self.frames += 1
+                    self._patch_counted = self._pending_z > 0
 
     # -- input
 
@@ -447,17 +465,33 @@ class Term:
         target = self.frames + n
         return self.wait_for(lambda: self.frames >= target, timeout)
 
-    def latest_image(self, region=None) -> Image.Image | None:
-        """Most recent placed image, optionally the one at a (row, col) cell."""
+    def frame_placements(self) -> dict[int, tuple[int, int, int, int]]:
+        """Placements of full frames (z=0), leaving out the patches over them."""
         with self.lock:
-            items = list(self.placements.items())
+            return {i: p for i, p in self.placements.items() if self.zindex.get(i, 0) == 0}
+
+    def latest_image(self, region=None) -> Image.Image | None:
+        """Most recent full frame, optionally the one at a (row, col) cell,
+        with the patches over it (changed regions) pasted in."""
+        with self.lock:
+            items = [(i, p) for i, p in self.placements.items() if self.zindex.get(i, 0) == 0]
             if region:
                 r, c = region
                 items = [(i, p) for i, p in items if p[0] <= r < p[0] + p[3] and p[1] <= c < p[1] + p[2]]
             if not items:
                 return None
-            i = max(i for i, _ in items)
-            return Image.open(io.BytesIO(self.images[i])).convert("RGB")
+            i, (row, col, cols, rows) = max(items)
+            im = Image.open(io.BytesIO(self.images[i])).convert("RGBA")
+            sx, sy = im.width / (cols * self.cell_w), im.height / (rows * self.cell_h)
+            for j in sorted(self.placements):
+                pr, pc, pcols, prows = self.placements[j]
+                if self.zindex.get(j, 0) > 0 and row <= pr and col <= pc and pr + prows <= row + rows and pc + pcols <= col + cols:
+                    patch = Image.open(io.BytesIO(self.images[j])).convert("RGBA")
+                    w, h = round(pcols * self.cell_w * sx), round(prows * self.cell_h * sy)
+                    patch = patch.resize((w, h)) if patch.size != (w, h) else patch
+                    # Over the frame as a terminal blends it: what the patch leaves transparent shows the frame.
+                    im.alpha_composite(patch, (round((pc - col) * self.cell_w * sx), round((pr - row) * self.cell_h * sy)))
+            return im.convert("RGB")
 
     def shot(self, path: str):
         """Composite text (with colors) and images into a PNG like the terminal would show."""
@@ -482,11 +516,11 @@ class Term:
                     draw.rectangle([x * cw, y * ch, (x + 1) * cw - 1, (y + 1) * ch - 1], fill=bgc)
                     if cell.data.strip():
                         draw.text((x * cw, y * ch + ch * 0.12), cell.data, font=font, fill=fgc)
-            for i in sorted(self.placements):
+            for i in sorted(self.placements, key=lambda i: (self.zindex.get(i, 0), i)):
                 row, col, c, r = self.placements[i]
-                im = Image.open(io.BytesIO(self.images[i])).convert("RGB")
+                im = Image.open(io.BytesIO(self.images[i])).convert("RGBA")
                 im = im.resize((c * cw, r * ch))
-                img.paste(im, ((col - 1) * cw, (row - 1) * ch))
+                img.paste(im, ((col - 1) * cw, (row - 1) * ch), im)  # transparent pixels show what's below
             scaled = {}
             for y, x, i, pr, pc in self._placeholder_cells():
                 if i not in scaled:
