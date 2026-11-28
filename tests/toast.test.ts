@@ -7,13 +7,13 @@ const toast = (id: number, text: string, ms = 3000, label?: string): Toast => ({
 });
 
 describe("timerBar", () => {
-  test("is always as wide as asked, shrinking in eighths", () => {
+  test("is always as wide as asked, shrinking a column at a time, gone only at 0", () => {
     for (let f = 0; f <= 1; f += 0.01) expect(width(timerBar(f, 10))).toBe(10);
-    expect(timerBar(1, 4)).toBe("████");
+    expect(timerBar(1, 4)).toBe("▂▂▂▂");
     expect(timerBar(0, 4)).toBe("    ");
-    expect(timerBar(0.5, 4)).toBe("██  ");
-    expect(timerBar(1 / 32, 4)).toBe("▏   ");
-    expect(timerBar(1.5, 2)).toBe("██");
+    expect(timerBar(0.5, 4)).toBe("▂▂  ");
+    expect(timerBar(0.01, 4)).toBe("▂   ");
+    expect(timerBar(1.5, 2)).toBe("▂▂");
     expect(timerBar(-1, 2)).toBe("  ");
   });
 });

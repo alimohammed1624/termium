@@ -51,11 +51,11 @@ try:
     rs = rows_with("Update news")
     check("toast isn't on the address line", OFF not in t.line(2) and rs and rs[0] > ROWS // 2, (t.line(2), rs))
     bar_row = rs[-1] + 1
-    while bar_row <= ROWS and "█" not in t.line(bar_row) and bar_row - rs[-1] < 4:
+    while bar_row <= ROWS and "▂" not in t.line(bar_row) and bar_row - rs[-1] < 4:
         bar_row += 1
     bar = lambda: t.line(bar_row).rstrip()
     first = bar()
-    check("timer line under it", "█" in first, first)
+    check("timer line under it", "▂" in first, first)
     time.sleep(1.2)
     check("timer line shrinks", len(bar().replace(" ", "")) < len(first.replace(" ", "")), (first, bar()))
 
@@ -83,7 +83,7 @@ try:
     t.click_cell(col + 2, row)
     check("a click dismisses it", t.wait_for(lambda: OFF not in t.text(), 2), t.text()[-400:])
     time.sleep(0.5)
-    check("the corner is clear again", not any("█" in l for l in t.screen.display[ROWS - 6:]), t.screen.display[ROWS - 6:])
+    check("the corner is clear again", not any("▂" in l for l in t.screen.display[ROWS - 6:]), t.screen.display[ROWS - 6:])
 
     # Expiry: one left alone goes by itself (the pointer off it: a toast
     # that comes up under the pointer waits too).

@@ -126,12 +126,13 @@ export function layoutToasts(toasts: Toast[], area: Rect, margin: number): Toast
   return boxes;
 }
 
-const EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
-
-/** A bar `fraction` of `cols` columns long, in eighths of a column (padded with spaces). */
+/**
+ * The timer line: a thin line `fraction` of `cols` columns long, padded
+ * with spaces. A full-height bar in eighths of a column would shrink more
+ * finely, but it's a block, not a line; a toast is at most 60 columns
+ * across, so a column at a time still goes smoothly.
+ */
 export function timerBar(fraction: number, cols: number): string {
-  const eighths = Math.round(Math.max(0, Math.min(1, fraction)) * cols * 8);
-  const full = Math.floor(eighths / 8);
-  const part = EIGHTHS[eighths % 8]!;
-  return "█".repeat(full) + part + " ".repeat(cols - full - (part ? 1 : 0));
+  const n = Math.ceil(Math.max(0, Math.min(1, fraction)) * cols);
+  return "▂".repeat(n) + " ".repeat(cols - n);
 }
