@@ -12,12 +12,16 @@ from drive import Term
 
 tmp = tempfile.mkdtemp(prefix="termium-reopen-")
 profile = os.path.join(tmp, "profile")
-# The fixtures, where an address with "slow" in it answers SLOW seconds late.
+# The fixtures, where an address with "slow" in it answers SLOW seconds late,
+# and one with "nocontent" answers 204 (No Content: the page stays) while NOCONTENT is set.
 SLOW = 0
+NOCONTENT = False
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if "slow" in self.path and SLOW:
             time.sleep(SLOW)
+        if "nocontent" in self.path and NOCONTENT:
+            self.send_response(204); self.end_headers(); return
         super().do_GET()
     def log_message(self, *a):
         pass
@@ -148,7 +152,7 @@ try:
     # 5. A history entry that doesn't answer in time: the page still ends up where it was.
     new_tab(f"{BASE}?f=1"); go(f"{BASE}?slow=1"); wait(lambda: active()[2] == "slow=1")
     go(f"{BASE}?f=cur"); wait(lambda: active()[2] == "f=cur")
-    SLOW = 30
+    SLOW = 12  # longer than a step may take, shorter than two
     t.key("ctrl+w"); wait(lambda: all(x[2] != "f=cur" for x in tabs()))
     t.key("ctrl+shift+t")
     check("a slow history entry: the page still comes back on its address", wait(lambda: active()[2] == "f=cur", 25), active())
@@ -166,6 +170,47 @@ try:
     time.sleep(8)
     check("...and stays", active()[2] == "person", active())
     SLOW = 0
+
+    # 6b. ...going back between #fragments too.
+    new_tab(f"{BASE}?fr=1"); go(f"{BASE}?fr=1#one"); time.sleep(0.5); go(f"{BASE}?slow=3"); wait(lambda: active()[2] == "slow=3")
+    go(f"{BASE}?fr=cur"); wait(lambda: active()[2] == "fr=cur")
+    SLOW = 5
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "fr=cur" for x in tabs()))
+    t.key("ctrl+shift+t")
+    wait(lambda: active()[2] == "slow=3", 10); time.sleep(1)
+    t.key("alt+left")
+    time.sleep(10)
+    # (The browser may still finish loading the step under way; the rebuild goes no further.)
+    check("Alt+Left during the rebuild (to another #fragment) stops it", active()[2] in ("fr=1", "slow=3"), active())
+    SLOW = 0
+
+    # 6c. An entry that doesn't load (204 No Content) isn't there: the page still ends up where it was.
+    new_tab(f"{BASE}?n=1"); go(f"{BASE}?n=cur"); wait(lambda: active()[2] == "n=cur")
+    go(f"{BASE}?nocontent=1"); wait(lambda: active()[2] == "nocontent=1")
+    t.key("alt+left"); wait(lambda: active()[2] == "n=cur")
+    NOCONTENT = True
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "n=cur" for x in tabs()))
+    t.key("ctrl+shift+t")
+    time.sleep(6)
+    check("a forward entry that doesn't load: the page is on its address", wait(lambda: active()[2] == "n=cur", 15), active())
+    NOCONTENT = False
+
+    # 6d. Undo on an older toast, then the newer: both back in their order.
+    for r in ("o=a", "o=b", "o=c"):
+        new_tab(f"{BASE}?{r}")
+    order = tabs()
+    num = {x[2]: x[1] for x in order}
+    t.key("ctrl+b"); t.key(str(num["o=a"])); wait(lambda: active()[2] == "o=a")
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "o=a" for x in tabs()))
+    t.key("ctrl+b"); t.key(str(num["o=b"] - 1)); wait(lambda: active()[2] == "o=b")
+    t.mouse(5, 5, action="move")
+    t.key("ctrl+w"); wait(lambda: all(x[2] != "o=b" for x in tabs()))
+    t.wait_for(lambda: t.text().count("Undo") == 2, 3)
+    col, row = toast_cell("Undo")  # the older toast is the upper one
+    t.click(col * t.cell_w + 3, (row - 1) * t.cell_h + 8)
+    wait(lambda: any(x[2] == "o=a" for x in tabs()))
+    t.key("ctrl+shift+t")
+    check("older Undo, then the newer: both back in their order", wait(lambda: tabs() == order, 20), (tabs(), order))
 
     # 7. A tab closed from a space that was then closed and reopened goes back into that space.
     t.key("ctrl+b"); t.key("shift+n"); time.sleep(0.6); t.type(f"{BASE}?y=1"); t.key("enter")

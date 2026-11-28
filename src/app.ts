@@ -1392,6 +1392,11 @@ export class App {
     if (!c) return Promise.resolve(void this.showToast("Nothing closed to reopen"));
     const i = this.closed.indexOf(c);
     if (i < 0) return Promise.resolve(); // reopened already
+    // Those closed after it were closed without it there: once it's back, their places are one further on.
+    for (const o of this.closed.slice(i + 1)) {
+      if (c.kind === "tab" && o.kind === "tab" && o.space === c.space && o.tab.index >= c.tab.index) o.tab.index++;
+      if (c.kind === "space" && o.kind === "space" && o.index >= c.index) o.index++;
+    }
     this.closed.splice(i, 1);
     if (c.toast !== undefined) this.dismissToast(c.toast);
     // One at a time: each goes back to its place among those reopened before it.
@@ -1449,50 +1454,77 @@ export class App {
    * Loads the rest of a reopened page's history into it, one address after
    * another, then goes back to the entry it was on. It stops if the page
    * goes, or anything else navigates it meanwhile (the person, the page, an
-   * agent); if a step fails or takes too long, it goes straight to the entry
-   * it was on, losing the rest of its history but never its address.
+   * agent); otherwise, if it doesn't end up on the address it was closed on
+   * (a step failed or took too long, an entry didn't load), it goes straight
+   * there, losing the rest of its history but never its address.
    */
   private async replayHistory(page: Page, plan: ReturnType<typeof replayPlan>): Promise<void> {
     if (!plan || (plan.urls.length < 2 && plan.forward === 0)) return;
     const current = plan.urls[plan.urls.length - 1 - plan.forward]!;
-    const norm = (u: string) => URL.canParse(u) ? new URL(u).href : u;
-    let expected = norm(plan.urls[0]!);
+    const norm = (u: string) => (URL.canParse(u) ? new URL(u).href : u);
+    const same = (a: string | undefined, b: string) => a !== undefined && norm(a) === norm(b);
+    // Our own navigations only: to the step's address, or (once) the step back to its entry.
+    let expected = plan.urls[0]!;
+    let ownTraversal = 0;
     let foreign = false;
-    // Only our own navigations, to the address of the step, are expected.
     const watch = (p: any, sid?: string) => {
-      if (sid !== page.sessionId || p.frameId !== page.targetId || /sameDocument/i.test(p.navigationType ?? "")) return;
-      if (p.navigationType !== "differentDocument" || norm(String(p.url)) !== expected) foreign = true;
+      if (sid !== page.sessionId || p.frameId !== page.targetId) return;
+      const type = String(p.navigationType ?? "");
+      if (type === "sameDocument") return; // the page's own pushState() or #fragment
+      if (type.startsWith("history") && ownTraversal > 0) ownTraversal--;
+      else if (type !== "differentDocument" || !same(String(p.url), expected)) foreign = true;
     };
-    this.cdp.on("Page.frameStartedNavigating", watch);
+    const alive = () => !foreign && this.pages.has(page.sessionId);
     // Each navigation (the first is the placement's) must answer before the next starts.
     const answered = async (seq: number) => {
       for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(50)) {
-        if (foreign || !this.pages.has(page.sessionId) || page.navSeq !== seq) return false;
+        if (!alive() || page.navSeq !== seq) return false;
         if (page.navStarted === 0) return true;
       }
       return false;
     };
+    const history = (): Promise<{ currentIndex: number; entries: { id: number; url: string }[] } | null> =>
+      this.cdp.send("Page.getNavigationHistory", {}, page.sessionId).catch(() => null);
+    this.cdp.on("Page.frameStartedNavigating", watch);
     let seq = 0;
+    let ok = false;
     try {
       for (const end = Date.now() + 15_000; page.navSeq === 0; await Bun.sleep(50)) {
         if (Date.now() > end || !this.pages.has(page.sessionId)) return;
       }
       seq = page.navSeq;
+      ok = await answered(seq);
       for (const url of plan.urls.slice(1)) {
-        if (!(await answered(seq))) break;
-        expected = norm(url);
-        this.navigate(page, url);
+        if (!ok) break;
+        expected = url;
+        // (No retry at startup, as other navigations get: something else navigating the page wins.)
+        this.navigate(page, url, 2);
         seq = page.navSeq;
+        ok = await answered(seq);
       }
-      if (await answered(seq)) {
-        if (plan.forward > 0) await this.history(page, -plan.forward);
-        return;
+      // Back to its entry: the last one with its address (an entry that didn't load isn't there).
+      const h = ok && plan.forward > 0 ? await history() : null;
+      if (h && alive() && page.navSeq === seq && !same(h.entries[h.currentIndex]?.url, current)) {
+        const target = h.entries.slice(0, h.currentIndex).reverse().find((e) => same(e.url, current));
+        if (target) {
+          ownTraversal = 1;
+          await this.cdp.send("Page.navigateToHistoryEntry", { entryId: target.id }, page.sessionId).catch(() => {});
+        }
+      }
+      // It's done once the page is on that address.
+      const replayed = ok;
+      ok = false;
+      for (const end = Date.now() + 8000; replayed && alive() && page.navSeq === seq && Date.now() < end; await Bun.sleep(100)) {
+        const now = await history();
+        if (now && same(now.entries[now.currentIndex]?.url, current)) {
+          ok = true;
+          break;
+        }
       }
     } finally {
       this.cdp.off("Page.frameStartedNavigating", watch);
     }
-    // Stopped: unless something else took the page elsewhere, it goes to where it was.
-    if (!foreign && this.pages.has(page.sessionId) && page.navSeq === seq) this.navigate(page, current);
+    if (!ok && alive() && page.navSeq === seq) this.navigate(page, current);
   }
 
   /**
