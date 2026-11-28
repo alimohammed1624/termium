@@ -389,6 +389,8 @@ export class App {
   private mouseButtons = 0;
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
   private drag: { sep: SepGeom<Page>; moved: boolean } | null = null;
+  /** A mouse button went down on termium's bars and hasn't come up yet. */
+  private chromeHeld = false;
   private hoverPage: Page | null = null;
   private chromeQueued = false;
   private started = false;
@@ -1593,14 +1595,19 @@ export class App {
     return (this.sidebar || this.mode === "spaces") && this.cols >= SIDEBAR_W + 30 ? SIDEBAR_W + 1 : 1;
   }
 
-  private paneArea(): Rect {
+  private paneArea(footer = this.footerRows()): Rect {
     const col = this.mainCol();
-    return { col, row: TOP_ROWS + 1, cols: Math.max(1, this.cols - col + 1), rows: Math.max(1, this.rows - TOP_ROWS - this.footerRows()) };
+    return { col, row: TOP_ROWS + 1, cols: Math.max(1, this.cols - col + 1), rows: Math.max(1, this.rows - TOP_ROWS - footer) };
   }
 
-  /** The hint footer's own row under the panes (with the footer on and room for it). */
+  /** The hint footer's own row under the panes (with the footer on, and never at the cost of a pane). */
   private footerRows(): number {
-    return this.footerMode === "on" && this.rows >= TOP_ROWS + 4 ? 1 : 0;
+    if (this.footerMode !== "on" || this.rows < TOP_ROWS + 4) return 0;
+    const tab = this.tab;
+    if (!tab || tab.zoomed || leaves(tab.root).length < 2) return 1;
+    const shown = (footer: number) =>
+      computeLayout(tab.root, this.paneArea(footer), true).panes.filter((p) => p.content.cols > 0 && p.content.rows > 0).length;
+    return shown(1) < shown(0) ? 0 : 1;
   }
 
   /** What the person is doing, for the hint footer (null: no hints, as in the update box). */
@@ -1621,7 +1628,8 @@ export class App {
     let s = at(row, col) + rowBg + " ".repeat(Math.max(0, w)) + at(row, col);
     if (!ctx) return s + RESET;
     let used = 0;
-    for (const { action, start, end } of layoutFooter(FOOTER_ACTIONS[ctx], w)) {
+    const state = { panes: this.tab ? leaves(this.tab.root).length : 0, tabs: this.space?.tabs.length ?? 0 };
+    for (const { action, start, end } of layoutFooter(FOOTER_ACTIONS[ctx], w, state)) {
       if (start > used) s += rowBg + fg(C.surface1) + SEPARATOR;
       const label = chipText(action).slice(0, -(action.key.length + 1));
       s += rowBg + fg(C.subtext) + label + fg(C.mauve) + BOLD + action.key + "\x1b[22m ";
@@ -2367,7 +2375,7 @@ export class App {
       this.navHits = null;
       this.noticeHit = null;
       const hintW = Math.max(0, w - modeW);
-      return this.drawFooter(2, col, hintW, barBg) + bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
+      return this.drawFooter(2, col, hintW, barBg) + at(2, col + hintW) + bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
     }
     const prompt = this.prompt;
     if (prompt && prompt.kind === "confirm") {
@@ -3716,7 +3724,17 @@ export class App {
       return;
     }
 
-    if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
+    // A press termium's own bars took: its moves and release are theirs too
+    // (even if the click moved a page under the pointer, as hiding the footer does).
+    if (this.chromeHeld && (ev.action === "release" || (ev.action === "move" && ev.button !== 3))) {
+      if (ev.action === "release") this.chromeHeld = false;
+      return;
+    }
+    this.chromeHeld = false;
+    if (ev.action === "press" && this.chromeClick(ev, col, row)) {
+      this.chromeHeld = !this.drag;
+      return;
+    }
 
     const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
     if (!g) return;
@@ -3734,7 +3752,8 @@ export class App {
   /** Handles clicks on the sidebar, tab bar, URL bar, pane headers and separators. */
   private chromeClick(ev: MouseEvent, col: number, row: number): boolean {
     const mainCol = this.mainCol();
-    if (col >= mainCol && (row === this.rows && this.footerRows() || row === 2 && this.hintsInUrlBar())) {
+    // (Mouse back/forward buttons still navigate from there.)
+    if (col >= mainCol && ev.button < 7 && (row === this.rows && this.footerRows() || row === 2 && this.hintsInUrlBar())) {
       if (ev.button === 0) this.footerClick(col, row);
       return true;
     }

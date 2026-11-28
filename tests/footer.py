@@ -150,8 +150,10 @@ try:
 
     # ---- ^B prefix
     t.key("ctrl+b")
-    want = ("Split→ v", "Split↓ -", "New tab c", "Close x", "Zoom z", "Resize r", "Spaces w", "Footer f", "Keys ?", "Cancel Esc", "Next n", "Prev p", "Sidebar b")
+    want = ("Split→ v", "Split↓ -", "New tab c", "Close x", "Spaces w", "Footer f", "Keys ?", "Cancel Esc", "Sidebar b")
     check("prefix: footer lists the prefix keys", wait(lambda: all(s in foot() for s in want)), foot())
+    check("...but not Zoom, Resize, Next or Prev with one pane and one tab",
+          not any(s in foot() for s in ("Zoom z", "Resize r", "Next n", "Prev p")), foot())
     click_hint("Cancel Esc")
     check("Cancel ends the prefix", wait(lambda: "Address ^L" in foot()), foot())
     t.key("ctrl+b"); time.sleep(0.3); click_hint("Split→ v")
@@ -160,7 +162,9 @@ try:
     t.key("ctrl+b"); time.sleep(0.3); click_hint("Split↓ -")
     check("prefix Split down stacks panes", wait(lambda: header_row() > 4), [t.line(r) for r in range(3, ROWS)])
     t.key("escape"); time.sleep(0.4)
-    t.key("ctrl+b"); time.sleep(0.3); click_hint("Zoom z")
+    t.key("ctrl+b")
+    check("with panes, ^B offers Zoom and Resize", wait(lambda: "Zoom z" in foot() and "Resize r" in foot()), foot())
+    click_hint("Zoom z")
     check("prefix Zoom shows the focused pane alone", wait(lambda: sep_col() < 0 and header_row() < 0))
     t.key("ctrl+b"); time.sleep(0.3); click_hint("Zoom z")
     check("...and back", wait(lambda: sep_col() > 0))
@@ -238,15 +242,24 @@ try:
     wait(lambda: "OK Enter" in foot()); click_hint("OK Enter")
     check("prompt: OK answers with the text", wait(lambda: value("window.r") == "anon"), value("window.r"))
 
+    # ---- mouse back button on the footer row still goes back
+    ctl("eval", "history.pushState({}, '', '?pushed'); 1")
+    i = foot().find("Address"); t.click_cell(i + 2, ROWS, button=128)
+    check("mouse Back over the footer goes back", wait(lambda: value("location.search") == ""), value("location.search"))
+
     # ---- ^B f: the row goes back to the page
+    ctl("eval", "window.ups = []; addEventListener('mouseup', (e) => ups.push(e.clientY)); addEventListener('mousedown', (e) => ups.push('down')); 1")
     click_hint("Hide ^Bf")
     check("Hide takes the footer away", wait(lambda: "Address ^L" not in foot()), foot())
     check("...and the page grows by one row", wait(lambda: value("innerHeight") == h_on + 20), (h_on, value("innerHeight")))
     check("...and says how to get it back", "^B f" in url_line(), url_line())
+    time.sleep(0.5)
+    check("...and the click's release doesn't reach the page now under it", value("window.ups") == [], value("window.ups"))
     # Only with ^B: the hints take the address line while a key is awaited; the page keeps its size.
     t.key("ctrl+b")
     check("with ^B the hints show in the address line", wait(lambda: "Split→ v" in url_line() and " ^B " in url_line()), url_line())
     check("...the page keeps the bottom row", value("innerHeight") == h_on + 20 and "Split" not in foot())
+    check("...with the ^B badge at the right edge (nothing of the toast left after it)", url_line().rstrip().endswith("^B"), url_line())
     click_hint("Split→ v", row=2)
     check("...and clicking one does it", wait(lambda: sep_col() > 0), t.line(4))
     t.key("escape"); time.sleep(0.4)
@@ -273,10 +286,27 @@ try:
     t.key("ctrl+b")
     check("140 columns: ^B still shows Footer, Keys and Cancel", wait(lambda: all(s in foot() for s in ("Footer f", "Keys ?", "Cancel Esc"))), foot())
     t.key("escape"); time.sleep(0.4)
-    # ---- narrow: what doesn't fit is left off the end, never cut mid-action
+    # ---- 80 columns, one pane: the prefix keeps its way out and to everything; no-op actions aren't offered
+    t.key("ctrl+t"); time.sleep(0.8); t.key("escape"); time.sleep(0.5)
+    t.resize(80, ROWS); time.sleep(1.5)
+    t.key("ctrl+b")
+    check("80 columns: ^B shows Footer, Keys and Cancel, not Zoom or Resize",
+          wait(lambda: all(s in foot() for s in ("Footer f", "Keys ?", "Cancel Esc"))) and "Zoom" not in foot() and "Resize" not in foot(), foot())
+    t.key("escape"); time.sleep(0.4)
+    check("80 columns: the normal footer keeps Keys and Hide", "Keys ^B?" in foot() and "Hide ^Bf" in foot(), foot())
+    # ---- narrow: what doesn't fit is left out, never cut mid-action
     t.resize(60, ROWS); time.sleep(1.5)
     f = foot()
-    check("narrow: whole actions only", "Address ^L" in f and "Hide ^Bf" not in f and f.rstrip().endswith(("^L", "^T", "^Bv", "^W")), f)
+    check("narrow: whole actions only, Keys and Hide kept", "Address ^L" in f and "New tab" not in f and f.rstrip().endswith("Keys ^B? · Hide ^Bf"), f)
+    t.resize(COLS, ROWS); time.sleep(1)
+    # ---- a short terminal: the footer never hides a pane
+    for _ in range(2):
+        t.key("ctrl+b"); time.sleep(0.2); t.key("minus"); time.sleep(0.8); t.key("escape"); time.sleep(0.5)
+    # 3 stacked panes (the last two sharing the lower half) need 4 rows: 6 rows leave just 4 under the bars.
+    t.resize(COLS, 6); time.sleep(1.5)
+    check("6 rows, 3 stacked panes: the footer gives its row up rather than hide a pane", "Address" not in t.line(6), t.line(6))
+    t.resize(COLS, 8); time.sleep(1.5)
+    check("8 rows: room for both, the footer is back", "Address ^L" in t.line(8), t.line(8))
     t.resize(COLS, ROWS); time.sleep(1)
 finally:
     if t:

@@ -27,9 +27,26 @@ describe("hint footer", () => {
     const all = layoutFooter(actions, 1000);
     expect(all.length).toBe(actions.length);
     for (let i = 1; i < all.length; i++) expect(all[i]!.start).toBe(all[i - 1]!.end + width(SEPARATOR));
-    const first = width(chipText(actions[0]!));
-    expect(layoutFooter(actions, first).length).toBe(1);
-    expect(layoutFooter(actions, first - 1).length).toBe(0);
+    const plain = actions.filter((a) => !a.pin);
+    const first = width(chipText(plain[0]!));
+    expect(layoutFooter(plain, first).length).toBe(1);
+    expect(layoutFooter(plain, first - 1).length).toBe(0);
+  });
+
+  test("short of room, pinned actions stay and unpinned ones go from the end", () => {
+    const prefix = FOOTER_ACTIONS.prefix;
+    const pinned = prefix.filter((a) => a.pin);
+    const w = pinned.reduce((n, a) => n + width(chipText(a)) + width(SEPARATOR), 0) - width(SEPARATOR);
+    expect(layoutFooter(prefix, w).map((l) => l.action)).toEqual(pinned);
+    expect(layoutFooter(prefix, w + 50).map((l) => l.action.label)).toContain("Keys");
+  });
+
+  test("actions that need panes or tabs only show with more than one", () => {
+    const labels = (panes: number, tabs: number) => layoutFooter(FOOTER_ACTIONS.prefix, 1000, { panes, tabs }).map((l) => l.action.label);
+    expect(labels(1, 1)).not.toContain("Zoom");
+    expect(labels(1, 1)).not.toContain("Next");
+    expect(labels(2, 1)).toContain("Resize");
+    expect(labels(1, 2)).toContain("Prev");
   });
 
   test("on for someone who never chose; the choice is kept; the environment wins", () => {

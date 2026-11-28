@@ -28,18 +28,30 @@ export interface FooterAction {
   key: string;
   /** The keys a click presses, space-separated combos as comboOf names them ("ctrl+b v"). */
   combo: string;
+  /** Kept when space runs out (the way to everything else, or out of the mode). */
+  pin?: boolean;
+  /** Only offered where it does something: with more than one pane, or tab. */
+  needs?: "panes" | "tabs";
+}
+
+/** What decides which actions do something right now. */
+export interface FooterState {
+  panes: number;
+  tabs: number;
 }
 
 /** The layout key prefix. */
 export const PREFIX = { combo: "ctrl+b", label: "^B" };
 
 const act = (label: string, key: string, combo: string): FooterAction => ({ label, key, combo });
+const pin = (a: FooterAction): FooterAction => ({ ...a, pin: true });
+const needs = (n: FooterAction["needs"], a: FooterAction): FooterAction => ({ ...a, needs: n });
 /** An action behind the prefix (as typed from normal mode). */
 const pre = (label: string, k: string, combo = k): FooterAction => act(label, PREFIX.label + k, `${PREFIX.combo} ${combo}`);
 /** A key once the prefix (or another mode) is waiting for one. */
 const key = (label: string, k: string, combo = k.toLowerCase()): FooterAction => act(label, k, combo);
 
-/** What each context offers, most useful first (what doesn't fit is left off the end). */
+/** What each context offers, most useful first (what doesn't fit is left off the end, pinned ones last). */
 export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
   normal: [
     act("Address", "^L", "ctrl+l"),
@@ -49,22 +61,22 @@ export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
     act("Back", "Alt←", "alt+arrowleft"),
     act("Reload", "^R", "ctrl+r"),
     pre("Spaces", "w"),
-    pre("Keys", "?"),
-    pre("Hide", "f"),
+    pin(pre("Keys", "?")),
+    pin(pre("Hide", "f")),
   ],
   prefix: [
     key("Split→", "v"),
     key("Split↓", "-"),
     key("New tab", "c"),
     key("Close", "x"),
-    key("Zoom", "z"),
-    key("Resize", "r"),
+    needs("panes", key("Zoom", "z")),
+    needs("panes", key("Resize", "r")),
     key("Spaces", "w"),
-    key("Footer", "f"),
-    key("Keys", "?"),
-    key("Cancel", "Esc", "escape"),
-    key("Next", "n"),
-    key("Prev", "p"),
+    pin(key("Footer", "f")),
+    pin(key("Keys", "?")),
+    pin(key("Cancel", "Esc", "escape")),
+    needs("tabs", key("Next", "n")),
+    needs("tabs", key("Prev", "p")),
     key("Sidebar", "b"),
   ],
   resize: [
@@ -72,14 +84,14 @@ export const FOOTER_ACTIONS: Record<FooterContext, FooterAction[]> = {
     key("Down", "j"),
     key("Up", "k"),
     key("Right", "l"),
-    key("Done", "Esc", "escape"),
+    pin(key("Done", "Esc", "escape")),
   ],
   spaces: [
     key("Down", "j"),
     key("Up", "k"),
     key("Open", "Enter"),
     key("New", "N", "shift+n"),
-    key("Cancel", "Esc", "escape"),
+    pin(key("Cancel", "Esc", "escape")),
   ],
   help: [key("Close", "Esc", "escape")],
   url: [key("Go", "Enter"), key("Cancel", "Esc", "escape")],
@@ -106,13 +118,24 @@ export function chipText(a: FooterAction): string {
 }
 
 /**
- * The actions that fit in `w` columns, in order, each with its offset from
- * the row's start (chips are separated by SEPARATOR).
+ * The actions that do something in `state` and fit in `w` columns, in
+ * order, each with its offset from the row's start (chips are separated by
+ * SEPARATOR). Short of room, unpinned actions go first, from the end.
  */
-export function layoutFooter(actions: FooterAction[], w: number): { action: FooterAction; start: number; end: number }[] {
+export function layoutFooter(
+  actions: FooterAction[],
+  w: number,
+  state: FooterState = { panes: 2, tabs: 2 },
+): { action: FooterAction; start: number; end: number }[] {
+  const shown = actions.filter((a) => !a.needs || state[a.needs] > 1);
+  const total = (list: FooterAction[]) => list.reduce((n, a, i) => n + width(chipText(a)) + (i ? width(SEPARATOR) : 0), 0);
+  while (total(shown) > w) {
+    const drop = shown.findLastIndex((a) => !a.pin);
+    shown.splice(drop >= 0 ? drop : shown.length - 1, 1);
+  }
   const out: { action: FooterAction; start: number; end: number }[] = [];
   let used = 0;
-  for (const action of actions) {
+  for (const action of shown) {
     const start = used + (out.length ? width(SEPARATOR) : 0);
     const end = start + width(chipText(action));
     if (end > w) break;
