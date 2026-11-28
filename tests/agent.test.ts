@@ -43,4 +43,10 @@ describe("parseCtl", () => {
     expect(parseCtl(["type", "1:2@1", "--", "-5"]).req).toMatchObject({ text: "-5" });
     expect(parseCtl(["shot", "-o", "a.png", "--full"])).toMatchObject({ out: "a.png", req: { full: true } });
   });
+
+  test("mute and unmute take an optional tab", () => {
+    expect(parseCtl(["mute", "3"]).req).toMatchObject({ cmd: "mute", tab: 3 });
+    expect(parseCtl(["unmute", "--tab", "2"]).req).toMatchObject({ cmd: "unmute", tab: 2 });
+    expect(parseCtl(["mute"]).req).toMatchObject({ cmd: "mute", tab: undefined });
+  });
 });

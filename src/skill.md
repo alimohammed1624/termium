@@ -54,6 +54,7 @@ it) loads a new document they're stale (exit 1): take a new snapshot.
 | `tabs [--json]` | list tabs: id, title, url, space, tab, pane; `*` = focused |
 | `open URL [--new-tab] [--background] [--no-wait]` | navigate the focused tab (or `--tab N`), or open a new tab; waits for the load |
 | `select TAB` / `close [TAB] [--force]` | show and focus a tab / close it |
+| `mute [TAB]` / `unmute [TAB]` | mute a tab's sound / unmute it (`tabs` shows `playing sound` or `muted`) |
 | `snapshot [TAB]` | accessibility tree as text, with element ids |
 | `text [TAB]` | the page's readable text |
 | `click ID` / `click --xy X,Y` | click an element (or a point in CSS pixels); `--double`, `--right` |

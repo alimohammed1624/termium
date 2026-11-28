@@ -493,6 +493,7 @@ export async function runServer(name: string, args: LaunchOptions, version: stri
         search: args.search,
         downloadDir: downloadDir(),
         downloadStaging: join(profile, "termium-downloads"),
+        audioExtension: join(profile, "termium-audio"),
         quit: () => void shutdown(0),
         detach: () => detachClient("detached"),
         log,

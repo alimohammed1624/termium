@@ -12,6 +12,7 @@
 import type { AgentTab, App, Page } from "./app";
 import type { DevToolsEndpoint } from "./browser";
 import type { CDP } from "./cdp";
+import { TimeoutError } from "./audio";
 import { decodePng, encodeRegion, type Raster } from "./png";
 
 /** A failure to report to the agent as is; `code` becomes the exit status. */
@@ -235,6 +236,19 @@ class Agent {
       }
       case "close":
         return this.close(req);
+      case "mute":
+      case "unmute": {
+        // Not the person's view or keys: no waiting for them.
+        const page = this.page(req.tab, true);
+        try {
+          await this.app.setMuted(page, req.cmd === "mute", () => Date.now() < this.deadline);
+        } catch (e) {
+          if (e instanceof TimeoutError) throw new CtlError(`timed out; tab not ${req.cmd}d`, EXIT.timeout);
+          throw new CtlError(e instanceof Error ? e.message : String(e));
+        }
+        this.note(`${req.cmd}d tab ${page.num}`);
+        return this.describe(page);
+      }
       case "snapshot":
         return this.snapshot(this.page(req.tab));
       case "text":
