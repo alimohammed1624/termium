@@ -3965,10 +3965,14 @@ export class App {
     return s;
   }
 
-  private openMenu(entries: MenuEntry[], point: { col: number; row: number }, opts: { title?: string; align?: "left" | "right" } = {}): void {
+  private openMenu(
+    entries: MenuEntry[],
+    point: { col: number; row: number },
+    opts: { title?: string; align?: "left" | "right"; bounds?: Rect } = {},
+  ): void {
     if (!this.attached || this.covered()) return;
     if (this.mode !== "normal") this.setMode("normal");
-    this.menu = new Menu(entries, point, { col: 1, row: 1, cols: this.cols, rows: this.rows }, opts);
+    this.menu = new Menu(entries, point, opts.bounds ?? { col: 1, row: 1, cols: this.cols, rows: this.rows }, opts);
     this.menuTab = this.tab;
     // Pages under it are drawn around it from now on.
     this.fullRedraw();
@@ -4209,17 +4213,26 @@ export class App {
       return this.opts.log(`history: ${e}`);
     }
     if (seq !== this.menuSeq || !t.valid() || this.menu || this.focused !== page || !this.pages.has(page.sessionId)) return;
-    const go = (entryId: number) => () => {
+    // The history may have changed since it was read (a pushState drops the forward entries): looked up again.
+    const go = (entryId: number) => async () => {
       if (!this.pages.has(page.sessionId)) return;
-      this.cdp.send("Page.navigateToHistoryEntry", { entryId }, page.sessionId).catch((e) => this.opts.log(`history: ${e}`));
+      try {
+        const now = await this.cdp.send("Page.getNavigationHistory", {}, page.sessionId);
+        const i = now.entries.findIndex((e: HistoryEntry) => e.id === entryId);
+        if (i < 0) return this.showToast("That page is no longer in this tab's history");
+        if (i !== now.currentIndex) await this.cdp.send("Page.navigateToHistoryEntry", { entryId }, page.sessionId);
+      } catch (e) {
+        this.opts.log(`history: ${e}`);
+      }
     };
     const rows = historyRows(h.entries, h.currentIndex, dir);
     this.openMenu(
       rows.length
         ? rows.map((r): MenuEntry => ({ label: truncate(r.title, 40), key: r.host ? truncate(r.host, 30) : undefined, run: go(r.id) }))
         : [{ label: dir < 0 ? "No earlier pages" : "No later pages", disabled: true, run: () => {} }],
-      { col, row: 3 },
-      { title: dir < 0 ? "Back" : "Forward" },
+      { col, row: TOP_ROWS + 1 },
+      // Under the address bar: a long history scrolls rather than covering the bars (and their buttons).
+      { title: dir < 0 ? "Back" : "Forward", bounds: { col: 1, row: TOP_ROWS + 1, cols: this.cols, rows: Math.max(3, this.rows - TOP_ROWS) } },
     );
   }
 

@@ -30,10 +30,13 @@ def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{detail}]" if detail and not cond else ""))
     if not cond: failures.append(name)
 
-def location():
-    r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), profile, "location.href"],
+def js(expr):
+    r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), profile, expr],
                        capture_output=True, text=True, timeout=20)
-    pages = [p["value"] for p in json.loads(r.stdout or "[]") if f":{PORT}/" in (p["value"] or "")]
+    return [p["value"] for p in json.loads(r.stdout or "[]") if f":{PORT}/" in p["url"]]
+
+def location():
+    pages = [v for v in js("location.href") if f":{PORT}/" in (v or "")]
     return pages[0] if len(pages) == 1 else pages
 
 def find(text, rows=None):
@@ -124,6 +127,28 @@ try:
     # A plain left-click still steps one entry.
     t.click_cell(find("→", [2])[0], 2)
     check("left-click → still goes forward one", landed(1), f"{location()} | {t.line(2)}")
+
+    # The history changes while the menu is open (pushState drops the forward entries): the row is stale.
+    right_click("→")
+    check("Forward from Hist 1 lists Hist 2..5", menu_titles() == ["Hist 2", "Hist 3", "Hist 4", "Hist 5"], str(menu_titles()))
+    js("history.pushState(null, '', 'pushed.html'), 1")
+    t.wait_for(lambda: location() == f"{BASE}/pushed.html", 5)
+    pick("Hist 4"); time.sleep(1)
+    check("a row dropped from the history meanwhile doesn't navigate", location() == f"{BASE}/pushed.html", str(location()))
+    check("it says so", t.wait_text("no longer in this tab's history", 5))
+
+    # A history taller than the terminal: the menu stays under the address bar and scrolls.
+    js("for (let i = 0; i < 15; i++) history.pushState(null, '', 'p' + i + '.html'); 1")
+    t.wait_for(lambda: location() == f"{BASE}/p14.html", 5)
+    t.resize(160, 12); time.sleep(1.5)
+    right_click("←")
+    check("a tall Back menu doesn't cover the tab or address bar",
+          "Hist" in t.line(1) and "←" in t.line(2) and "Back" not in t.line(1) + t.line(2) and find("Back", [3]) is not None,
+          f"{t.line(1)!r} {t.line(2)!r} {t.line(3)!r}")
+    check("it shows it scrolls", "▼" in t.text())
+    t.shot(f"{OUT}/tall-menu.png")
+    t.click_cell(find("←", [2])[0], 2, 2); time.sleep(1)
+    check("right-clicking ← again (the menu open) doesn't pick a row", location() == f"{BASE}/p14.html", str(location()))
 finally:
     t.close()
     srv.terminate()
