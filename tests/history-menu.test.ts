@@ -12,9 +12,9 @@ const entries = [
 describe("history menu rows", () => {
   test("back: earlier entries, nearest first, with title and host", () => {
     expect(historyRows(entries, 3, -1)).toEqual([
-      { id: 3, title: "example.com/b", host: "example.com" },
-      { id: 2, title: "Page A", host: "127.0.0.1:8000" },
-      { id: 1, title: "New Tab", host: "" },
+      { id: 3, url: "https://example.com/b", title: "example.com/b", host: "example.com" },
+      { id: 2, url: "http://127.0.0.1:8000/a.html", title: "Page A", host: "127.0.0.1:8000" },
+      { id: 1, url: "about:blank", title: "New Tab", host: "" },
     ]);
   });
 

@@ -149,6 +149,24 @@ try:
     t.shot(f"{OUT}/tall-menu.png")
     t.click_cell(find("←", [2])[0], 2, 2); time.sleep(1)
     check("right-clicking ← again (the menu open) doesn't pick a row", location() == f"{BASE}/p14.html", str(location()))
+
+    # An entry replaced while the menu is open keeps its id (replaceState): its row is stale too.
+    right_click("←")
+    js("history.back(), 1"); t.wait_for(lambda: location() == f"{BASE}/p13.html", 5)
+    js("history.replaceState(null, '', 'different.html'), 1")
+    js("history.forward(), 1"); t.wait_for(lambda: location() == f"{BASE}/p14.html", 5)
+    t.click_cell(find("Hist", [4])[0], 4); time.sleep(1)
+    check("a row whose entry was replaced doesn't go to the replacement", location() == f"{BASE}/p14.html", str(location()))
+    check("it says so (replaced)", t.wait_text("no longer in this tab's history", 5))
+
+    # Too short for a menu under the bars: it still shows a readable row, and clicking it goes there.
+    t.key("escape"); t.resize(160, 4); time.sleep(1.5)
+    right_click("←")
+    rows = [r for r in range(1, 5) if "Hist" in t.line(r) and "127.0.0.1" in t.line(r)]
+    check("a 4-row terminal shows whole rows", len(rows) >= 1, repr([t.line(r) for r in range(1, 5)]))
+    if rows:
+        t.click_cell(find("Hist", [rows[0]])[0], rows[0])
+        check("and clicking it goes there", t.wait_for(lambda: location() == f"{BASE}/p13.html" or location() == f"{BASE}/different.html", 5), str(location()))
 finally:
     t.close()
     srv.terminate()
