@@ -37,18 +37,24 @@ export function itemMatches(item: PaletteItem, query: string): boolean {
   return words.every((w) => hay.includes(w));
 }
 
+/** A shortcut as typed, for comparing: modifiers in any case ("ctrl+b"), a lone key's case kept ("X" isn't "x"). */
+function keysOf(s: string): string {
+  return s.trim().split(/\s+/).filter(Boolean).map((k) => (k.length > 1 ? k.toLowerCase() : k)).join(" ");
+}
+
 const ORDER: PaletteKind[] = ["action", "tab", "history"];
 
 /**
  * The rows for `query`: `go` (open or search the typed text) first, so
  * Enter does what the address bar always did; then the actions, tabs and
  * history that match, in that order. In each group, an exact shortcut
- * (`Ctrl+B X`, not `Ctrl+B x`) comes first, then matches at the start of the text.
+ * (`Ctrl+B X` or `ctrl+b X`, not `Ctrl+B x`) comes first, then matches at
+ * the start of the text.
  */
 export function paletteRows(query: string, go: PaletteItem | null, items: PaletteItem[]): PaletteItem[] {
-  const exact = query.trim();
-  const q = exact.toLowerCase();
-  const starts = (it: PaletteItem) => (exact && it.hint === exact ? 0 : q && it.text.toLowerCase().startsWith(q) ? 1 : 2);
+  const exact = keysOf(query);
+  const q = query.trim().toLowerCase();
+  const starts = (it: PaletteItem) => (exact && it.hint && keysOf(it.hint) === exact ? 0 : q && it.text.toLowerCase().startsWith(q) ? 1 : 2);
   const found = items
     .filter((it) => itemMatches(it, q))
     .map((it, i) => ({ it, i }))

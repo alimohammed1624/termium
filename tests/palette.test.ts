@@ -39,6 +39,11 @@ describe("palette", () => {
     const items = [action("Close pane", "Ctrl+W", "Ctrl+B x"), action("Close tab", "Ctrl+B X")];
     expect(paletteRows("Ctrl+B X", null, items)[0]!.text).toBe("Close tab");
     expect(paletteRows("Ctrl+B x", null, items).map((r) => r.text)).toEqual(["Close pane", "Close tab"]);
+    // Modifiers in any case; the key's case still counts.
+    expect(paletteRows("ctrl+b X", null, items)[0]!.text).toBe("Close tab");
+    const more = [action("New tab", "Ctrl+T", "Ctrl+B c"), action("Split down", "Ctrl+B -"), action("Detach", "Ctrl+B d"), action("Send Ctrl+B to the page", "Ctrl+B Ctrl+B")];
+    expect(paletteRows("ctrl+b d", null, more)[0]!.text).toBe("Detach");
+    expect(paletteRows("ctrl+b ctrl+b", null, more)[0]!.text).toBe("Send Ctrl+B to the page");
   });
 
   test("nothing typed: everything, no go row", () => {

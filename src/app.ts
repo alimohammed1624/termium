@@ -1566,6 +1566,7 @@ export class App {
       }
     }
     this.mousePressedAt = null;
+    this.paletteSwallow = false;
     this.mouseCapture = null;
     this.mouseButtons = 0;
     this.drag = null;
@@ -2160,6 +2161,8 @@ export class App {
 
   /** The popup address bar was drawn: once it's gone, the pages are drawn again. */
   private paletteShown = false;
+  /** A mouse button pressed on the popup address bar is still down: its moves and release go nowhere. */
+  private paletteSwallow = false;
 
   private drawChrome(): void {
     if (!this.started || this.closingAll || !this.attached) return;
@@ -2581,7 +2584,8 @@ export class App {
         continue;
       }
       const style = index === p.sel ? bg(C.surface1) + fg(C.text) + BOLD : panel;
-      const hint = truncate(item.hint ?? "", Math.floor(boxW / 2));
+      // (An address keeps its end, where pages of one site differ.)
+      const hint = item.kind === "history" ? truncateStart(item.hint ?? "", Math.floor(boxW / 2)) : truncate(item.hint ?? "", Math.floor(boxW / 2));
       const textW = Math.max(1, boxW - 4 - (hint ? width(hint) + 2 : 0));
       s += at(row, left) + style + fg(index === p.sel ? C.mauve : C.overlay) + ` ${icons[item.kind]} ` +
         fg(C.text) + fit(item.text, textW) + RESET + style + "\x1b[22m" + dim + (hint ? `  ${hint}` : "") + " " + RESET;
@@ -2599,7 +2603,7 @@ export class App {
    * What the popup address bar offers for its text: go to it (or search
    * for it), then the actions, open tabs and pages seen before that match.
    * The text as it opened (the address, selected) lists everything;
-   * ">" lists actions only. Keeps the highlighted row in range, and puts it
+   * ">" lists actions and tabs only. Keeps the highlighted row in range, and puts it
    * back on the first row whenever the text changes.
    */
   private paletteList(p: UrlPrompt): PaletteItem[] {
@@ -2619,8 +2623,8 @@ export class App {
         },
       };
     }
-    const items = this.commandActions().map(actionItem);
-    if (!commands) items.push(...this.tabItems(), ...this.historyItems(p.page));
+    const items = [...this.commandActions().map(actionItem), ...this.tabItems()];
+    if (!commands) items.push(...this.historyItems(p.page));
     const list = paletteRows(query, go, items);
     const key = `${p.edit.selectAll}:${p.edit.text}`;
     if (p.selFor !== key) {
@@ -3558,6 +3562,7 @@ export class App {
       return;
     }
     if (ev.action !== "press") return;
+    this.paletteSwallow = true;
     if (!inside) {
       // A click on the address keeps the draft (as it always did).
       const n = this.navHits;
@@ -3899,6 +3904,12 @@ export class App {
     const captured = this.mouseCapture;
     if (captured && (ev.action === "move" || ev.action === "release")) {
       this.pageMouse(captured, ev, px, py);
+      return;
+    }
+    // A click the popup took ends there (its release and moves too), and
+    // nothing reaches a page until the pages are drawn again after it.
+    if (this.paletteSwallow || (this.paletteShown && this.prompt?.kind !== "url")) {
+      if (ev.action === "release") this.paletteSwallow = false;
       return;
     }
     if (this.prompt?.kind === "url") return this.paletteMouse(this.prompt, ev, col, row);
@@ -4249,6 +4260,17 @@ function editCommands(ev: KeyEvent): string[] | undefined {
     case "y": return ["redo"];
   }
   return undefined;
+}
+
+/** Cuts `s` to at most `max` display columns from the start ("…end"). */
+function truncateStart(s: string, max: number): string {
+  if (width(s) <= max) return truncate(s, max);
+  let out = "";
+  for (const ch of [...s.replace(/[\x00-\x1f\x7f-\x9f]/g, " ")].reverse()) {
+    if (width(ch + out) > max - 1) break;
+    out = ch + out;
+  }
+  return max > 0 ? `…${out}` : "";
 }
 
 function hostOf(url: string): string {

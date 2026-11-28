@@ -10,7 +10,7 @@ All notable changes to termium are documented here. The format follows
 - Ctrl+L opens a popup address bar that is also a command palette: type an
   address or search, or filter every action (each with its shortcut), open
   tabs and pages seen in the session; ↑/↓ and Enter or the mouse run them,
-  `>` lists actions only.
+  `>` lists only actions and tabs.
 
 ## [0.3.0] - 2026-11-25
 

@@ -140,6 +140,28 @@ try:
     t.click_cell(t.line(1).find(" 2 ") + 2, 1)
     check("a click on another tab switches to it in one click", t.wait_for(lambda: not popup_open() and "anim" in t.line(2), 5), (t.line(1), t.line(2)))
 
+    # Mouse input the popup takes never reaches the page under it.
+    ctl("eval", "window.__ev = []; for (const k of ['pointerdown','mousedown','pointerup','mouseup','click']) addEventListener(k, () => __ev.push(k), true); 1")
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.wait_idle(0.4, 5)
+    t.click_cell(t.cols - 3, t.rows - 2)
+    check("a click outside closes the box", t.wait_for(lambda: not popup_open(), 3))
+    time.sleep(0.8)
+    ev = ctl("eval", "__ev")
+    check("...and none of it reaches the page", ev == [] or (isinstance(ev, dict) and ev.get("value") == []), ev)
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.type(">zoom"); t.wait_idle(0.4, 5)
+    r = row_with("Zoom in"); x, y = (t.line(r).find("Zoom in") + 2) * t.cell_w, (r - 1) * t.cell_h + 5
+    t.write(f"\x1b[27u\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m")
+    time.sleep(1.0)
+    ev = ctl("eval", "__ev")
+    check("Esc and a click at once: the click doesn't reach the page either", ev == [] or (isinstance(ev, dict) and ev.get("value") == []), ev)
+    check("...nor runs the row", "110%" not in t.line(2), t.line(2))
+
+    # '>' lists tabs too (Ctrl+B 1-9).
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.type(">Ctrl+B 1"); t.wait_idle(0.4, 5)
+    r = row_with("▣ ")
+    check("'>Ctrl+B 1' offers tab 1", r > 0 and "Ctrl+B 1" in t.line(r), t.text())
+    t.key("escape"); time.sleep(0.3)
+
     # Paste goes into the box.
     t.key("ctrl+l"); t.wait_for(popup_open, 3); t.paste(">reset zoom")
     check("a paste lands in the box", t.wait_for(lambda: row_with("Reset zoom") and not row_with("Split right"), 3), t.text())

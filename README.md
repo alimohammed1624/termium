@@ -221,7 +221,8 @@ address or a search, or a few letters of an action (split, new space,
 zoom, sidebar…), a tab or a page seen earlier in the session. Every action
 shows its shortcut. ↑/↓ (or Ctrl+P/N, the wheel) pick a row, Enter or a
 click runs it; the first row (go to or search for what's typed) is picked
-until you move, so Enter always goes. Start with `>` to list only actions.
+until you move, so Enter always goes. Start with `>` to list only actions
+and tabs.
 
 While the address bar is open, Ctrl+T, Ctrl+R, Alt+←/→, zoom and the
 `Ctrl+B` prefix still work, and Ctrl+W closes the tab as in Chrome; its own
