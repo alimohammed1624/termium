@@ -40,7 +40,7 @@ def freeze_browser(profile):
             os.kill(int(pid), signal.SIGSTOP)
 
 def at_address_bar(t, timeout=25):
-    return t.wait_for(lambda: "SPACES" in t.text() and not t.screen.cursor.hidden and t.screen.cursor.y == 1, timeout)
+    return t.wait_for(lambda: "SPACES" in t.text() and not t.screen.cursor.hidden and "› " in t.screen.display[t.screen.cursor.y], timeout)
 
 def running(t):
     try:
