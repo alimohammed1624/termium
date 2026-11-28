@@ -223,7 +223,8 @@ Ctrl+Backspace (delete word) and Alt/Ctrl+←/→.
 
 The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
-divider between panes.
+divider between panes. Right-click ← or → for the tab's earlier or later
+pages, and click one to jump straight there.
 
 ### Updates
 
