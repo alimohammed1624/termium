@@ -6,6 +6,14 @@ All notable changes to termium are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `termium ctl show FILE|-` shows an HTML file an agent wrote (a plan, a
+  report), or HTML piped to it, in a pane beside the person's, whose focus
+  stays put. Showing it again with the same `--name` (default: the file)
+  updates that pane instead of opening another, and a shown file reloads
+  whenever it changes. `--down` stacks it below, `--new-tab` opens it in a
+  background tab. Documented in the skill.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added

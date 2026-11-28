@@ -160,7 +160,7 @@ interface Space {
 
 type Placement =
   | { kind: "tab"; space: Space; index: number; editUrl: boolean; url?: string; background?: boolean; agent?: boolean }
-  | { kind: "split"; tab: Tab; next: Page; dir: Dir; editUrl: boolean; url?: string }
+  | { kind: "split"; tab: Tab; next: Page; dir: Dir; editUrl: boolean; url?: string; keepFocus?: boolean }
   | { kind: "replace"; old: Page; url: string };
 
 type Prompt =
@@ -954,7 +954,7 @@ export class App {
       const tab = placement.tab;
       if (this.locateTab(tab)) {
         tab.root = splitLeaf(tab.root, placement.next, page, placement.dir);
-        tab.focused = page;
+        if (!placement.keepFocus) tab.focused = page;
         tab.zoomed = false;
       } else {
         const space = this.space!;
@@ -3893,6 +3893,23 @@ export class App {
     // A new tab must never take the person's address-bar draft or keystrokes:
     // while they're busy it opens in the background (the caller says so).
     return this.placePage({ kind: "tab", space, index: space.active + 1, editUrl: false, url, background, agent: true });
+  }
+
+  /**
+   * Splits the tab on screen, opening `url` beside its focused pane (or
+   * beside `near`, if that's in the same tab); the focus (and the person's
+   * keys) stay where they are.
+   */
+  agentSplit(url: string, dir: Dir, near?: Page): Promise<Page | null> {
+    const tab = this.tab;
+    const next = near && tab && leaves(tab.root).includes(near) ? near : this.focused;
+    if (!tab || !next) return Promise.resolve(null);
+    return this.placePage({ kind: "split", tab, next, dir, editUrl: false, url, keepFocus: true });
+  }
+
+  /** Reloads a page, as F5 does (a crashed or hung one is replaced). */
+  agentReload(page: Page): void {
+    this.reload(page);
   }
 
   /** Navigates a page (a crashed or hung one is replaced, as from the address bar). */

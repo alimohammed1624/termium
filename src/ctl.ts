@@ -44,6 +44,12 @@ ID is an element id from \`snapshot\`, like 3:142@2):
                                 wait until the page has loaded, or the element / text /
                                 address appears (--gone: disappears)
   dialog accept|dismiss [TEXT]  answer a JavaScript dialog (TEXT for a prompt)
+  show FILE|- [--name NAME] [--new-tab] [--down]
+                                show a local file (an HTML plan or report), or HTML from
+                                stdin (-), in a pane beside the focused one (--down: below
+                                it; --new-tab: in a tab behind). Again with the same NAME
+                                (default: the file), it updates that pane; a file is
+                                reloaded whenever it changes
 
 Options:
   -s, --session NAME   the session (default: "${DEFAULT_SESSION}")
@@ -86,6 +92,7 @@ export function parseCtl(argv: string[]): Parsed {
   let session = DEFAULT_SESSION;
   let json = false;
   let out: string | undefined;
+  let name: string | undefined;
   let timeoutMs: number | undefined;
   const flags = new Set<string>();
   let tab: number | undefined;
@@ -122,6 +129,9 @@ export function parseCtl(argv: string[]): Parsed {
       case "--output":
         out = value();
         break;
+      case "--name":
+        name = value();
+        break;
       case "--timeout": {
         const s = num(value(), "--timeout");
         if (s <= 0) fail("--timeout must be more than 0");
@@ -145,6 +155,7 @@ export function parseCtl(argv: string[]): Parsed {
       case "--middle":
       case "--gone":
       case "--full":
+      case "--down":
         flags.add(a);
         break;
       default:
@@ -164,10 +175,12 @@ export function parseCtl(argv: string[]): Parsed {
     click: ["--double", "--right", "--middle"],
     wait: ["--gone"],
     shot: ["--full"],
+    show: ["--new-tab", "--down"],
   };
   for (const f of flags) if (!allowed[cmd]?.includes(f)) fail(`${f} doesn't apply to ${cmd}`);
   if (xy && cmd !== "click") fail(`--xy only applies to click`);
   if (out && cmd !== "shot") fail(`-o only applies to shot`);
+  if (name !== undefined && cmd !== "show") fail(`--name only applies to show`);
   const maxArgs = (n: number) => {
     if (pos.length > n) fail(`too many arguments for ${cmd}: ${pos.slice(n).join(" ")}`);
   };
@@ -268,11 +281,34 @@ export function parseCtl(argv: string[]): Parsed {
       maxArgs(0);
       break;
     }
+    case "show": {
+      const what = pos.shift();
+      if (!what) fail("show needs a FILE, or - for HTML from stdin");
+      maxArgs(0);
+      if (tab !== undefined) fail("--tab doesn't apply to show (it opens its own pane; --name reuses one)");
+      if (flags.has("--new-tab") && flags.has("--down")) fail("--new-tab and --down can't be used together");
+      if (name !== undefined && !name.trim()) fail("--name can't be empty");
+      if (what === "-") req.html = readStdin();
+      else req.path = resolve(what);
+      req.name = name;
+      req.newTab = flags.has("--new-tab");
+      req.down = flags.has("--down");
+      break;
+    }
     default:
       fail(`unknown ctl command "${cmd}" (see termium ctl --help)`);
   }
   req.timeoutMs = timeoutMs;
   return { session, json, out, timeoutMs, req };
+}
+
+/** All of stdin, as text (for `show -`). */
+function readStdin(): string {
+  try {
+    return readFileSync(0, "utf8");
+  } catch (e: any) {
+    fail(`can't read stdin: ${e?.message ?? e}`);
+  }
 }
 
 /** Sends one request to session `name`; exits with a message if that can't be done. */
@@ -414,6 +450,8 @@ function human(req: CtlRequest, r: any): string {
       return `scrolled to ${r.scrollX},${r.scrollY}`;
     case "wait":
       return `${r.waited}${r.value !== undefined ? ` ${JSON.stringify(r.value)}` : ""}${r.gone ? " gone" : ""} after ${(r.ms / 1000).toFixed(1)}s`;
+    case "show":
+      return `${r.reused ? "updated" : "showing"} tab ${r.id}${r.pane > 1 ? ` (pane ${r.pane})` : ""}: ${r.title || "(untitled)"}  ${r.url}`;
     case "dialog":
       return `${r.accepted ? "accepted" : "dismissed"} the ${r.type} dialog: ${r.message}`;
     default:
