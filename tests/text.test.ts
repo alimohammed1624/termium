@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LineEdit, fit, splitPaths, toUrl, truncate } from "../src/text";
+import { LineEdit, fade, fadeFit, fit, splitPaths, toUrl, truncate, width } from "../src/text";
 import type { KeyEvent } from "../src/input";
 
 const key = (k: string, mods: Partial<KeyEvent["mods"]> = {}, text = ""): KeyEvent => ({
@@ -28,6 +28,38 @@ describe("truncate / fit", () => {
     expect(truncate("hello world", 6)).toBe("hello…");
     expect(truncate("日本語テキスト", 5)).toBe("日本…");
     expect(fit("ab", 4)).toBe("ab  ");
+  });
+});
+
+describe("fade", () => {
+  const sgr = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`;
+  test("text that fits is unchanged", () => {
+    expect(fade("hello", 5, "ffffff", "000000")).toBe("hello");
+  });
+  test("cut-off text ends in 3 cells shading toward the background", () => {
+    // The cut lands on the blank after "hello": the fade covers letters, not the blank.
+    const out = fade("hello world", 6, "ffffff", "000000");
+    expect(out).toBe(`he${sgr(191, 191, 191)}l${sgr(128, 128, 128)}l${sgr(64, 64, 64)}o${sgr(255, 255, 255)}`);
+    expect(width(out)).toBe(5);
+    expect(out).not.toContain("…");
+  });
+  test("fills the full width when the cut lands on a letter", () => {
+    const out = fade("abcdefghij", 6, "ffffff", "000000");
+    expect(out).toBe(`abc${sgr(191, 191, 191)}d${sgr(128, 128, 128)}e${sgr(64, 64, 64)}f${sgr(255, 255, 255)}`);
+    expect(width(out)).toBe(6);
+  });
+  test("wide characters and short fields", () => {
+    expect(width(fade("日本語テキスト", 5, "ffffff", "000000"))).toBe(4);
+    // Wide letters: the fade covers about 3 columns, not 3 letters.
+    expect(fade("日本語テキスト", 8, "ffffff", "000000")).toBe(`日本${sgr(170, 170, 170)}語${sgr(85, 85, 85)}テ${sgr(255, 255, 255)}`);
+    expect(fade("abc", 2, "ffffff", "000000")).toBe(`a${sgr(128, 128, 128)}b${sgr(255, 255, 255)}`);
+    expect(fade("abc", 0, "ffffff", "000000")).toBe("");
+  });
+  test("controls are blanked and fadeFit pads to the width", () => {
+    expect(fade("a\x1bb", 5, "ffffff", "000000")).toBe("a b");
+    const out = fadeFit("hello world", 6, "ffffff", "000000");
+    expect(width(out)).toBe(6);
+    expect(out.endsWith(" ")).toBe(true);
   });
 });
 

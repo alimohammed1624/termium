@@ -39,7 +39,7 @@ import {
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP, selectPopupColors } from "./select-popup";
 import { CATPPUCCIN_MOCHA, resolvePalette, type Palette, type TermColors } from "./theme";
-import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
+import { DEFAULT_SEARCH, LineEdit, fade, fadeFit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
 
@@ -229,6 +229,12 @@ const bg = (hex: string) => `\x1b[48;2;${rgb(hex)}m`;
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
 const at = (row: number, col: number) => `\x1b[${row};${col}H`;
+
+/** The attached terminal shows 24-bit color: cut-off titles and URLs fade out then, else they end in "…". */
+let TRUECOLOR = false;
+/** `s` (in `from` on `on`) cut to `n` columns, fading out or with an ellipsis; `pad` fills the rest with spaces. */
+const clip = (s: string, n: number, from: string, on: string, pad = false) =>
+  TRUECOLOR ? (pad ? fadeFit : fade)(s, n, from, on) : (pad ? fit : truncate)(s, n);
 
 /** Shortcuts that still work while the address bar (or another text prompt) is open. */
 const PROMPT_GLOBALS = new Set([
@@ -1469,8 +1475,9 @@ export class App {
    * A terminal attached: draw everything for it from scratch, at its size.
    * Image ids and positions from an earlier terminal mean nothing to it.
    */
-  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string; theme?: string; colors?: TermColors }): void {
+  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string; theme?: string; colors?: TermColors; truecolor?: boolean }): void {
     if (t.cwd) this.cwd = t.cwd;
+    TRUECOLOR = !!t.truecolor;
     this.setPalette(resolvePalette(t.theme, t.colors));
     // Nothing half-typed on the previous terminal carries over (a pending
     // Ctrl+B prefix would turn this one's first key into a command), nor
@@ -2217,14 +2224,13 @@ export class App {
       const cursor = this.mode === "spaces" && i === this.spaceCursor;
       const marker = cursor ? "▸" : active ? "●" : " ";
       const count = `${space.tabs.length}`;
-      const name = truncate(`${marker} ${i + 1} ${space.name}`, w - count.length - 2);
+      const on = cursor ? C.hover : active ? C.surface : C.panel;
+      const ink = cursor || active ? C.text : C.muted;
+      // " name count ": a blank before, between and after.
+      const name = clip(`${marker} ${i + 1} ${space.name}`, w - count.length - 3, ink, on);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
-      const style = cursor
-        ? bg(C.hover) + fg(C.text) + BOLD
-        : active
-          ? bg(C.surface) + fg(C.text) + BOLD
-          : base;
-      line(row, text, style);
+      // Exactly w columns already (fit would strip a fade's colors).
+      s += at(row, 1) + bg(on) + fg(ink) + (cursor || active ? BOLD : "") + text + RESET;
       this.spaceHits.push({ row, index: i });
       row++;
     });
@@ -2244,17 +2250,21 @@ export class App {
     this.badgeHit = badge && bw ? [col + w, col + full] : null;
     const space = this.space;
     const tabs = space?.tabs ?? [];
-    const items = tabs.map((tab, i) => {
+    const active = space?.active ?? 0;
+    // A tab's label, its title cut to `max` columns.
+    const item = (i: number, max: number) => {
+      const tab = tabs[i]!;
       const pages = leaves(tab.root);
       const title = pageTitle(tab.focused);
       const extra = pages.length > 1 ? ` ⊞${pages.length}` : "";
       const dot = pages.some((p) => p.dialog) ? "! " : pages.some((p) => p.loading) ? "◌ " : "";
-      return ` ${i + 1} ${dot}${truncate(title, 22)}${extra} `;
-    });
+      const cut = i === active ? clip(title, max, C.text, C.background) : clip(title, max, C.dim, C.backdrop);
+      return ` ${i + 1} ${dot}${cut}${extra} `;
+    };
+    const items = tabs.map((_, i) => item(i, 22));
     const plus = " + ";
     // Scroll so the active tab is visible.
     let first = 0;
-    const active = space?.active ?? 0;
     const total = (from: number, to: number) => items.slice(from, to + 1).reduce((a, t) => a + width(t) + 1, 0);
     const markers = (from: number) => (from > 0 ? 1 : 0) + (active < items.length - 1 ? 1 : 0);
     while (first < active && total(first, active) + width(plus) + markers(first) > w) first++;
@@ -2272,7 +2282,7 @@ export class App {
       const text = items[i]!;
       const tw = width(text);
       const more = i < items.length - 1 ? 1 : 0; // room for a "›" if tabs follow
-      if (used + tw + width(plus) + more > w) break;
+      if (used + tw + 1 + width(plus) + more > w) break; // the tab, its "│", "+" and maybe "›"
       last = i;
       const style = i === active ? bg(C.background) + fg(C.text) + BOLD : bg(C.backdrop) + fg(C.dim);
       s += style + text + RESET + bg(C.backdrop) + fg(C.hover) + "│";
@@ -2282,7 +2292,9 @@ export class App {
     if (last < first && items.length > 0) {
       // Not even the active tab fits whole: show it cut to the space there is.
       const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
-      const text = truncate(items[active]!, room);
+      // The title gives way first; the whole label is cut only if its number and pane count don't fit.
+      const frame = width(item(active, 0));
+      const text = room >= frame ? item(active, Math.min(22, room - frame)) : clip(item(active, Infinity), room, C.text, C.background);
       s += bg(C.background) + fg(C.text) + BOLD + text + RESET + bg(C.backdrop);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
       used += width(text);
@@ -2391,7 +2403,7 @@ export class App {
       const secure = url.startsWith("https://");
       const shown = url.replace(/^https:\/\//, "");
       const icon = page?.crashed ? fg(C.red) + "✖ " : secure ? fg(C.green) + "🔒" : fg(C.dim) + "  ";
-      s += bg(C.surface) + " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2) + RESET;
+      s += bg(C.surface) + " " + icon + fg(C.text) + clip(shown, fieldW - 1 - 2, C.text, C.surface, true) + RESET;
     }
     s += barBg + " ";
     const rightCol = urlStart + fieldW + 1;
@@ -2418,12 +2430,13 @@ export class App {
     for (const [page, g] of this.geom) {
       if (!g.header) continue;
       const focused = tab?.focused === page;
-      const style = focused ? bg(C.hover) + fg(C.text) + BOLD : bg(C.panel) + fg(C.dim);
+      const [ink, on] = focused ? [C.text, C.hover] : [C.dim, C.panel];
+      const style = bg(on) + fg(ink) + (focused ? BOLD : "");
       const host = page.url.includes(MARKER) ? "" : hostOf(page.url);
       const title = pageTitle(page) === page.url.replace(/^https?:\/\//, "") ? "" : pageTitle(page);
       const flag = page.dialog ? "! " : page.loading ? "◌ " : "";
       const text = ` ${flag}${title}${title && host ? " — " : ""}${host}`;
-      s += at(g.header.row, g.header.col) + style + fit(text, g.header.cols) + RESET;
+      s += at(g.header.row, g.header.col) + style + clip(text, g.header.cols, ink, on, true) + RESET;
     }
     for (const sep of this.seps) {
       if (sep.split.dir !== "h") continue;
