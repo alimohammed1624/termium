@@ -233,20 +233,41 @@ try:
     prefix("m")
     check("split: muted again", t.wait_for(lambda: tab(split).get("muted") is True, 5, 0.3), json.dumps(tab(split)))
 
-    # 5. Its extension's worker goes (closed by another DevTools client): it comes back, mute still works.
+    # 5. Its extension's worker goes (closed by another DevTools client), twice, while a
+    # muted tab plays: it never makes a sound meanwhile, and muting works again after.
     port = ctl_json("devtools").get("port")
-    workers = [x for x in json.loads(subprocess.run(["curl", "-s", f"http://127.0.0.1:{port}/json/list"], capture_output=True, text=True).stdout)
-               if x.get("type") == "service_worker" and x.get("url", "").endswith("/worker.js")]
-    check("worker: found", len(workers) == 1, str(workers))
-    for w in workers:
-        subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "close", f"http://127.0.0.1:{port}", w["id"]], cwd=ROOT, capture_output=True, timeout=30)
+
+    def close_worker():
+        workers = [x for x in json.loads(subprocess.run(["curl", "-s", f"http://127.0.0.1:{port}/json/list"], capture_output=True, text=True).stdout)
+                   if x.get("type") == "service_worker" and x.get("url", "").endswith("/worker.js")]
+        for w in workers:
+            subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-ext.ts"), "close", f"http://127.0.0.1:{port}", w["id"]],
+                           cwd=ROOT, capture_output=True, timeout=30)
+        return len(workers)
+
+    check("worker: the split tab is muted and playing", tab(split).get("muted") is True and tab(split).get("audible") is True, json.dumps(tab(split)))
+    rec = subprocess.Popen(["timeout", "-s", "INT", "45", "parec", "--latency-msec=20", "-d", "termiumtest.monitor",
+                            "--format=s16le", "--channels=1", "--rate=8000", "--raw"], env=AENV, stdout=subprocess.PIPE)
+    check("worker: found and closed", close_worker() == 1)
     t0 = time.time()
-    r = ctl("unmute", str(split), "--timeout", "40")
-    check("worker: unmute works once it's back", r.returncode == 0, f"{r.returncode} {r.stderr} after {time.time() - t0:.1f}s")
-    check("worker: and the state follows again", t.wait_for(lambda: tab(split).get("muted") is False and tab(split).get("audible") is True, 40, 0.5),
-          json.dumps(tab(split)))
+    r = ctl("mute", str(ids["media"]), "--timeout", "40")
+    check("worker: ctl mute (in flight as it goes) works once it's back", r.returncode == 0, f"{r.returncode} {r.stderr} after {time.time() - t0:.1f}s")
+    check("worker: closed again", close_worker() == 1)
+    r = ctl("unmute", str(split), "--timeout", "0.1")
+    check("worker: a timed-out unmute says so", r.returncode == 4, f"{r.returncode} {r.stderr}")
+    time.sleep(20)
+    check("worker: ... and never unmutes later", tab(split).get("muted") is True, json.dumps(tab(split)))
+    check("worker: mutes kept", tab(ids["media"]).get("muted") is True, json.dumps(tab(ids["media"])))
+    rec.send_signal(signal.SIGINT)
+    raw = rec.communicate()[0]
+    a = array.array("h", raw[: len(raw) // 2 * 2])
+    loud = [i for i in range(len(a) // 400) if math.sqrt(sum(x * x for x in a[i * 400:(i + 1) * 400]) / 400) > 200]
+    check("worker: not a sound from the muted tab throughout (50 ms windows)", len(a) > 8000 * 20 and not loud, f"{len(a)} samples, loud windows {loud[:5]}")
+    r = ctl("unmute", str(split))
+    check("worker: unmute works", r.returncode == 0, f"{r.returncode} {r.stderr}")
     q = rms()
     check("worker: sound again", q > 1000, f"rms {q:.0f}")
+    ctl("unmute", str(ids["media"]))
 
     # 6. A tab bar too narrow for the icon: clicking what's left of the tab (its "…") never mutes.
     prefix("b")  # no sidebar

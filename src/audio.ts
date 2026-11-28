@@ -2,7 +2,7 @@
 // (no per-tab "audible" state, no per-tab mute command), but the browser's
 // own tab audio state is there for extensions (chrome.tabs: audible,
 // mutedInfo). So termium loads a tiny extension of its own over its DevTools
-// pipe (Extensions.loadUnpacked, which Chrome allows only with
+// pipe (Extensions.loadUnpacked; Google Chrome takes it only with
 // --enable-unsafe-extension-debugging) and asks its service worker.
 //
 // That's the browser's real tab mute, the one Chrome's tab strip uses: it
@@ -38,12 +38,12 @@ const targets = async () => {
   return m;
 };
 self.termiumAudio = {
-  // Tabs playing or muted, once something changed since version "seen" (or after 20 s).
+  // Tabs playing or muted, once something changed since version "seen" (or after 10 s).
   async next(seen) {
     if (seen === ver) {
       await new Promise((r) => {
         const done = () => { waiting.delete(done); clearTimeout(t); r(); };
-        const t = setTimeout(done, 20000);
+        const t = setTimeout(done, 10000);
         waiting.add(done);
       });
     }
@@ -72,9 +72,16 @@ export interface AudioState {
 
 export class TabAudio {
   private sid: string | null = null;
+  /** The extension's id, once loaded. */
+  private id: string | null = null;
   private stopped = false;
   /** The browser can't load the extension (it never worked): no indicator, no muting. */
   private unsupported = false;
+  /**
+   * Pages muted (by target id), as last set or seen: loading the extension
+   * again unmutes the tabs it muted, so they're muted again right after.
+   */
+  private muted = new Set<string>();
 
   constructor(
     private cdp: CDP,
@@ -83,12 +90,14 @@ export class TabAudio {
     private log: (msg: string) => void,
     /** Every page playing or muted, by DevTools target id (pages not in it: neither). */
     private onChange: (states: Map<string, AudioState>) => void,
+    /** A page's DevTools session (to wake the extension's worker from), if there's one. */
+    private anyPage: () => string | undefined = () => undefined,
   ) {}
 
   /**
    * Loads the extension and follows tab audio until stop() or the browser
-   * goes. A worker that dies or stops answering is started again (loading
-   * the extension again does that), backing off while it keeps failing.
+   * goes. A worker that goes or stops answering is found again (or the
+   * extension loaded again, which starts it), backing off while that fails.
    */
   async run(): Promise<void> {
     let seen = -1;
@@ -109,10 +118,12 @@ export class TabAudio {
       }
       const sid = this.sid!;
       try {
-        // next() answers within 20 s (at once if something changed).
-        const r = await this.call(sid, `termiumAudio.next(${seen})`, 30_000);
+        // next() answers within 10 s (at once if something changed).
+        const r = await this.call(sid, `termiumAudio.next(${seen})`, 15_000);
         seen = r.ver;
-        this.onChange(new Map((r.tabs as [string, boolean, boolean][]).map(([t, audible, muted]) => [t, { audible, muted }])));
+        const states = new Map((r.tabs as [string, boolean, boolean][]).map(([t, audible, muted]) => [t, { audible, muted }]));
+        this.muted = new Set([...states].filter(([, st]) => st.muted).map(([t]) => t));
+        this.onChange(states);
       } catch (e) {
         if (this.stopped || this.cdp.closed) return;
         this.log(`audio: ${e instanceof Error ? e.message : e}; starting it again`);
@@ -126,43 +137,74 @@ export class TabAudio {
     if (this.sid) this.drop(this.sid);
   }
 
-  /** Writes and loads the extension, attaches to its worker, and checks that it answers. */
+  /**
+   * Attaches to the extension's worker: the running one, or a stopped one
+   * woken up, or else loads the extension (again), which starts it but
+   * unmutes the tabs it muted: those are muted again at once. In use once
+   * it answers.
+   */
   private async connect(worked: boolean): Promise<boolean> {
-    let sid: string | null = null;
     try {
-      mkdirSync(this.dir, { recursive: true });
-      writeFileSync(join(this.dir, "manifest.json"), JSON.stringify(MANIFEST, null, 2));
-      writeFileSync(join(this.dir, "worker.js"), WORKER);
-      // Loaded again, a loaded extension restarts (its worker too).
-      let id: string;
-      try {
-        ({ id } = await withTimeout(this.cdp.send("Extensions.loadUnpacked", { path: this.dir }), 10_000, "loading the extension"));
-      } catch (e) {
-        // Never loaded: this browser can't (or won't) load it; don't keep trying.
-        if (!worked) this.unsupported = true;
-        throw e;
+      let sid = this.id ? await this.attach(this.id, 5) : null;
+      if (!sid && this.id) {
+        const page = this.anyPage();
+        if (page) {
+          await this.cdp.send("ServiceWorker.enable", {}, page).catch(() => {});
+          await this.cdp.send("ServiceWorker.startWorker", { scopeURL: `chrome-extension://${this.id}/` }, page).catch(() => {});
+          this.cdp.send("ServiceWorker.disable", {}, page).catch(() => {});
+          sid = await this.attach(this.id, 20);
+        }
       }
-      for (let i = 0; i < 50 && !this.stopped && !sid; i++) {
-        // (Asked for by type: getTargets otherwise lists what setDiscoverTargets follows, pages only.)
-        const { targetInfos } = await this.cdp.send("Target.getTargets", { filter: [{ type: "service_worker" }] });
-        const worker = targetInfos.find((t: any) => String(t.url).startsWith(`chrome-extension://${id}/`));
-        if (worker) sid = (await this.cdp.send("Target.attachToTarget", { targetId: worker.targetId, flatten: true })).sessionId;
-        else await Bun.sleep(100);
+      if (!sid) {
+        mkdirSync(this.dir, { recursive: true });
+        writeFileSync(join(this.dir, "manifest.json"), JSON.stringify(MANIFEST, null, 2));
+        writeFileSync(join(this.dir, "worker.js"), WORKER);
+        try {
+          ({ id: this.id } = await withTimeout(this.cdp.send("Extensions.loadUnpacked", { path: this.dir }), 10_000, "loading the extension"));
+        } catch (e) {
+          // Never loaded: this browser can't (or won't) load it; don't keep trying.
+          if (!worked) this.unsupported = true;
+          throw e;
+        }
+        sid = await this.attach(this.id!, 50);
+        if (!sid) throw new Error("its service worker didn't start");
       }
-      if (!sid) throw new Error("its service worker didn't start");
-      this.cdp.send("Runtime.runIfWaitingForDebugger", {}, sid).catch(() => {});
-      // Its script may not have run yet (a worker just started waits for its debuggers).
-      for (let i = 0; (await this.call(sid, "typeof termiumAudio", 5000)) !== "object"; i++) {
-        if (i >= 50) throw new Error("its service worker doesn't answer");
-        await Bun.sleep(100);
+      for (const t of [...this.muted]) {
+        if (!(await this.call(sid, `termiumAudio.mute(${JSON.stringify(t)}, true)`, 5000))) this.muted.delete(t);
       }
       this.sid = sid;
       return true;
     } catch (e) {
       this.log(`audio: no tab audio state or muting (${e instanceof Error ? e.message : e})`);
-      if (sid) this.drop(sid);
       return false;
     }
+  }
+
+  /** A session on extension `id`'s worker that answers, looking for it `tries` times; null if none. */
+  private async attach(id: string, tries: number): Promise<string | null> {
+    for (let i = 0; i < tries && !this.stopped; i++) {
+      // (Asked for by type: getTargets otherwise lists what setDiscoverTargets follows, pages only.)
+      const { targetInfos } = await this.cdp.send("Target.getTargets", { filter: [{ type: "service_worker" }] });
+      const worker = targetInfos.find((t: any) => String(t.url).startsWith(`chrome-extension://${id}/`));
+      if (!worker) {
+        await Bun.sleep(100);
+        continue;
+      }
+      const { sessionId: sid } = await this.cdp.send("Target.attachToTarget", { targetId: worker.targetId, flatten: true });
+      this.cdp.send("Runtime.runIfWaitingForDebugger", {}, sid).catch(() => {});
+      try {
+        // Its script may not have run yet (a worker just started waits for its debuggers).
+        for (let j = 0; (await this.call(sid, "typeof termiumAudio", 3000)) !== "object"; j++) {
+          if (j >= 50) throw new Error("its service worker doesn't answer");
+          await Bun.sleep(100);
+        }
+        return sid;
+      } catch {
+        this.drop(sid);
+        return null;
+      }
+    }
+    return null;
   }
 
   /** Lets go of a worker session (calls still waiting on it fail). */
@@ -178,12 +220,16 @@ export class TabAudio {
     return r?.result?.value;
   }
 
-  /** Mutes or unmutes the page's tab; false if the browser doesn't know it as a tab. */
-  async setMuted(targetId: string, muted: boolean): Promise<boolean> {
+  /**
+   * Mutes or unmutes the page's tab; false if the browser doesn't know it as
+   * a tab. Nothing is sent once `stillOk` says no (a command's deadline).
+   */
+  async setMuted(targetId: string, muted: boolean, stillOk: () => boolean = () => true): Promise<boolean> {
     for (let attempt = 0; ; attempt++) {
       // Starting (just after startup, or after its worker went): wait for that a while.
-      for (let i = 0; i < 150 && !this.sid && !this.unsupported && !this.stopped; i++) await Bun.sleep(100);
+      for (let i = 0; i < 150 && !this.sid && !this.unsupported && !this.stopped && stillOk(); i++) await Bun.sleep(100);
       const sid = this.sid;
+      if (!stillOk()) throw new TimeoutError();
       if (!sid) {
         throw new Error(
           this.unsupported
@@ -192,13 +238,23 @@ export class TabAudio {
         );
       }
       try {
-        return !!(await this.call(sid, `termiumAudio.mute(${JSON.stringify(targetId)}, ${muted})`, 5000));
+        const ok = !!(await this.call(sid, `termiumAudio.mute(${JSON.stringify(targetId)}, ${muted})`, 5000));
+        if (ok && muted) this.muted.add(targetId);
+        else this.muted.delete(targetId);
+        return ok;
       } catch (e) {
         // Its worker went: run() starts it again (dropping the session wakes it); then once more.
         this.drop(sid);
         if (attempt > 0 || this.stopped) throw new Error(`muting failed (${e instanceof Error ? e.message : e}); try again`);
       }
     }
+  }
+}
+
+/** setMuted gave up at its caller's deadline, before sending anything more. */
+export class TimeoutError extends Error {
+  constructor() {
+    super("timed out");
   }
 }
 

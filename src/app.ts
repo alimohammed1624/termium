@@ -523,7 +523,7 @@ export class App {
       .catch((e) => this.opts.log(`permissions: ${e}`));
     // Which tabs play sound, and muting them (in the background: startup doesn't wait for it).
     if (this.opts.audioExtension) {
-      this.audio = new TabAudio(cdp, this.opts.audioExtension, this.opts.log, (states) => this.onAudio(states));
+      this.audio = new TabAudio(cdp, this.opts.audioExtension, this.opts.log, (states) => this.onAudio(states), () => this.pages.values().next().value?.sessionId);
       void this.audio.run();
     }
 
@@ -1150,9 +1150,9 @@ export class App {
   }
 
   /** Mutes or unmutes a page (the browser's tab mute: it covers its frames, and stays across tab switches and navigation). */
-  async setMuted(page: Page, muted: boolean): Promise<void> {
+  async setMuted(page: Page, muted: boolean, stillOk?: () => boolean): Promise<void> {
     if (!this.audio) throw new Error("muting isn't available in this session");
-    if (!(await this.audio.setMuted(page.targetId, muted))) throw new Error(`tab ${page.num} isn't a browser tab that can be muted`);
+    if (!(await this.audio.setMuted(page.targetId, muted, stillOk))) throw new Error(`tab ${page.num} isn't a browser tab that can be muted`);
     // Shown at once; the browser confirms it (and anything else that changed) right after.
     page.muted = muted;
     this.queueChrome();
