@@ -153,6 +153,33 @@ try:
     check("a piped pane navigated elsewhere drops its file", wait_until(lambda: not os.path.exists(away_file), 5), away_file)
     ctl("close", str(r.get("id")))
 
+    # Showing again right after its pane went elsewhere: a new pane, not over the page it went to.
+    r = ctl_json("show", "-", "--name", "piped3", stdin="<p>piped three</p>")
+    p3 = r.get("id")
+    ctl("open", "file://" + other, "--tab", str(p3))
+    r = ctl_json("show", "-", "--name", "piped3", stdin="<p>piped three again</p>")
+    check("re-shown at once after leaving: a new pane", r.get("id") not in (None, p3) and r.get("reused") is False
+          and page_text(p3) == "Report, rewritten", (p3, r))
+    ctl("close", str(p3)); ctl("close", str(r.get("id")))
+
+    # A navigation called off at "Leave this page?": the piped page stays, and so does its file.
+    r = ctl_json("show", "-", "--name", "stay", stdin="<title>Stay</title><p>stay here</p>"
+                 "<script>onbeforeunload = (e) => { e.preventDefault(); e.returnValue = ''; };</script>")
+    st_id, st_file = r.get("id"), r.get("url", "")[len("file://"):]
+    ctl("click", "--xy", "20,20", "--tab", str(st_id))  # (the prompt needs the page to have been used)
+    ctl("open", "file://" + other, "--tab", str(st_id), "--no-wait")
+    leave = lambda: next((t.get("dialog") for t in ctl_json("tabs") if t["id"] == st_id), None)
+    check("leaving asks first", wait_until(lambda: leave() is not None, 5))
+    time.sleep(2)
+    check("its file stays while it asks", os.path.exists(st_file))
+    ctl("dialog", "dismiss", "--tab", str(st_id))
+    time.sleep(3)
+    check("called off: the page and its file are still there", os.path.exists(st_file) and page_text(st_id) == "stay here")
+    r = ctl_json("show", "-", "--name", "stay", stdin="<title>Stay</title><p>stay, updated</p>")
+    # (Its reload asks "Leave this page?" in turn: the page's own doing.)
+    check("and the name still has that pane", r.get("id") == st_id and r.get("reused") is True, r)
+    ctl("close", str(st_id), "--force")
+
     # --- --new-tab
     r = ctl_json("show", other, "--new-tab")
     check("--new-tab opens it in a tab behind", r.get("tab") == 2 and r.get("pane") == 1 and not r.get("active"), r)
@@ -174,6 +201,10 @@ try:
     check("--new-tab never adopts: a tab of its own", r.get("id") not in (None, opened) and r.get("reused") is False, r)
 
     # --- errors
+    locked = os.path.join(work, "locked.html")
+    write(locked, "Locked"); os.chmod(locked, 0)
+    r = ctl("show", locked, "--name", "locked")
+    check("a file the browser can't read is exit 1", r.returncode == 1 and "couldn't load" in r.stderr, (r.returncode, r.stderr))
     r = ctl("show", "nope.html")
     check("a missing file is exit 1", r.returncode == 1 and "no such file" in r.stderr, (r.returncode, r.stderr))
     r = ctl("show")

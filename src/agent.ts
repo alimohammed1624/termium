@@ -450,9 +450,20 @@ class Agent {
     }
     // Piped HTML goes to a file of its own (the same one for the same name), loaded like any other.
     if (fromStdin) path = entry?.temp ?? join(showDir(this.ctx.tmpDir), `${randomBytes(8).toString("hex")}.html`);
-    const url = pathToFileURL(path).href;
+    let url = pathToFileURL(path).href;
     const label = fromStdin ? "piped HTML" : basename(path);
     let page: Page;
+    // Piped HTML whose pane has gone elsewhere since (asked of the page itself: what termium
+    // knows of its address can be ahead of it) is done with: the name gets a new pane.
+    if (entry?.temp) {
+      const href = await this.evalValue(this.page(entry.page.num), "location.href").catch(() => null);
+      if (typeof href === "string" && withoutHash(href) !== entry.url) {
+        stopShowing(shown, name);
+        entry = undefined;
+        path = join(showDir(this.ctx.tmpDir), `${randomBytes(8).toString("hex")}.html`);
+        url = pathToFileURL(path).href;
+      }
+    }
     const reused = !!entry;
     if (entry) {
       page = this.page(entry.page.num);
@@ -493,6 +504,9 @@ class Agent {
     } finally {
       // (Once it's on the file: till then the pane's address is still the one it had.)
       if (shown.get(name) === entry) watchShown(this.app, shown, name, entry, this.ctx.log);
+    }
+    if (/^chrome-error:/.test(await this.evalValue(page, "location.href").catch(() => ""))) {
+      throw new CtlError(`tab ${page.num}: couldn't load ${label} (${this.describe(page).title || "error page"})`);
     }
     return { ...this.describe(page), name, reused };
   }
@@ -1318,6 +1332,8 @@ interface Shown {
   /** Piped HTML's own file, removed with the pane. */
   temp?: string;
   timer?: ReturnType<typeof setInterval>;
+  /** When its pane was first seen showing something else (piped HTML: dropped after a moment). */
+  leftAt?: number;
 }
 
 /** Panes `show` opened, by name, for each session. */
@@ -1371,20 +1387,29 @@ function watchShown(app: App, shown: Map<string, Shown>, name: string, e: Shown,
   e.timer = setInterval(() => {
     if (shown.get(name) !== e) return clearInterval(e.timer);
     if (!app.isOpen(e.page)) return stopShowing(shown, name);
+    // A dialog on it (a "Leave this page?" too: the navigation may yet be called off) or a
+    // load under way: nothing to decide yet (a reload would answer the dialog for the person).
+    if (e.page.dialog || e.page.loading || e.page.navStarted) return;
     if (withoutHash(e.page.url) !== e.url) {
       // Gone elsewhere (the person followed a link, say): not reloaded any more, until shown
-      // again. Piped HTML has nothing to go back to: its file goes, and the name with it.
+      // again. Piped HTML has nothing to go back to: its file goes, and the name with it, once
+      // it has stayed away a moment (termium's idea of the address is corrected within a second
+      // when a navigation it started is called off).
       if (e.page.url && !app.isPlaceholder(e.page.url)) {
-        if (e.temp) return stopShowing(shown, name);
+        if (e.temp) {
+          e.leftAt ||= Date.now();
+          if (Date.now() - e.leftAt >= 1500) stopShowing(shown, name);
+          return;
+        }
         clearInterval(e.timer);
         e.timer = undefined;
       }
       return;
     }
+    e.leftAt = 0;
     if (e.temp) return; // (piped HTML only changes by another show)
-    // The person is typing in it (or editing its address), or it shows a dialog: not now,
-    // a reload would wipe what they typed, or answer the dialog for them.
-    if (e.page.dialog || (app.humanBusy() && app.activePage() === e.page)) return;
+    // The person is typing in it (or editing its address): not now, it would wipe what they typed.
+    if (app.humanBusy() && app.activePage() === e.page) return;
     const now = fileStamp(e.path);
     if (!now || now === e.stamp) return; // (gone for a moment while it's replaced: wait for it)
     e.stamp = now;
