@@ -288,7 +288,7 @@ const DIALOG_GLOBALS = new Set(["ctrl+t", "alt+=", "alt++", "alt+-", "alt+0"]);
 const DETACHED_VIEWPORT = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false, screenWidth: 1920, screenHeight: 1080 };
 
 const SIDEBAR_W = 22;
-const CHROMELESS_HINT = "Chromeless: Ctrl+L for the address, Ctrl+B f shows the bars";
+const CHROMELESS_HINT = "Chromeless: Ctrl+L for the address, Ctrl+B F shows the bars";
 const TOP_ROWS = 2;
 /** URL fragment that marks pages termium created; random so real URLs never match. */
 const MARKER = `#termium-${crypto.randomUUID().slice(0, 8)}-`;
@@ -315,7 +315,7 @@ const HELP: [string, string][] = [
   ["w", "spaces (j/k, Enter, 1-9, Esc)"],
   ["N / W / D", "new / rename / close space"],
   ["b", "toggle sidebar"],
-  ["f", "chromeless (hide tab & address bars)"],
+  ["F", "chromeless (hide tab & address bars)"],
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
@@ -367,7 +367,7 @@ export class App {
 
   private zoom = 1;
   sidebar = true;
-  /** No tab bar, address bar or sidebar: the pages fill the terminal (Ctrl+B f). */
+  /** No tab bar, address bar or sidebar: the pages fill the terminal (Ctrl+B F). */
   chromeless = false;
   /** Chromeless: the address line shows over the top row for now (a toast, a question, a key prefix). */
   private strip = false;
@@ -2792,7 +2792,7 @@ export class App {
       { label: "Rename space", keys: "Ctrl+B W", keywords: "workspace", run: b("shift+w") },
       { label: "Close space", keys: "Ctrl+B D", keywords: "workspace", run: b("shift+d") },
       { label: "Toggle sidebar", keys: "Ctrl+B b", keywords: "spaces hide show", run: b("b") },
-      { label: "Toggle chromeless", keys: "Ctrl+B f", keywords: "hide show bars tab address fullscreen full page", run: b("f") },
+      { label: "Toggle chromeless", keys: "Ctrl+B F", keywords: "hide show bars tab address fullscreen full page", run: b("shift+f") },
       { label: "Send Ctrl+B to the page", keys: "Ctrl+B Ctrl+B", run: b("ctrl+b", PALETTE_CTRL_B) },
       { label: "Detach", keys: "Ctrl+B d", keywords: "attach background", run: b("d") },
       { label: "Update termium", keys: "Ctrl+B U", keywords: "upgrade restart", run: b("shift+u") },
@@ -3463,7 +3463,7 @@ export class App {
       case "b":
         this.sidebar = !this.sidebar;
         return this.relayoutAndRedraw();
-      case "f":
+      case "shift+f":
         this.setChromeless();
         return;
       case "q": void this.requestQuit(); return;

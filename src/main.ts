@@ -59,7 +59,7 @@ Options:
   --scale <n>           device pixels per CSS pixel (default: follows the terminal's cell size)
   --search <url>        search URL with %s for the query (default: DuckDuckGo, or $TERMIUM_SEARCH)
   --chromeless          hide the tab bar, address bar and sidebar: the page fills the terminal
-                        (the session keeps it; Ctrl+B f or termium ctl chromeless off turns it off)
+                        (the session keeps it; Ctrl+B F or termium ctl chromeless off turns it off)
   --no-update-check     don't check GitHub for a newer termium, nor offer to update
                         (also TERMIUM_NO_UPDATE_CHECK=1, or a set CI variable)
   -h, --help            show this help

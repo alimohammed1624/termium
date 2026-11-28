@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Chromeless mode (no tab bar, address bar or sidebar), against the real
-termium and headless browser: Ctrl+B f, the palette, `ctl chromeless`,
+termium and headless browser: Ctrl+B F, the palette, `ctl chromeless`,
 --chromeless, the page filling the terminal (pictures and mouse), Ctrl+L,
 tab switches, and the setting surviving a restart into a newer termium.
 
     python3 tests/chromeless.py [OUT_DIR]
 """
-import json, os, shutil, socket, subprocess, sys, tempfile, time
+import json, os, re, shutil, socket, subprocess, sys, tempfile, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 from drive import Term
@@ -94,9 +94,11 @@ try:
     check("with the bars: the page is under them, right of the sidebar", wait_placed(t, BARS), placed(t))
     t.shot(os.path.join(OUT, "bars.png"))
 
-    # ---------------------------------------------------- Ctrl+B f
-    t.key("ctrl+b"); t.key("f")
-    check("Ctrl+B f: a line over the top says how to get back", t.wait_for(lambda: "Ctrl+B f shows the bars" in t.line(1), 5), t.line(1))
+    # ---------------------------------------------------- Ctrl+B F
+    t.key("ctrl+b"); t.key("f"); time.sleep(1.0)
+    check("Ctrl+B f (lower case) leaves chromeless off", ctl("chromeless") == {"chromeless": False} and bars_shown(t), (ctl("chromeless"), t.line(2)))
+    t.key("ctrl+b"); t.key("shift+f")
+    check("Ctrl+B F: a line over the top says how to get back", t.wait_for(lambda: "Ctrl+B F shows the bars" in t.line(1), 5), t.line(1))
     check("...while it shows, the picture leaves that row out (cut, not squeezed)",
           t.wait_for(lambda: placed(t) == [(2, 1, COLS, ROWS - 1)], 5) and b",r=44,y=" in bytes(t.raw), placed(t))
     check("...then the page fills every row and column", wait_placed(t, FULL, 8), placed(t))
@@ -175,13 +177,13 @@ try:
 
     # ---------------------------------------------------- the palette, the help
     t.key("ctrl+l"); time.sleep(0.4); t.type(">chromeless"); time.sleep(0.5)
-    check("the palette offers 'Toggle chromeless' with its key", "Toggle chromeless" in t.text() and "Ctrl+B f" in t.text(), t.text()[:600])
+    check("the palette offers 'Toggle chromeless' with its key", "Toggle chromeless" in t.text() and "Ctrl+B F" in t.text(), t.text()[:600])
     t.key("enter")
     check("...which brings the bars back", t.wait_for(lambda: bars_shown(t), 5) and wait_placed(t, BARS, 8), (t.line(2), placed(t)))
     t.key("ctrl+l"); time.sleep(0.4); t.type(">chromeless"); time.sleep(0.5); t.key("enter")
     check("...and hides them again", wait_placed(t, FULL, 8) and not bars_shown(t), placed(t))
     t.key("ctrl+b"); t.key("question")
-    check("help lists Ctrl+B f", t.wait_for(lambda: "chromeless" in t.text(), 5), t.text()[:300])
+    check("help lists Ctrl+B F", t.wait_for(lambda: re.search(r"(^|\s)F\s+chromeless", t.text(), re.M), 5), t.text()[:600])
     t.key("escape"); wait_placed(t, FULL, 8)
 
     # ---------------------------------------------------- ctl

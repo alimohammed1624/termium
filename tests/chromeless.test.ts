@@ -1,5 +1,7 @@
 // Chromeless mode's address line over a page's top row: the picture under it is cut, not squeezed.
 import { expect, test } from "bun:test";
+import { comboOf } from "../src/app";
+import { InputParser, type KeyEvent } from "../src/input";
 import { drawImage, placeholderCells } from "../src/terminal";
 
 test("a picture placed with its top pixels left out says so (y=), and only then", () => {
@@ -17,4 +19,19 @@ test("placeholder cells can leave the first rows as they are", () => {
   expect(cut).toContain("\x1b[2;1H");
   expect(cut).toContain("\x1b[3;1H");
   expect(cut.slice(cut.indexOf("\x1b[2;1H"))).toBe(all.slice(all.indexOf("\x1b[2;1H")));
+});
+
+// Chromeless is Ctrl+B F (Shift+f); plain Ctrl+B f is find's.
+test("F after the prefix is shift+f, from legacy and kitty input; f stays f", () => {
+  const combo = (data: string, kitty: boolean) => {
+    const events: KeyEvent[] = [];
+    const p = new InputParser((e) => { if (e.type === "key") events.push(e); });
+    p.kittyActive = kitty;
+    p.feed(data);
+    return comboOf(events[0]!);
+  };
+  expect(combo("F", false)).toBe("shift+f");
+  expect(combo("\x1b[102;2;70u", true)).toBe("shift+f");
+  expect(combo("f", false)).toBe("f");
+  expect(combo("\x1b[102;1;102u", true)).toBe("f");
 });

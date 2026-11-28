@@ -226,7 +226,7 @@ click runs it; the first row (go to or search for what's typed) is picked
 until you move, so Enter always goes. Start with `>` to list only actions
 and tabs.
 
-Chromeless mode (`Ctrl+B f`, the palette's "Toggle chromeless",
+Chromeless mode (`Ctrl+B F`, the palette's "Toggle chromeless",
 `termium --chromeless` or `termium ctl chromeless on|off|toggle`) gives the
 page every row and column of the terminal. Ctrl+L still opens the box above;
 `Ctrl+B n` / `p` / `1`-`9` switch tabs. A line over the top shows briefly
