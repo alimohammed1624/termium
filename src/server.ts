@@ -60,7 +60,7 @@ import {
 } from "./update";
 
 /** Environment a session runs with that a restart keeps (see restartSession). */
-const RESTART_ENV = ["XDG_DATA_HOME", "XDG_STATE_HOME", "TERMIUM_BROWSER", "TERMIUM_SEARCH", "TERMIUM_DOWNLOAD_DIR", "TMPDIR", "HOME"];
+const RESTART_ENV = ["XDG_DATA_HOME", "XDG_STATE_HOME", "TERMIUM_BROWSER", "TERMIUM_SEARCH", "TERMIUM_DOWNLOAD_DIR", "TERMIUM_NATIVE_SCROLLBAR", "TMPDIR", "HOME"];
 
 /** A queued agent command whose time ran out before its turn. */
 const SKIPPED = Symbol("skipped");

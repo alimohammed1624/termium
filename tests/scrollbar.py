@@ -25,9 +25,9 @@ def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{detail}]" if detail and not cond else ""))
     if not cond: failures.append(name)
 
-def page_value(expr):
+def page_value(expr, page="tall.html"):
     r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), profile, expr], capture_output=True, text=True, timeout=20)
-    vals = [p["value"] for p in json.loads(r.stdout or "[]") if "tall.html" in p["url"]]
+    vals = [p["value"] for p in json.loads(r.stdout or "[]") if page in p["url"]]
     return vals[0] if vals else None
 
 COLS, ROWS, CW, CH = 120, 40, 10, 20
@@ -56,7 +56,10 @@ try:
     check("page loads", t.wait_for(lambda: page_value("document.title") == "tall page", 30))
     t.wait_idle(1.0, 15)
     check("bar shows a thumb at the top", t.wait_for(lambda: thumb_rows()[:1] == [TOP], 10), bar())
-    first = thumb_rows()
+    # the browser's own scrollbar of the page is hidden; a scroll box inside keeps its own
+    check("the page's own scrollbar is hidden", page_value("innerWidth - document.documentElement.clientWidth") == 0)
+    check("a scroll box inside the page keeps its scrollbar",
+          (page_value("(e => e.offsetWidth - e.clientWidth)(document.getElementById('inner'))") or 0) > 0)
     t.shot(f"{OUT}/01-top.png")
 
     # wheel scrolls the page and the thumb follows
@@ -103,6 +106,25 @@ try:
     page_value("(document.body.innerHTML = '<p>short</p>', 1)")
     check("a page that doesn't scroll has no thumb", t.wait_for(lambda: thumb_rows() == [], 5), bar())
     t.shot(f"{OUT}/05-short.png")
+
+    # after a navigation, on a page whose CSP forbids style elements, the page's own bar stays hidden
+    t.key("ctrl+l"); t.key("ctrl+a"); t.key("ctrl+k"); t.type(f"{BASE}/csp.html"); t.key("enter")
+    check("CSP page loads", t.wait_for(lambda: page_value("document.title", "csp.html") == "csp page", 15))
+    page_value("(document.body.style.height = '5000px', 1)", "csp.html")
+    check("a CSP page's own scrollbar is hidden too", t.wait_for(lambda: page_value("innerWidth - document.documentElement.clientWidth", "csp.html") == 0, 5),
+          page_value("innerWidth - document.documentElement.clientWidth", "csp.html"))
+    check("...and termium's bar shows", t.wait_for(lambda: thumb_rows()[:1] == [TOP], 5), bar())
+finally:
+    t.close()
+
+# TERMIUM_NATIVE_SCROLLBAR=1 keeps the browser's own scrollbar
+t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "--profile", profile, f"{BASE}/tall.html"], cols=COLS, rows=ROWS, cell_w=CW, cell_h=CH, cwd=ROOT,
+         env={"TERMIUM_NATIVE_SCROLLBAR": "1"})
+try:
+    check("page loads (native scrollbar kept)", t.wait_for(lambda: page_value("document.title") == "tall page", 30))
+    w = page_value("innerWidth - document.documentElement.clientWidth")
+    check("TERMIUM_NATIVE_SCROLLBAR=1 keeps the page's own scrollbar", (w or 0) > 0, w)
+    check("...and termium's bar", t.wait_for(lambda: thumb_rows()[:1] == [TOP], 10), bar())
 finally:
     t.close()
     srv.terminate()

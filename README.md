@@ -225,6 +225,11 @@ The mouse works on everything: click tabs (middle click closes), spaces,
 the back, forward and reload buttons, the address, pane titles, and drag the
 divider between panes.
 
+Each pane's last column is a scrollbar: drag its thumb to scroll the page,
+or click above or below the thumb to scroll by a page. It replaces the
+browser's own scrollbar of the page (scroll boxes inside the page keep
+theirs); `TERMIUM_NATIVE_SCROLLBAR=1` keeps the browser's as well.
+
 ### Updates
 
 ```sh

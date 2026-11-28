@@ -38,7 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
-import { barCells, offsetFor, pageStep, thumb, type ScrollMetrics } from "./scrollbar";
+import { HIDE_PAGE_SCROLLBAR, barCells, offsetFor, pageStep, thumb, type ScrollMetrics } from "./scrollbar";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -823,6 +823,9 @@ export class App {
       this.cdp.send("Inspector.enable", {}, sid),
       this.ua ? this.cdp.send("Emulation.setUserAgentOverride", this.ua, sid) : null,
       this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: SELECT_POPUP, worldName: "termium", runImmediately: true }, sid),
+      // termium draws the page's scrollbar itself (TERMIUM_NATIVE_SCROLLBAR=1 keeps the browser's too).
+      process.env.TERMIUM_NATIVE_SCROLLBAR === "1" ? null :
+        this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: HIDE_PAGE_SCROLLBAR, worldName: "termium", runImmediately: true }, sid),
       this.cdp.send("Page.setInterceptFileChooserDialog", { enabled: true }, sid),
       // Cross-site iframes and dedicated workers are separate targets.
       this.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sid),

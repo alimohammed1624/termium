@@ -29,6 +29,22 @@ export interface BarCell {
   bg: "thumb" | "track";
 }
 
+/**
+ * Run in every new document (in termium's isolated world): hides the
+ * browser's own scrollbar of the top document, which would sit next to
+ * termium's. Only the viewport's: scroll boxes inside the page and frames
+ * keep theirs. A constructed stylesheet, which a page's Content-Security-
+ * Policy can't block and which adds nothing to the page's DOM.
+ */
+export const HIDE_PAGE_SCROLLBAR = `(() => {
+  if (window !== window.top) return;
+  try {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(":root { scrollbar-width: none !important; }");
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  } catch {}
+})();`;
+
 /** Lower eighth blocks: LOWER[k] fills the bottom k/8 of a cell. */
 const LOWER = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
