@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
+import { FOOTER_ACTIONS, FOOTER_MODES, FOOTER_TOAST, SEPARATOR, chipText, keyOf, layoutFooter, loadFooterMode, saveFooterMode, type FooterContext, type FooterMode } from "./footer";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -213,6 +214,8 @@ export interface AppOptions {
   /** The version this session runs. */
   version: string;
   update?: UpdateHooks;
+  /** Where the hint footer's on/auto/off choice is kept (not kept without one). */
+  footerFile?: string;
 }
 
 // ---------------------------------------------------------------- style
@@ -303,6 +306,7 @@ const HELP: [string, string][] = [
   ["Ctrl+B", "send Ctrl+B to the page"],
   ["d", "detach (termium attach resumes)"],
   ["U", "update termium / restart into it"],
+  ["i", "hint footer: on / only with ^B / off"],
   ["q", "quit"],
   ["?", "this help"],
 ];
@@ -365,6 +369,9 @@ export class App {
   private navHits: { back: [number, number]; fwd: [number, number]; reload: [number, number]; url: [number, number] } | null = null;
   private spaceHits: { row: number; index: number }[] = [];
   private newSpaceRow = -1;
+  /** The hint footer (see footer.ts), and where its actions are on screen. */
+  private footerMode: FooterMode = "on";
+  private footerHits: { row: number; start: number; end: number; combo: string; ctx: FooterContext }[] = [];
 
   private nextImage = 100;
   private nextTabId = 1;
@@ -382,6 +389,8 @@ export class App {
   private mouseButtons = 0;
   private lastClick = { time: 0, x: 0, y: 0, button: -1, count: 0 };
   private drag: { sep: SepGeom<Page>; moved: boolean } | null = null;
+  /** Mouse buttons that went down on termium's bars and haven't come up yet. */
+  private chromeHeld = new Set<number>();
   private hoverPage: Page | null = null;
   private chromeQueued = false;
   private started = false;
@@ -393,7 +402,9 @@ export class App {
   constructor(
     private cdp: CDP,
     private opts: AppOptions,
-  ) {}
+  ) {
+    this.footerMode = opts.footerFile ? loadFooterMode(opts.footerFile) : "on";
+  }
 
   // ---------------------------------------------------------- startup
 
@@ -1584,9 +1595,78 @@ export class App {
     return (this.sidebar || this.mode === "spaces") && this.cols >= SIDEBAR_W + 30 ? SIDEBAR_W + 1 : 1;
   }
 
-  private paneArea(): Rect {
+  private paneArea(footer = this.footerRows()): Rect {
     const col = this.mainCol();
-    return { col, row: TOP_ROWS + 1, cols: Math.max(1, this.cols - col + 1), rows: Math.max(1, this.rows - TOP_ROWS) };
+    return { col, row: TOP_ROWS + 1, cols: Math.max(1, this.cols - col + 1), rows: Math.max(1, this.rows - TOP_ROWS - footer) };
+  }
+
+  /** The hint footer's own row under the panes (with the footer on, and never at the cost of a pane). */
+  private footerRows(): number {
+    if (this.footerMode !== "on" || this.rows < TOP_ROWS + 4) return 0;
+    const tab = this.tab;
+    if (!tab || tab.zoomed || leaves(tab.root).length < 2) return 1;
+    const shown = (footer: number) =>
+      computeLayout(tab.root, this.paneArea(footer), true).panes.filter((p) => p.content.cols > 0 && p.content.rows > 0).length;
+    return shown(1) < shown(0) ? 0 : 1;
+  }
+
+  /** What the person is doing, for the hint footer (null: no hints, as in the update box). */
+  private footerContext(): FooterContext | null {
+    if (this.mode === "update") return null;
+    if (this.mode !== "normal") return this.mode;
+    const p = this.prompt;
+    if (!p) return "normal";
+    if (p.kind !== "dialog") return p.kind;
+    const type = p.page.dialog?.type;
+    return type === "beforeunload" ? "leave" : type === "alert" ? "alert" : "dialog";
+  }
+
+  /** The hint footer's actions in row `row` from `col`, `w` wide (and their click areas). */
+  private drawFooter(row: number, col: number, w: number, rowBg = bg(C.mantle)): string {
+    this.footerHits = this.footerHits.filter((h) => h.row !== row);
+    const ctx = this.footerContext();
+    let s = at(row, col) + rowBg + " ".repeat(Math.max(0, w)) + at(row, col);
+    if (!ctx) return s + RESET;
+    let used = 0;
+    const tab = this.tab;
+    const split = (dir: Dir) => !!(tab && this.focused && enclosingSplit(tab.root, this.focused, dir));
+    const state = {
+      panes: !!tab && leaves(tab.root).length > 1,
+      tabs: (this.space?.tabs.length ?? 0) > 1,
+      spaces: this.spaces.length > 1,
+      sideBySide: split("h"),
+      stacked: split("v"),
+    };
+    for (const { action, start, end } of layoutFooter(FOOTER_ACTIONS[ctx], w, state)) {
+      if (start > used) s += rowBg + fg(C.surface1) + SEPARATOR;
+      const label = chipText(action).slice(0, -(action.key.length + 1));
+      s += rowBg + fg(C.subtext) + label + fg(C.mauve) + BOLD + action.key + "\x1b[22m ";
+      this.footerHits.push({ row, start: col + start, end: col + end, combo: action.combo, ctx });
+      used = end;
+    }
+    return s + RESET;
+  }
+
+  /** With the footer only shown with the prefix: the hints take the address line while a mode waits for a key. */
+  private hintsInUrlBar(): boolean {
+    return this.footerMode === "auto" && (this.mode === "prefix" || this.mode === "resize" || this.mode === "spaces");
+  }
+
+  /** ^B i: the hint footer goes on → only with ^B → off → on, remembered for later sessions. */
+  private cycleFooter(): void {
+    this.footerMode = FOOTER_MODES[(FOOTER_MODES.indexOf(this.footerMode) + 1) % FOOTER_MODES.length]!;
+    const saved = !this.opts.footerFile || saveFooterMode(this.opts.footerFile, this.footerMode);
+    this.showToast(FOOTER_TOAST[this.footerMode] + (saved ? "" : " (this session only: couldn't save it)"), 4000);
+    this.relayoutAndRedraw();
+  }
+
+  /** A click on a hint presses its keys, so it does just what they do. */
+  private footerClick(col: number, row: number): boolean {
+    const hit = this.footerHits.find((h) => h.row === row && col >= h.start && col < h.end);
+    // (Drawn for another moment, e.g. a dialog the page has since closed: its keys would mean something else now.)
+    if (!hit || hit.ctx !== this.footerContext()) return false;
+    for (const combo of hit.combo.split(" ")) this.onKey(keyOf(combo));
+    return true;
   }
 
   /** Recomputes pane geometry and fixes every page's viewport and screencast. */
@@ -2151,17 +2231,21 @@ export class App {
     if (mainCol > 1) s += this.drawSidebar();
     s += this.drawTabBar(mainCol, mainW);
     s += this.drawUrlBar(mainCol, mainW);
+    this.footerHits = this.footerHits.filter((h) => h.row === 2 && this.hintsInUrlBar());
+    // Drawn last, over anything that runs into its row (a long dialog message
+    // in a short pane), so what shows there is what a click there does.
+    const footer = () => (this.footerRows() ? this.drawFooter(this.rows, mainCol, mainW) : "");
     if (this.mode === "help") {
-      out(this.sync(s + RESET + this.helpOverlay() + this.cursorSeq()));
+      out(this.sync(s + RESET + this.helpOverlay() + footer() + this.cursorSeq()));
       return;
     }
     if (this.mode === "update") {
-      out(this.sync(s + RESET + this.updateOverlay() + this.cursorSeq()));
+      out(this.sync(s + RESET + this.updateOverlay() + footer() + this.cursorSeq()));
       return;
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
-    out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
+    out(this.sync(s + RESET + this.takeStale() + footer() + this.cursorSeq()));
   }
 
   private drawSidebar(): string {
@@ -2296,6 +2380,13 @@ export class App {
     const right = (toast || notice.text) + zoom;
     const rightW = Math.min(width(right), Math.max(0, notice.text ? w - 30 - modeW : Math.floor(w / 2)));
 
+    if (this.hintsInUrlBar()) {
+      this.promptCursor = null;
+      this.navHits = null;
+      this.noticeHit = null;
+      const hintW = Math.max(0, w - modeW);
+      return this.drawFooter(2, col, hintW, barBg) + at(2, col + hintW) + bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
+    }
     const prompt = this.prompt;
     if (prompt && prompt.kind === "confirm") {
       const text = fit(` ⚠ ${prompt.message}  [Enter] Yes  [Esc] No`, w - modeW);
@@ -3152,6 +3243,7 @@ export class App {
       case "q": void this.requestQuit(); return;
       case "d": this.opts.detach(); return;
       case "shift+u": this.openUpdate(); return;
+      case "i": this.cycleFooter(); return;
       case "?":
         this.mode = "help";
         this.fullRedraw();
@@ -3611,13 +3703,17 @@ export class App {
     if (this.mode === "help") {
       if (ev.action === "press") {
         this.mode = "normal";
+        this.chromeHeld.add(ev.button); // (its release isn't the page's)
         this.fullRedraw();
       }
       return;
     }
     if (this.mode === "update") {
       // A click anywhere puts the box away (unanswered; the notice stays).
-      if (ev.action === "press") this.closeUpdate(this.updateBox?.state === "failed");
+      if (ev.action === "press") {
+        this.chromeHeld.add(ev.button);
+        this.closeUpdate(this.updateBox?.state === "failed");
+      }
       return;
     }
 
@@ -3635,6 +3731,13 @@ export class App {
       this.leaveHover();
     }
 
+    // A press termium's own bars took: its moves and release are theirs too
+    // (even if the click moved a page under the pointer, as hiding the footer does).
+    if ((ev.action === "release" || ev.action === "move") && this.chromeHeld.has(ev.button)) {
+      if (ev.action === "release") this.chromeHeld.delete(ev.button);
+      return;
+    }
+
     // Pointer captured by a page while a button is held.
     const captured = this.mouseCapture;
     if (captured && (ev.action === "move" || ev.action === "release")) {
@@ -3642,7 +3745,12 @@ export class App {
       return;
     }
 
-    if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
+    // (A press means that button's earlier release was lost, e.g. in help.)
+    if (ev.action === "press") this.chromeHeld.delete(ev.button);
+    if (ev.action === "press" && this.chromeClick(ev, col, row)) {
+      if (!this.drag) this.chromeHeld.add(ev.button);
+      return;
+    }
 
     const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
     if (!g) return;
@@ -3660,6 +3768,11 @@ export class App {
   /** Handles clicks on the sidebar, tab bar, URL bar, pane headers and separators. */
   private chromeClick(ev: MouseEvent, col: number, row: number): boolean {
     const mainCol = this.mainCol();
+    // (Mouse back/forward buttons still navigate from there.)
+    if (col >= mainCol && ev.button < 7 && (row === this.rows && this.footerRows() || row === 2 && this.hintsInUrlBar())) {
+      if (ev.button === 0) this.footerClick(col, row);
+      return true;
+    }
     if (col < mainCol) {
       if (ev.button !== 0) return true;
       const hit = this.spaceHits.find((h) => h.row === row);
