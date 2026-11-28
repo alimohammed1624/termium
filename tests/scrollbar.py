@@ -134,6 +134,36 @@ try:
     t.key("enter"); time.sleep(0.8)
     check("a click on the bar under a dialog doesn't scroll", abs((scroll_y() or 0) - y0) <= 2, (y0, scroll_y()))
 
+    # a dialog that comes up during a drag ends it: no jump once it's answered
+    page_value("(scrollTo(0, 1500), 1)"); time.sleep(0.8)
+    t.wait_for(lambda: thumb_rows(), 3)
+    y0 = scroll_y()
+    t.mouse(x, thumb_y(), 0, "press")
+    page_value("(setTimeout(() => alert('DRAG-ALERT'), 0), 1)")
+    check("alert during a drag shown", t.wait_text("DRAG-ALERT", 5))
+    for py in range(thumb_y(), ROWS * CH, 20):
+        t.mouse(x, py, 0, "drag"); time.sleep(0.01)
+    t.mouse(x, ROWS * CH - 5, 0, "release"); time.sleep(0.2)
+    t.key("enter"); time.sleep(1.0)
+    check("a dialog during a drag stops it", abs((scroll_y() or 0) - y0) <= 2, (y0, scroll_y()))
+
+    # track clicks each count, even when the page is slow to scroll
+    page_value("(scrollTo(0, 0), window.addEventListener('scroll', () => { const t = Date.now(); while (Date.now() - t < 400); }), 1)")
+    time.sleep(0.8)
+    step = page_value("innerHeight * 0.875")
+    for _ in range(3):
+        t.click(x, (BOTTOM - 1) * CH + 10); time.sleep(0.1)
+    check("three quick track clicks scroll three pages", t.wait_for(lambda: abs((scroll_y() or 0) - 3 * step) <= 3, 8), (scroll_y(), 3 * step))
+    page_value("(location.reload(), 1)")
+    t.wait_for(lambda: page_value("document.title") == "tall page", 15); t.wait_idle(1.0, 10)
+
+    # a page that locked scrolling (overflow hidden on the root) isn't scrolled by the bar either
+    page_value("(document.documentElement.style.overflow = 'hidden', scrollTo(0, 0), 1)"); time.sleep(0.5)
+    t.scroll(x, 300, down=True, n=5); time.sleep(0.3)
+    t.click(x, (BOTTOM - 1) * CH + 10); time.sleep(0.8)
+    check("the bar doesn't scroll a locked page", scroll_y() == 0, scroll_y())
+    page_value("(document.documentElement.style.overflow = '', 1)")
+
     # the page stops scrolling (its content shrinks): the thumb goes away
     page_value("(document.body.innerHTML = '<p>short</p>', 1)")
     check("a page that doesn't scroll has no thumb", t.wait_for(lambda: thumb_rows() == [], 5), bar())

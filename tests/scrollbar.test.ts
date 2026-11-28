@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { computeLayout, leaf, splitLeaf } from "../src/layout";
-import { barCells, offsetFor, pageStep, scrolls, thumb } from "../src/scrollbar";
+import { barCells, offsetFor, scrolls, thumb } from "../src/scrollbar";
 
 describe("scrollbar", () => {
   test("no bar when the page doesn't scroll", () => {
@@ -44,12 +44,6 @@ describe("scrollbar", () => {
     expect(offsetFor({ y: 5, view: 100, total: 400 }, 1, 8)).toBe(5);
     // Round trip.
     expect(thumb({ ...m, y: offsetFor(m, 10, 42) }, 10)!.top).toBe(42);
-  });
-
-  test("page steps stay in range", () => {
-    expect(pageStep({ y: 0, view: 100, total: 400 }, 1)).toBe(88);
-    expect(pageStep({ y: 280, view: 100, total: 400 }, 1)).toBe(300);
-    expect(pageStep({ y: 50, view: 100, total: 400 }, -1)).toBe(0);
   });
 
   test("marks land in their row", () => {

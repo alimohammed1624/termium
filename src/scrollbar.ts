@@ -73,10 +73,22 @@ export function offsetFor(m: ScrollMetrics, rows: number, top: number): number {
   return Math.round((Math.max(0, Math.min(room, top)) * max) / room);
 }
 
-/** The offset after one page up (-1) or down (1), as a browser's scrollbar track click does. */
-export function pageStep(m: ScrollMetrics, dir: -1 | 1): number {
-  const max = Math.max(0, m.total - m.view);
-  return Math.max(0, Math.min(max, Math.round(m.y + dir * m.view * 0.875)));
+/**
+ * An expression that scrolls the page's document: to `n` (CSS px), by `n`,
+ * or by `n` pages (7/8 of the viewport, as a browser's track click). Relative
+ * steps are worked out in the page, from where it is then. Nothing happens
+ * while the page has locked scrolling (overflow hidden on the root, or on
+ * the body when the root leaves it to the body), as the wheel does nothing then.
+ */
+export function scrollScript(how: "to" | "by" | "pages", n: number): string {
+  const top = how === "to" ? `${n}` : how === "by" ? `scrollY + ${n}` : `scrollY + ${n} * innerHeight * 0.875`;
+  return `(() => {
+  const root = document.documentElement;
+  const of = (e) => (e ? getComputedStyle(e).overflowY : "visible");
+  const v = of(root) === "visible" ? of(document.body) : of(root);
+  if (v === "hidden" || v === "clip") return;
+  (document.scrollingElement || root).scrollTo({ top: ${top}, behavior: "instant" });
+})()`;
 }
 
 /**

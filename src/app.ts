@@ -38,7 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
-import { HIDE_PAGE_SCROLLBAR, barCells, offsetFor, pageStep, thumb, type ScrollMetrics } from "./scrollbar";
+import { HIDE_PAGE_SCROLLBAR, barCells, offsetFor, scrollScript, thumb, type ScrollMetrics } from "./scrollbar";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -3683,7 +3683,9 @@ export class App {
     // A thumb drag ends when the button is let go, wherever (a move without
     // it held means the release went elsewhere).
     if (this.barDrag) {
-      if (ev.action === "move" && ev.button === 0 && !this.covered()) return this.dragBar(py);
+      const p = this.barDrag.page;
+      const inert = this.covered() || !!p.dialog || p === this.panelPage;
+      if (ev.action === "move" && ev.button === 0 && !inert) return this.dragBar(py);
       if (ev.action === "release" || ev.action === "move") this.endBarDrag();
       if (ev.action === "release") return;
     }
@@ -3739,10 +3741,9 @@ export class App {
       const page = g.item;
       // Inert while a dialog is up (a scroll would wait for it, then jump).
       if (page.dialog || page === this.panelPage) return;
-      const m = page.scroll;
       // The wheel scrolls the document (whatever is under the page's right edge).
-      if (ev.action === "wheel" && m && (ev.wheel === "up" || ev.wheel === "down")) {
-        this.scrollPageTo(page, Math.max(0, Math.min(m.total - m.view, m.y + (ev.wheel === "up" ? -60 : 60))), true);
+      if (ev.action === "wheel" && (ev.wheel === "up" || ev.wheel === "down")) {
+        this.scrollPage(page, scrollScript("by", ev.wheel === "up" ? -60 : 60));
       } else if (ev.action === "press" && ev.button === 0) this.pressBar(page, barPane.bar!, py);
       return;
     }
@@ -3834,8 +3835,8 @@ export class App {
     const t = thumb(m, bar.rows);
     if (!m || !t) return;
     const e = ((py - (bar.row - 1) * this.cellH) / this.cellH) * 8;
-    if (e < t.top) this.scrollPageTo(page, pageStep(m, -1));
-    else if (e >= t.top + t.len) this.scrollPageTo(page, pageStep(m, 1));
+    if (e < t.top) this.scrollPage(page, scrollScript("pages", -1));
+    else if (e >= t.top + t.len) this.scrollPage(page, scrollScript("pages", 1));
     else {
       this.barDrag = { page, grab: e - t.top };
       this.redrawScrollbar(page);
@@ -3858,21 +3859,14 @@ export class App {
     if (y === m.y) return;
     page.scroll = { ...m, y };
     this.redrawScrollbar(page);
-    this.scrollPageTo(page, y);
+    // Only the latest position matters: coalesced like pointer motion.
+    const expression = scrollScript("to", y);
+    this.queueMove(page, () => this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {}));
   }
 
-  /**
-   * Scrolls the page's document to `y` (CSS px) at once; while dragging,
-   * only the latest position is sent. `follow`: show the new position now
-   * (wheel steps build on it).
-   */
-  private scrollPageTo(page: Page, y: number, follow = false): void {
-    if (follow && page.scroll) {
-      page.scroll = { ...page.scroll, y };
-      this.redrawScrollbar(page);
-    }
-    const expression = `(document.scrollingElement || document.documentElement).scrollTo({ top: ${y}, behavior: "instant" })`;
-    this.queueMove(page, () => this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {}));
+  /** Runs a relative scroll (scrollScript) in the page; each one counts, so none is coalesced. */
+  private scrollPage(page: Page, expression: string): void {
+    this.cdp.send("Runtime.evaluate", { expression }, page.sessionId).catch(() => {});
   }
 
   private pageMouse(page: Page, ev: MouseEvent, px: number, py: number): void {
