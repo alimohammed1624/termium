@@ -50,6 +50,7 @@ t = Term(["bun", os.path.join(ROOT, "src/main.ts"), "-s", SESSION, "--profile", 
          cols=COLS, rows=ROWS, cwd=ROOT)
 ENV = dict(os.environ, XDG_RUNTIME_DIR=t.runtime_dir, XDG_DATA_HOME=os.path.join(t.own_root, "data"),
            XDG_STATE_HOME=os.path.join(t.own_root, "state"), TERMIUM_NO_UPDATE_CHECK="1")
+ENV.pop("TERM", None)  # (drive.Term sets its own)
 clients = [t]
 
 def ctl(*args, main=os.path.join(ROOT, "src/main.ts")):
@@ -129,6 +130,31 @@ try:
     t.key("ctrl+b"); t.key("n")
     check("Ctrl+B n switches to the next", t.wait_for(lambda: active_tab() != first, 5), ctl("tabs"))
     check("...the page fills the terminal", wait_placed(t, FULL, 8), placed(t))
+    t.key("ctrl+l"); time.sleep(0.4); t.type(">clipboard reader"); time.sleep(0.5); t.key("enter")
+    check("a tab picked in the palette says which over the top too", t.wait_for(lambda: "Tab 1 of 2" in t.line(1), 5), t.line(1))
+    check("...and shows it", t.wait_for(lambda: active_tab() == first, 5), ctl("tabs"))
+    wait_placed(t, FULL, 8)
+    t.key("alt+equal")
+    check("zoom says its level over the top", t.wait_for(lambda: "Zoom 110%" in t.line(1), 5), t.line(1))
+    t.key("alt+0"); wait_placed(t, FULL, 8)
+
+    # ---------------------------------------------------- splits: the line over the top covers pane headers
+    t.key("ctrl+b"); t.key("v"); time.sleep(1.5); t.key("escape")
+    check("a split: two panes, each with a header on row 1", t.wait_for(lambda: len(placed(t)) == 2 and all(p[0] == 2 for p in placed(t)), 10), placed(t))
+    t.key("ctrl+b"); t.key("shift+w")
+    check("the rename prompt shows over the pane headers", t.wait_for(lambda: "Rename space" in t.line(1), 5), t.line(1))
+    t.key("escape")
+    check("...the resize mode label too", (t.key("ctrl+b"), t.key("r"), t.wait_for(lambda: "RESIZE" in t.line(1), 5))[2], t.line(1))
+    t.key("escape"); time.sleep(0.3)
+    t.key("ctrl+b"); t.key("x")
+    check("back to one pane filling the terminal", wait_placed(t, FULL, 10), placed(t))
+    ev("window.__wh = 0; addEventListener('wheel', () => __wh++, true); 0")
+    t.key("ctrl+b"); t.key("shift+w"); t.wait_for(lambda: "Rename space" in t.line(1), 5)
+    t.scroll(COLS * 5, 5, n=3); time.sleep(0.6)
+    check("the wheel over that line doesn't reach the page under it", ev("__wh") == 0, ev("__wh"))
+    t.scroll(COLS * 5, 100, n=3); time.sleep(0.6)
+    check("...below it, it does", (ev("__wh") or 0) > 0, ev("__wh"))
+    t.key("escape"); wait_placed(t, FULL, 8)
 
     # ---------------------------------------------------- the palette, the help
     t.key("ctrl+l"); time.sleep(0.4); t.type(">chromeless"); time.sleep(0.5)

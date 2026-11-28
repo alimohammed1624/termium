@@ -374,7 +374,8 @@ export class App {
   private mode: Mode = "normal";
   private prompt: Prompt | null = null;
   private spaceCursor = 0;
-  private toast: { text: string; until: number } | null = null;
+  /** `nav`: only says a page is loading or loaded (any other toast outranks it). */
+  private toast: { text: string; until: number; nav?: boolean } | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   private geom = new Map<Page, PaneGeom<Page>>();
@@ -1121,8 +1122,8 @@ export class App {
     if (loading) page.crashed = false;
     // Chromeless, a brief line over the top says the focused page is loading, then what it is.
     const say = this.chromeless && page === this.focused;
-    if (loading && say) this.showToast("◌ Loading…", 2000);
-    if (!loading) void this.refreshInfo(page).then(() => say && page === this.focused && this.showToast(pageTitle(page), 1500));
+    if (loading && say) this.navToast("◌ Loading…", 2000);
+    if (!loading) void this.refreshInfo(page).then(() => say && page === this.focused && this.navToast(pageTitle(page), 1500));
     this.queueChrome();
   }
 
@@ -1636,7 +1637,9 @@ export class App {
   /** Chromeless: something needs the address line for now (a toast, a question, a key prefix). */
   private stripWanted(): boolean {
     const p = this.prompt;
-    return (!!this.toast && this.toast.until > Date.now()) || (!!p && p.kind !== "url") || this.mode === "prefix" || this.mode === "resize";
+    // (Spaces mode shows the sidebar, unless the terminal is too narrow for it.)
+    const spaces = this.mode === "spaces" && this.mainCol() === 1;
+    return (!!this.toast && this.toast.until > Date.now()) || (!!p && p.kind !== "url") || this.mode === "prefix" || this.mode === "resize" || spaces;
   }
 
   /** Recomputes pane geometry and fixes every page's viewport and screencast. */
@@ -2099,6 +2102,11 @@ export class App {
     return true;
   }
 
+  /** The cell shows that pane's page (not the chromeless address line over its top row). */
+  private onPage(g: PaneGeom<Page>, col: number, row: number): boolean {
+    return inRect(g.content, col, row) && !(this.strip && row === 1);
+  }
+
   /** The pane's top row is under the chromeless address line (shown for now). */
   private underStrip(r: Rect): boolean {
     return this.strip && r.row === 1 && r.rows > 1;
@@ -2232,8 +2240,10 @@ export class App {
       this.navHits = null;
       this.noticeHit = null;
       this.promptCursor = null;
-      if (strip) s += this.drawUrlBar(mainCol, mainW, 1);
     }
+    // (Drawn last, over pane headers and a dialog's panel on that row.)
+    const stripLine = strip ? this.drawUrlBar(mainCol, mainW, 1) : "";
+    s += stripLine;
     const palette = this.prompt?.kind === "url" ? this.prompt : null;
     if (!palette) this.paletteHits = null;
     if (this.paletteShown && !palette) {
@@ -2255,6 +2265,7 @@ export class App {
     }
     s += this.drawPaneChrome();
     s += this.dialogPanel();
+    s += stripLine;
     out(this.sync(s + RESET + this.takeStale() + this.cursorSeq()));
   }
 
@@ -3212,6 +3223,23 @@ export class App {
     return s + RESET;
   }
 
+  /** A loading / loaded toast: never in place of another toast still showing. */
+  private navToast(text: string, ms: number): void {
+    const t = this.toast;
+    if (t && !t.nav && t.until > Date.now()) return;
+    this.showToast(text, ms);
+    this.toast!.nav = true;
+  }
+
+  /** Chromeless, there's no tab bar to say which tab shows: a toast does. (Call before the redraw: one redraw shows it.) */
+  private sayTab(): void {
+    const space = this.space;
+    const tab = this.tab;
+    if (!this.chromeless || !space || !tab) return;
+    const where = this.spaces.length > 1 ? `${space.name}: ` : "";
+    this.showToast(`${where}Tab ${space.active + 1} of ${space.tabs.length}: ${pageTitle(tab.focused)}`, 1500);
+  }
+
   showToast(text: string, ms = 3000): void {
     this.toast = { text, until: Date.now() + ms };
     if (this.toastTimer) clearTimeout(this.toastTimer);
@@ -3859,6 +3887,7 @@ export class App {
   private setZoom(z: number): void {
     this.zoom = Math.max(0.3, Math.min(5, Math.round(z * 100) / 100));
     if (Math.abs(this.zoom - 1) < 0.04) this.zoom = 1;
+    if (this.chromeless) this.showToast(`Zoom ${Math.round(this.zoom * 100)}%`, 1500);
     this.relayoutAndRedraw();
   }
 
@@ -3890,8 +3919,7 @@ export class App {
     if (i < 0 || i >= n || i === space.active) return;
     space.active = i;
     this.prompt = this.prompt?.kind === "rename" ? this.prompt : null;
-    // Chromeless, there's no tab bar to say which tab this is. (Set first: one redraw shows it.)
-    if (this.chromeless) this.showToast(`Tab ${i + 1} of ${n}: ${pageTitle(space.tabs[i]!.focused)}`, 1500);
+    this.sayTab();
     this.relayoutAndRedraw();
   }
 
@@ -3899,6 +3927,7 @@ export class App {
     if (i < 0 || i >= this.spaces.length) return;
     this.activeSpace = i;
     this.prompt = null;
+    this.sayTab();
     this.relayoutAndRedraw();
   }
 
@@ -3973,7 +4002,7 @@ export class App {
     }
 
     if (ev.action === "move" && this.hoverPage && !this.mouseCapture &&
-        ![...this.geom.values()].some((p) => p.item === this.hoverPage && inRect(p.content, col, row))) {
+        ![...this.geom.values()].some((p) => p.item === this.hoverPage && this.onPage(p, col, row))) {
       this.leaveHover();
     }
 
@@ -3993,7 +4022,7 @@ export class App {
 
     if (ev.action === "press" && this.chromeClick(ev, col, row)) return;
 
-    const g = [...this.geom.values()].find((p) => inRect(p.content, col, row));
+    const g = [...this.geom.values()].find((p) => this.onPage(p, col, row));
     if (!g) return;
     if (ev.action === "press") {
       if (this.prompt?.kind === "rename") {
@@ -4253,11 +4282,13 @@ export class App {
   agentSelect(page: Page): boolean {
     const loc = this.locate(page);
     if (!loc) return false;
+    const shown = this.tab;
     this.activeSpace = this.spaces.indexOf(loc.space);
     loc.space.active = loc.space.tabs.indexOf(loc.tab);
     loc.tab.focused = page;
     if (loc.tab.zoomed && !leaves(loc.tab.root).includes(page)) loc.tab.zoomed = false;
     if (this.prompt?.kind === "url" || this.prompt?.kind === "rename") this.prompt = null;
+    if (this.tab !== shown) this.sayTab();
     this.relayoutAndRedraw();
     return true;
   }
