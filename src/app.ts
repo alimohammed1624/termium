@@ -2294,7 +2294,7 @@ export class App {
       const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
       // The title gives way first; the whole label is cut only if its number and pane count don't fit.
       const frame = width(item(active, 0));
-      const text = room > frame ? item(active, Math.min(22, room - frame)) : clip(item(active, Infinity), room, C.text, C.background);
+      const text = room >= frame ? item(active, Math.min(22, room - frame)) : clip(item(active, Infinity), room, C.text, C.background);
       s += bg(C.background) + fg(C.text) + BOLD + text + RESET + bg(C.backdrop);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
       used += width(text);
