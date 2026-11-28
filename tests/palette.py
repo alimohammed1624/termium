@@ -156,6 +156,24 @@ try:
     check("Esc and a click at once: the click doesn't reach the page either", ev == [] or (isinstance(ev, dict) and ev.get("value") == []), ev)
     check("...nor runs the row", "110%" not in t.line(2), t.line(2))
 
+    # A button pressed just as the box closes (Esc and a press at once) keeps its release from the page.
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.wait_idle(0.4, 5)
+    ctl("eval", "__ev.length = 0")
+    x, y = (t.cols - 4) * t.cell_w, (t.rows - 3) * t.cell_h
+    t.write(f"\x1b[27u\x1b[<0;{x + 1};{y + 1}M"); time.sleep(0.8); t.write(f"\x1b[<0;{x + 1};{y + 1}m"); time.sleep(0.8)
+    ev = ctl("eval", "__ev")
+    check("a press as it closes: its release doesn't reach the page", ev == [] or (isinstance(ev, dict) and ev.get("value") == []), ev)
+    # A click that opens help: after Esc, the first click on the page works.
+    t.key("ctrl+l"); t.wait_for(popup_open, 3); t.type(">keyboard"); t.wait_idle(0.4, 5)
+    r = row_with("Keyboard shortcuts"); t.click_cell(t.line(r).find("Keyboard") + 2, r)
+    check("a click on 'Keyboard shortcuts' opens help", t.wait_text("termium keys", 5), t.text())
+    t.key("escape"); time.sleep(1.0)
+    ctl("eval", "__ev.length = 0")
+    t.click_cell(t.cols - 4, t.rows - 3); time.sleep(0.8)
+    ev = ctl("eval", "__ev")
+    got = ev if isinstance(ev, list) else (ev or {}).get("value")
+    check("after help closes, the first click reaches the page", isinstance(got, list) and "click" in got, ev)
+
     # '>' lists tabs too (Ctrl+B 1-9).
     t.key("ctrl+l"); t.wait_for(popup_open, 3); t.type(">Ctrl+B 1"); t.wait_idle(0.4, 5)
     r = row_with("▣ ")

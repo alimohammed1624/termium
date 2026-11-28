@@ -1566,7 +1566,7 @@ export class App {
       }
     }
     this.mousePressedAt = null;
-    this.paletteSwallow = false;
+    this.paletteHeld.clear();
     this.mouseCapture = null;
     this.mouseButtons = 0;
     this.drag = null;
@@ -2161,8 +2161,8 @@ export class App {
 
   /** The popup address bar was drawn: once it's gone, the pages are drawn again. */
   private paletteShown = false;
-  /** A mouse button pressed on the popup address bar is still down: its moves and release go nowhere. */
-  private paletteSwallow = false;
+  /** Mouse buttons pressed on the popup address bar (or just after it closed) and still down: their moves and releases go nowhere. */
+  private paletteHeld = new Set<number>();
 
   private drawChrome(): void {
     if (!this.started || this.closingAll || !this.attached) return;
@@ -3562,7 +3562,7 @@ export class App {
       return;
     }
     if (ev.action !== "press") return;
-    this.paletteSwallow = true;
+    this.paletteHeld.add(ev.button);
     if (!inside) {
       // A click on the address keeps the draft (as it always did).
       const n = this.navHits;
@@ -3873,6 +3873,17 @@ export class App {
     const col = Math.floor(px / this.cellW) + 1;
     const row = Math.floor(py / this.cellH) + 1;
 
+    // A gesture the popup address bar took ends there, whatever it opened
+    // (help, the update box): its moves and releases reach nothing else.
+    if (this.paletteHeld.size) {
+      if (ev.action === "press") this.paletteHeld.add(ev.button);
+      else if (ev.action === "release") {
+        if (ev.button === 3) this.paletteHeld.clear(); // (a release that doesn't say which)
+        else this.paletteHeld.delete(ev.button);
+      }
+      return;
+    }
+
     if (this.mode === "help") {
       if (ev.action === "press") {
         this.mode = "normal";
@@ -3906,10 +3917,10 @@ export class App {
       this.pageMouse(captured, ev, px, py);
       return;
     }
-    // A click the popup took ends there (its release and moves too), and
-    // nothing reaches a page until the pages are drawn again after it.
-    if (this.paletteSwallow || (this.paletteShown && this.prompt?.kind !== "url")) {
-      if (ev.action === "release") this.paletteSwallow = false;
+    // Nothing reaches a page until the pages are drawn again after the popup
+    // (a button pressed meanwhile is the popup's too, see paletteHeld).
+    if (this.paletteShown && this.prompt?.kind !== "url") {
+      if (ev.action === "press") this.paletteHeld.add(ev.button);
       return;
     }
     if (this.prompt?.kind === "url") return this.paletteMouse(this.prompt, ev, col, row);
