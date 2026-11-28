@@ -68,7 +68,7 @@ def mods_value(mods: set[str]) -> int:
 
 
 class Term:
-    def __init__(self, argv, cols=160, rows=45, cell_w=10, cell_h=20, cwd=None, env=None, passthrough=False):
+    def __init__(self, argv, cols=160, rows=45, cell_w=10, cell_h=20, cwd=None, env=None, passthrough=False, colors=None):
         """With passthrough, run inside a real terminal: the child's output goes
         to our stdout and the terminal's replies come back from our stdin, so the
         real terminal renders and answers; scripted input is mixed in.
@@ -80,6 +80,9 @@ class Term:
         XDG_STATE_HOME default to private ones as well (profiles, logs), all
         under one temp dir removed on close or when Python exits."""
         self.passthrough = passthrough
+        # The terminal's colors, answered to OSC 10/11/4 queries: {"fg": "rrggbb",
+        # "bg": ..., "ansi": {12: ...}}. None: the queries go unanswered.
+        self.colors = colors
         env = dict(env or {})
         # No update check (GitHub, and an update box taking keys) unless a
         # test asks for one (tests/update.py, with a fake GitHub).
@@ -269,6 +272,14 @@ class Term:
             replies += f"\x1b[6;{self.cell_h};{self.cell_w}t".encode()
         if b"\x1b[14t" in data:
             replies += f"\x1b[4;{self.rows * self.cell_h};{self.cols * self.cell_w}t".encode()
+        if self.colors:
+            for m in re.finditer(rb"\x1b\](10|11|4;(\d+));\?(?:\x1b\\|\x07)", data):
+                which = m.group(1)
+                c = (self.colors.get("fg") if which == b"10" else self.colors.get("bg") if which == b"11"
+                     else self.colors.get("ansi", {}).get(int(m.group(2))))
+                if c:
+                    spec = "rgb:" + "/".join(c[i:i + 2] * 2 for i in (0, 2, 4))
+                    replies += b"\x1b]" + which + b";" + spec.encode() + b"\x1b\\"
         if re.search(rb"\x1b\[0?c", data):
             replies += b"\x1b[?62;22c"
         if replies:

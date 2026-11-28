@@ -41,7 +41,23 @@ export type InputEvent =
   | { type: "kittyKeyboard"; flags: number }
   | { type: "kittyGraphics"; id: number; message: string }
   | { type: "deviceAttributes" }
+  /** A terminal color (OSC 10 text, 11 background, 4 palette entry `index`), as the terminal wrote it. */
+  | { type: "color"; which: "fg" | "bg" | number; spec: string }
   | { type: "focus"; focused: boolean };
+
+const COLOR_REPLY = /^(?:1[01]|4;\d{1,3});[^\x07\x1b]{1,80}(?:\x07|\x1b\\)/;
+const COLOR_REPLY_START = /^(?:1[01]?|1[01];[^\x07\x1b]{0,80}\x1b?|4(?:;\d{0,3}(?:;[^\x07\x1b]{0,80}\x1b?)?)?)?$/;
+
+/**
+ * What follows ESC ] (`rest`) as a color reply: its length and that of its
+ * body (without the terminator), "partial" if it may be the start of one,
+ * or null.
+ */
+function colorReply(rest: string): { length: number; body: number } | "partial" | null {
+  const m = COLOR_REPLY.exec(rest);
+  if (m) return { length: m[0].length, body: m[0].length - (m[0].endsWith("\x07") ? 1 : 2) };
+  return COLOR_REPLY_START.test(rest) ? "partial" : null;
+}
 
 /** String.fromCodePoint that tolerates garbage (out-of-range values give ""). */
 function cpString(n: number): string {
@@ -233,15 +249,15 @@ export class InputParser {
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * Legacy terminals send Alt+[ as "ESC [" and Alt+O as "ESC O", which also
-   * start escape sequences. Terminals write a real sequence in one go, so
-   * an "ESC [" or "ESC O" left incomplete for a moment was a keypress: emit
-   * it rather than let it swallow the next key.
+   * Legacy terminals send Alt+[ as "ESC [", Alt+O as "ESC O" and Alt+] as
+   * "ESC ]", which also start escape sequences (or color replies).
+   * Terminals write a real sequence in one go, so one left incomplete for a
+   * moment was a keypress: emit it rather than let it swallow the next key.
    */
   private watchStall(): void {
     const stalled = this.buf;
     if (this.kittyActive || this.pasting || stalled.length < 2 || stalled[0] !== "\x1b") return;
-    if (stalled[1] !== "[" && stalled[1] !== "O") return;
+    if (stalled[1] !== "[" && stalled[1] !== "O" && stalled[1] !== "]") return;
     this.stallTimer = setTimeout(() => {
       this.stallTimer = null;
       if (this.buf !== stalled) return;
@@ -249,7 +265,9 @@ export class InputParser {
       this.legacyChar(stalled[1]!, true);
       this.drain();
       this.watchStall();
-    }, 40);
+      // A color reply already past its number (ESC ] 11;) is no keypress: it
+      // may wait longer for the rest (a slow link splitting it).
+    }, /^\x1b\](?:1[01]|4;\d{1,3});/.test(stalled) ? 1000 : 40);
   }
 
   private drain(): void {
@@ -328,8 +346,22 @@ export class InputParser {
         }
         if (end < 0) break; // incomplete
         if (n === "_") this.apc(buf.slice(i + 2, end));
+        else if (n === "]") this.osc(buf.slice(i + 2, end));
         i = end + termLen;
         continue;
+      }
+      // Without the kitty keyboard protocol ESC ] is also Alt+]: only a
+      // color reply (OSC 10, 11 or 4) is read as one. The start of one waits
+      // for the rest (a keypress that only looks like it is let go after a
+      // moment, see watchStall); anything else is the key.
+      if (n === "]") {
+        const reply = colorReply(buf.slice(i + 2));
+        if (reply === "partial") break;
+        if (reply) {
+          this.osc(buf.slice(i + 2, i + 2 + reply.body));
+          i += 2 + reply.length;
+          continue;
+        }
       }
       // ESC followed by a character: Alt+key in legacy encoding.
       const cp = buf.codePointAt(i + 1)!;
@@ -365,6 +397,14 @@ export class InputParser {
     const message = semi >= 0 ? body.slice(semi + 1) : "";
     const idMatch = ctrl.match(/(?:^|,)i=(\d+)/);
     this.emit({ type: "kittyGraphics", id: idMatch ? Number(idMatch[1]) : 0, message });
+  }
+
+  private osc(body: string): void {
+    // Color replies: 10;<spec>, 11;<spec>, 4;<index>;<spec>
+    const m = /^(10|11|4;(\d{1,3}));(.*)$/s.exec(body);
+    if (!m) return;
+    const which = m[1] === "10" ? "fg" : m[1] === "11" ? "bg" : Number(m[2]);
+    this.emit({ type: "color", which, spec: m[3]! });
   }
 
   private csi(params: string, final: string): void {

@@ -43,6 +43,7 @@ import {
   type Restore,
 } from "./session";
 import { setSink } from "./terminal";
+import { isTheme, termColors, type TermColors } from "./theme";
 import {
   MAX_AGE_MS,
   cachePath,
@@ -100,6 +101,10 @@ export interface Hello {
   via?: string;
   /** Open this in a new tab (attaching to a session that's already running). */
   url?: string | null;
+  /** The chrome theme this terminal asked for (--theme, $TERMIUM_THEME): "auto" follows `colors`. */
+  theme?: string;
+  /** The terminal's own colors (its replies to OSC 10, 11 and 4), as 6-digit hex. */
+  colors?: TermColors;
   /** This terminal wants update news: the session checks for a newer termium while it's attached. */
   updateCheck?: boolean;
   /** How to run this terminal's termium (its binary, or bun and the script): a restart into it runs that. */
@@ -1028,5 +1033,7 @@ function terminalOf(h: Partial<Hello>) {
     placeholders: !!h.placeholders,
     rgbIds: !!h.rgbIds,
     cwd: typeof h.cwd === "string" && h.cwd.startsWith("/") ? h.cwd : undefined,
+    theme: isTheme(h.theme) ? h.theme : undefined,
+    colors: termColors(h.colors),
   };
 }

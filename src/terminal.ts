@@ -2,6 +2,7 @@
 // graphics frame placement.
 
 import { writeSync } from "node:fs";
+import { ANSI_QUERIED } from "./theme";
 
 const ESC = "\x1b";
 const ST = `${ESC}\\`;
@@ -131,15 +132,21 @@ export function restoreTerminal(): void {
  * Queries whose replies the input parser understands. Device attributes go
  * last: every terminal answers it, so its reply means the others are done.
  */
-export function queryCapabilities(graphics = true): void {
+export function queryCapabilities(graphics = true, colors = true): void {
   out(
     (graphics ? `${ESC}_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA${ST}` : "") + // kitty graphics support
+      (colors ? queryColors() : "") +
       `${ESC}[?u` + // kitty keyboard flags
       `${ESC}[?1016$p` + // is SGR-pixel mouse supported?
       `${ESC}[16t` + // cell size in pixels
       `${ESC}[14t` + // text area size in pixels
       `${ESC}[c`, // primary device attributes
   );
+}
+
+/** Asks for the terminal's text and background colors and the palette entries the chrome uses (OSC 10, 11, 4). */
+export function queryColors(): string {
+  return `${ESC}]10;?${ST}${ESC}]11;?${ST}` + ANSI_QUERIED.map((i) => `${ESC}]4;${i};?${ST}`).join("");
 }
 
 export function querySizes(): void {

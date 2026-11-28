@@ -52,11 +52,12 @@ def top_left(id_):
     return None
 
 def blue_pixels():
-    """Pixels of the select menu's highlight colour in the newest frame."""
+    """Pixels of the select menu's highlight colour in the newest frame (the chrome's
+    accent: Catppuccin Mocha's mauve, as this terminal doesn't report its colors)."""
     img = t.latest_image()
     if img is None:
         return 0
-    return sum(1 for (r, g, b) in img.get_flattened_data() if abs(r - 26) < 25 and abs(g - 115) < 30 and abs(b - 232) < 30)
+    return sum(1 for (r, g, b) in img.get_flattened_data() if abs(r - 203) < 25 and abs(g - 166) < 30 and abs(b - 247) < 30)
 
 def frame_matches_pane():
     """The newest image is exactly the size of the pane it's drawn in (cells x cell size)."""

@@ -37,7 +37,8 @@ import {
   transmitVirtual,
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
-import { SELECT_POPUP } from "./select-popup";
+import { SELECT_POPUP, selectPopupColors } from "./select-popup";
+import { CATPPUCCIN_MOCHA, resolvePalette, type Palette, type TermColors } from "./theme";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -217,22 +218,11 @@ export interface AppOptions {
 
 // ---------------------------------------------------------------- style
 
-const C = {
-  crust: "11111b",
-  mantle: "181825",
-  base: "1e1e2e",
-  surface0: "313244",
-  surface1: "45475a",
-  overlay: "6c7086",
-  subtext: "a6adc8",
-  text: "cdd6f4",
-  mauve: "cba6f7",
-  blue: "89b4fa",
-  green: "a6e3a1",
-  red: "f38ba8",
-  yellow: "f9e2af",
-  peach: "fab387",
-};
+/**
+ * The chrome's colors (src/theme.ts): set from the attached terminal's
+ * palette, or the theme it asked for, on every attach.
+ */
+let C: Palette = CATPPUCCIN_MOCHA;
 const rgb = (hex: string) => `${parseInt(hex.slice(0, 2), 16)};${parseInt(hex.slice(2, 4), 16)};${parseInt(hex.slice(4, 6), 16)}`;
 const fg = (hex: string) => `\x1b[38;2;${rgb(hex)}m`;
 const bg = (hex: string) => `\x1b[48;2;${rgb(hex)}m`;
@@ -376,6 +366,12 @@ export class App {
   private pageKeysDown = new Map<string, { page: Page; ev: KeyEvent }>();
   /** iframe (out-of-process) and worker sessions, mapped to the page they belong to. */
   private frameOwner = new Map<string, Page>();
+  /**
+   * Document session -> its script giving <select> popups the chrome's
+   * colors, the palette in it, and the queue its updates run in (one at a
+   * time, so a replaced script is always removed).
+   */
+  private themeScripts = new Map<string, { id: string | null; palette: Palette | null; queue: Promise<void> }>();
   private downloads = new Map<string, string>(); // guid -> suggested file name
   private lastMiddlePress = 0;
   private mouseCapture: Page | null = null;
@@ -405,6 +401,7 @@ export class App {
       // Commands still waiting on that session will never be answered.
       this.cdp.failSession(p.sessionId);
       this.frameOwner.delete(p.sessionId);
+      this.themeScripts.delete(p.sessionId);
       this.onGone(this.pages.get(p.sessionId));
     });
     cdp.on("Target.targetDestroyed", (p) => this.onGone(this.byTarget.get(p.targetId)));
@@ -812,10 +809,38 @@ export class App {
       this.cdp.send("Inspector.enable", {}, sid),
       this.ua ? this.cdp.send("Emulation.setUserAgentOverride", this.ua, sid) : null,
       this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: SELECT_POPUP, worldName: "termium", runImmediately: true }, sid),
+      this.themeDocument(sid),
       this.cdp.send("Page.setInterceptFileChooserDialog", { enabled: true }, sid),
       // Cross-site iframes and dedicated workers are separate targets.
       this.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sid),
     ]).catch((e) => this.opts.log(`setup ${sid}: ${e}`));
+  }
+
+  /**
+   * Gives a document session's <select> popups the chrome's colors (in its
+   * documents now and those it loads later), replacing what it had.
+   */
+  private themeDocument(sid: string): Promise<void> {
+    let doc = this.themeScripts.get(sid);
+    if (!doc) this.themeScripts.set(sid, (doc = { id: null, palette: null, queue: Promise.resolve() }));
+    const d = doc;
+    d.queue = d.queue
+      .then(async () => {
+        // Already in these colors, or the session is gone.
+        if (d.palette === C || this.themeScripts.get(sid) !== d) return;
+        const palette = C;
+        if (d.id) await this.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: d.id }, sid).catch(() => {});
+        d.id = null;
+        const { identifier } = await this.cdp.send(
+          "Page.addScriptToEvaluateOnNewDocument",
+          { source: selectPopupColors(palette), worldName: "termium", runImmediately: true },
+          sid,
+        );
+        d.id = identifier;
+        d.palette = palette;
+      })
+      .catch((e) => this.opts.log(`theme ${sid}: ${e}`));
+    return d.queue;
   }
 
   private async onAttached(p: any, parent?: string): Promise<void> {
@@ -1444,8 +1469,9 @@ export class App {
    * A terminal attached: draw everything for it from scratch, at its size.
    * Image ids and positions from an earlier terminal mean nothing to it.
    */
-  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string }): void {
+  attach(t: { cols: number; rows: number; cellW: number; cellH: number; pixelMouse: boolean; placeholders: boolean; rgbIds?: boolean; cwd?: string; theme?: string; colors?: TermColors }): void {
     if (t.cwd) this.cwd = t.cwd;
+    this.setPalette(resolvePalette(t.theme, t.colors));
     // Nothing half-typed on the previous terminal carries over (a pending
     // Ctrl+B prefix would turn this one's first key into a command), nor
     // anything it had open that takes keys (the update box, help, address
@@ -1514,6 +1540,13 @@ export class App {
   repaintVisible(): void {
     if (!this.attached || this.closingAll || this.covered()) return;
     for (const page of this.geom.keys()) if (page.imageIds.length) this.paint(page);
+  }
+
+  /** Draws the chrome (and <select> popups) in `p` from now on. */
+  private setPalette(p: Palette): void {
+    if (JSON.stringify(p) === JSON.stringify(C)) return;
+    C = p;
+    for (const sid of this.themeScripts.keys()) void this.themeDocument(sid);
   }
 
   /** The terminal went away: stop drawing and stop the screencasts until one attaches again. */
@@ -2170,8 +2203,8 @@ export class App {
     const line = (row: number, text: string, style: string) => {
       s += at(row, 1) + style + fit(text, w) + RESET;
     };
-    const base = bg(C.mantle) + fg(C.subtext);
-    line(1, " termium", bg(C.mantle) + fg(C.mauve) + BOLD);
+    const base = bg(C.panel) + fg(C.muted);
+    line(1, " termium", bg(C.panel) + fg(C.accent) + BOLD);
     line(2, " SPACES", base + "\x1b[2m");
     this.spaceHits = [];
     let row = 3;
@@ -2187,19 +2220,19 @@ export class App {
       const name = truncate(`${marker} ${i + 1} ${space.name}`, w - count.length - 2);
       const text = ` ${name}${" ".repeat(Math.max(1, w - 2 - width(name) - count.length))}${count} `;
       const style = cursor
-        ? bg(C.surface1) + fg(C.text) + BOLD
+        ? bg(C.hover) + fg(C.text) + BOLD
         : active
-          ? bg(C.surface0) + fg(C.text) + BOLD
+          ? bg(C.surface) + fg(C.text) + BOLD
           : base;
       line(row, text, style);
       this.spaceHits.push({ row, index: i });
       row++;
     });
     this.newSpaceRow = row <= this.rows - 1 ? row : -1;
-    if (this.newSpaceRow > 0) line(row++, " + new space", base + fg(C.overlay));
+    if (this.newSpaceRow > 0) line(row++, " + new space", base + fg(C.dim));
     for (; row < this.rows; row++) line(row, "", base);
     const hint = this.mode === "spaces" ? " j/k Enter Esc" : " ^B ? for keys";
-    line(this.rows, hint, base + fg(C.overlay));
+    line(this.rows, hint, base + fg(C.dim));
     return s;
   }
 
@@ -2226,12 +2259,12 @@ export class App {
     const markers = (from: number) => (from > 0 ? 1 : 0) + (active < items.length - 1 ? 1 : 0);
     while (first < active && total(first, active) + width(plus) + markers(first) > w) first++;
 
-    let s = at(1, col) + bg(C.crust);
+    let s = at(1, col) + bg(C.backdrop);
     let used = 0;
     this.tabHits = [];
     if (first > 0) {
       // Tabs scrolled off to the left.
-      s += fg(C.peach) + "‹";
+      s += fg(C.orange) + "‹";
       used += 1;
     }
     let last = first - 1;
@@ -2241,8 +2274,8 @@ export class App {
       const more = i < items.length - 1 ? 1 : 0; // room for a "›" if tabs follow
       if (used + tw + width(plus) + more > w) break;
       last = i;
-      const style = i === active ? bg(C.base) + fg(C.text) + BOLD : bg(C.crust) + fg(C.overlay);
-      s += style + text + RESET + bg(C.crust) + fg(C.surface1) + "│";
+      const style = i === active ? bg(C.background) + fg(C.text) + BOLD : bg(C.backdrop) + fg(C.dim);
+      s += style + text + RESET + bg(C.backdrop) + fg(C.hover) + "│";
       this.tabHits.push({ start: col + used, end: col + used + tw, index: i });
       used += tw + 1;
     }
@@ -2250,23 +2283,23 @@ export class App {
       // Not even the active tab fits whole: show it cut to the space there is.
       const room = Math.max(1, w - used - width(plus) - (active < items.length - 1 ? 1 : 0));
       const text = truncate(items[active]!, room);
-      s += bg(C.base) + fg(C.text) + BOLD + text + RESET + bg(C.crust);
+      s += bg(C.background) + fg(C.text) + BOLD + text + RESET + bg(C.backdrop);
       this.tabHits.push({ start: col + used, end: col + used + width(text), index: active });
       used += width(text);
       last = active;
     }
     if (last < items.length - 1) {
       // Tabs that don't fit on the right.
-      s += bg(C.crust) + fg(C.peach) + "›";
+      s += bg(C.backdrop) + fg(C.orange) + "›";
       used += 1;
     }
     this.newTabHit = { start: col + used, end: col + used + width(plus) };
-    s += bg(C.crust) + fg(C.subtext) + plus;
+    s += bg(C.backdrop) + fg(C.muted) + plus;
     used += width(plus);
     const label = this.space ? ` ${this.space.name} ` : "";
     const pad = w - used;
     if (pad > 0) {
-      s += bg(C.crust) + fg(C.overlay) + (pad > width(label) + 1 ? " ".repeat(pad - width(label)) + label : " ".repeat(pad));
+      s += bg(C.backdrop) + fg(C.dim) + (pad > width(label) + 1 ? " ".repeat(pad - width(label)) + label : " ".repeat(pad));
     }
     if (badge && bw) s += RESET + at(1, col + w) + badge.style + truncate(badge.text, bw);
     return s + RESET;
@@ -2285,7 +2318,7 @@ export class App {
 
   private drawUrlBar(col: number, w: number): string {
     const page = this.focused;
-    const barBg = bg(C.base);
+    const barBg = bg(C.background);
     let s = at(2, col) + barBg;
     const mode = this.modeLabel();
     const zoom = this.zoom !== 1 ? ` ${Math.round(this.zoom * 100)}% ` : "";
@@ -2301,7 +2334,7 @@ export class App {
       const text = fit(` ⚠ ${prompt.message}  [Enter] Yes  [Esc] No`, w - modeW);
       this.promptCursor = null;
       this.navHits = null;
-      return s + bg(C.yellow) + fg(C.crust) + BOLD + text + RESET + bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
+      return s + bg(C.yellow) + fg(C.onYellow) + BOLD + text + RESET + bg(C.accent) + fg(C.onAccent) + BOLD + mode + RESET;
     }
     if (prompt && prompt.kind === "dialog") {
       const d = prompt.page.dialog;
@@ -2312,17 +2345,17 @@ export class App {
         `${d?.message ?? ""}  [Enter] OK`;
       const fieldW = w - modeW - 4;
       let text = fit(` ⚠ ${label}`, d?.type === "prompt" ? Math.min(width(label) + 4, Math.floor(fieldW / 2)) : fieldW);
-      s += bg(C.yellow) + fg(C.crust) + BOLD + text + RESET;
+      s += bg(C.yellow) + fg(C.onYellow) + BOLD + text + RESET;
       if (d?.type === "prompt") {
         const rest = w - modeW - width(text);
         const v = prompt.edit.view(rest - 2);
         this.promptCursor = { row: 2, col: col + width(text) + 1 + v.cursorCol };
-        s += bg(C.surface0) + fg(C.text) + " " + fit(v.text, rest - 1) + RESET;
+        s += bg(C.surface) + fg(C.text) + " " + fit(v.text, rest - 1) + RESET;
       } else {
         this.promptCursor = null;
         s += barBg + " ".repeat(Math.max(0, w - modeW - width(text)));
       }
-      s += bg(C.mauve) + fg(C.crust) + BOLD + mode + RESET;
+      s += bg(C.accent) + fg(C.onAccent) + BOLD + mode + RESET;
       this.navHits = null;
       return s;
     }
@@ -2330,7 +2363,7 @@ export class App {
     const back = " ← ";
     const fwd = " → ";
     const reload = page?.loading ? " ✕ " : " ⟳ ";
-    const btnStyle = barBg + fg(C.subtext);
+    const btnStyle = barBg + fg(C.muted);
     s += btnStyle + back + fwd + reload + " ";
     const urlStart = col + width(back + fwd + reload) + 1;
     const fieldW = Math.max(4, w - (urlStart - col) - rightW - modeW - 1);
@@ -2349,7 +2382,7 @@ export class App {
       const text = prompt.edit.selectAll
         ? `\x1b[7m${v.text}\x1b[27m`
         : v.text;
-      s += bg(C.surface1) + fg(C.text) + " " + fg(C.overlay) + label + fg(C.text) + text +
+      s += bg(C.hover) + fg(C.text) + " " + fg(C.dim) + label + fg(C.text) + text +
         " ".repeat(Math.max(0, fieldW - 1 - width(label) - width(v.text))) + RESET;
       this.promptCursor = prompt.edit.selectAll ? null : { row: 2, col: urlStart + 1 + width(label) + v.cursorCol };
     } else {
@@ -2357,14 +2390,14 @@ export class App {
       const url = page ? displayUrl(page) : "";
       const secure = url.startsWith("https://");
       const shown = url.replace(/^https:\/\//, "");
-      const icon = page?.crashed ? fg(C.red) + "✖ " : secure ? fg(C.green) + "🔒" : fg(C.overlay) + "  ";
-      s += bg(C.surface0) + " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2) + RESET;
+      const icon = page?.crashed ? fg(C.red) + "✖ " : secure ? fg(C.green) + "🔒" : fg(C.dim) + "  ";
+      s += bg(C.surface) + " " + icon + fg(C.text) + fit(shown, fieldW - 1 - 2) + RESET;
     }
     s += barBg + " ";
     const rightCol = urlStart + fieldW + 1;
     this.noticeHit = notice.text && rightW > 0 ? [rightCol, rightCol + Math.min(width(notice.text), rightW)] : null;
-    if (rightW > 0) s += barBg + (notice.text ? notice.style : fg(C.peach)) + fit(right, rightW);
-    if (modeW) s += bg(C.mauve) + fg(C.crust) + BOLD + mode;
+    if (rightW > 0) s += barBg + (notice.text ? notice.style : fg(C.orange)) + fit(right, rightW);
+    if (modeW) s += bg(C.accent) + fg(C.onAccent) + BOLD + mode;
     const used = (urlStart - col) + fieldW + 1 + rightW + modeW;
     if (used < w) s += RESET + barBg + " ".repeat(w - used);
     return s + RESET;
@@ -2385,7 +2418,7 @@ export class App {
     for (const [page, g] of this.geom) {
       if (!g.header) continue;
       const focused = tab?.focused === page;
-      const style = focused ? bg(C.surface1) + fg(C.text) + BOLD : bg(C.mantle) + fg(C.overlay);
+      const style = focused ? bg(C.hover) + fg(C.text) + BOLD : bg(C.panel) + fg(C.dim);
       const host = page.url.includes(MARKER) ? "" : hostOf(page.url);
       const title = pageTitle(page) === page.url.replace(/^https?:\/\//, "") ? "" : pageTitle(page);
       const flag = page.dialog ? "! " : page.loading ? "◌ " : "";
@@ -2395,7 +2428,7 @@ export class App {
     for (const sep of this.seps) {
       if (sep.split.dir !== "h") continue;
       for (let r = 0; r < sep.rect.rows; r++) {
-        s += at(sep.rect.row + r, sep.rect.col) + bg(C.crust) + fg(C.surface1) + "│";
+        s += at(sep.rect.row + r, sep.rect.col) + bg(C.backdrop) + fg(C.hover) + "│";
       }
     }
     return s + RESET;
@@ -2439,10 +2472,10 @@ export class App {
     const shown = lines.slice(0, Math.max(1, r.rows - 3));
     const left = r.col + Math.max(0, Math.floor((r.cols - inner - 4) / 2));
     const top = r.row + 1;
-    for (let i = 0; i < r.rows; i++) s += at(r.row + i, r.col) + bg(C.crust) + " ".repeat(r.cols);
-    s += at(top, left) + bg(C.base) + fg(C.yellow) + BOLD + fit("  ⚠ The page says:", inner + 4) + RESET;
+    for (let i = 0; i < r.rows; i++) s += at(r.row + i, r.col) + bg(C.backdrop) + " ".repeat(r.cols);
+    s += at(top, left) + bg(C.background) + fg(C.yellow) + BOLD + fit("  ⚠ The page says:", inner + 4) + RESET;
     shown.forEach((line, i) => {
-      s += at(top + 1 + i, left) + bg(C.base) + fg(C.text) + fit(`  ${line}`, inner + 4) + RESET;
+      s += at(top + 1 + i, left) + bg(C.background) + fg(C.text) + fit(`  ${line}`, inner + 4) + RESET;
     });
     return s;
   }
@@ -2468,7 +2501,7 @@ export class App {
     const cmd = news.length && !this.updateInstalled;
     const wantW = Math.max(colW, cmd ? width(UPGRADE_CMD) + 4 : 0, ...news.map(([, t]) => width(t) + 2));
     if (cmd) {
-      for (const l of wrapWords(UPGRADE_CMD, Math.max(1, Math.min(area.cols, wantW) - 4))) news.push([fg(C.blue), `  ${l}`]);
+      for (const l of wrapWords(UPGRADE_CMD, Math.max(1, Math.min(area.cols, wantW) - 4))) news.push([fg(C.link), `  ${l}`]);
     }
     if (news.length) news.push(["", ""]);
     const fitsOne = HELP.length + news.length + 4 <= area.rows;
@@ -2481,10 +2514,10 @@ export class App {
     const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
     // (With placeholders the overlay's text replaces the cells showing them.)
     let s = this.placeholders ? "" : this.deleteOwnImages();
-    for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
-    const panel = bg(C.base) + fg(C.text);
+    for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.backdrop) + " ".repeat(area.cols);
+    const panel = bg(C.background) + fg(C.text);
     const hidden = Math.max(0, HELP.length - shown * columns);
-    s += at(top, left) + panel + BOLD + fg(C.mauve) + fit(" termium keys", boxW) + RESET;
+    s += at(top, left) + panel + BOLD + fg(C.accent) + fit(" termium keys", boxW) + RESET;
     s += at(top + 1, left) + panel + fit("", boxW);
     const newsRows = Math.min(news.length, Math.max(0, boxH - 4));
     for (let r = 0; r < newsRows; r++) s += at(top + 2 + r, left) + panel + news[r]![0] + fit(news[r]![1], boxW) + RESET;
@@ -2496,11 +2529,11 @@ export class App {
         line += columns === 1 ? text : fit(text, c === 0 ? colW : boxW - colW);
       }
       const heading = columns === 1 && HELP[r]?.[1] === "" && HELP[r]?.[0] !== "";
-      s += at(top + 2 + newsRows + r, left) + panel + (heading ? fg(C.mauve) : "") + fit(line, boxW) + RESET;
+      s += at(top + 2 + newsRows + r, left) + panel + (heading ? fg(C.accent) : "") + fit(line, boxW) + RESET;
     }
     s += at(top + boxH - 2, left) + panel + fit("", boxW);
     const footer = hidden > 0 ? `  ${hidden} more: make the terminal taller · any key closes` : "  any key closes";
-    s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(footer, boxW) + RESET;
+    s += at(top + boxH - 1, left) + panel + fg(C.dim) + fit(footer, boxW) + RESET;
     return s + RESET;
   }
 
@@ -2824,10 +2857,10 @@ export class App {
     const short = full < 50;
     if (!this.updatesShown) return null;
     if (this.updateInstalled) {
-      return { text: short ? " ↻ " : ` ↻ v${displayVersion(this.updateInstalled)} `, style: bg(C.crust) + fg(C.yellow) + BOLD };
+      return { text: short ? " ↻ " : ` ↻ v${displayVersion(this.updateInstalled)} `, style: bg(C.backdrop) + fg(C.yellow) + BOLD };
     }
     if (this.updateLatest) {
-      return { text: short ? " ↑ " : ` ↑ v${displayVersion(this.updateLatest)} `, style: bg(C.crust) + fg(C.green) + BOLD };
+      return { text: short ? " ↑ " : ` ↑ v${displayVersion(this.updateLatest)} `, style: bg(C.backdrop) + fg(C.green) + BOLD };
     }
     return null;
   }
@@ -2844,9 +2877,9 @@ export class App {
     type Seg = [style: string, text: string];
     const lines: Seg[][] = [];
     const txt = fg(C.text);
-    const key = fg(C.mauve) + BOLD;
+    const key = fg(C.accent) + BOLD;
     const ok = fg(C.green) + BOLD;
-    const dim = fg(C.overlay);
+    const dim = fg(C.dim);
     const add = (...segs: Seg[]) => lines.push(segs);
     const blank = () => lines.push([]);
     const wrapped = (style: string, text: string) => {
@@ -2856,7 +2889,7 @@ export class App {
     const headline = () => add([ok, ` termium ${nv}`], [txt, ` is available (you have ${cur})`]);
     const byHand = () => {
       add([dim, " update by hand:"]);
-      wrapped(fg(C.blue), UPGRADE_CMD);
+      wrapped(fg(C.link), UPGRADE_CMD);
     };
     let title = "";
     let footer = "";
@@ -2915,10 +2948,10 @@ export class App {
     const boxH = Math.min(area.rows, lines.length + 4);
     const top = area.row + Math.max(0, Math.floor((area.rows - boxH) / 2));
     const left = area.col + Math.max(0, Math.floor((area.cols - boxW) / 2));
-    const panel = bg(C.base) + fg(C.text);
+    const panel = bg(C.background) + fg(C.text);
     let s = this.placeholders ? "" : this.deleteOwnImages();
-    for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.crust) + " ".repeat(area.cols);
-    s += at(top, left) + panel + BOLD + fg(C.mauve) + fit(` ${title}`, boxW) + RESET;
+    for (let r = 0; r < area.rows; r++) s += at(area.row + r, area.col) + bg(C.backdrop) + " ".repeat(area.cols);
+    s += at(top, left) + panel + BOLD + fg(C.accent) + fit(` ${title}`, boxW) + RESET;
     s += at(top + 1, left) + panel + fit("", boxW);
     const shown = Math.max(0, boxH - 4);
     for (let i = 0; i < shown; i++) {
@@ -2933,7 +2966,7 @@ export class App {
       s += at(top + 2 + i, left) + line + panel + " ".repeat(Math.max(0, boxW - used)) + RESET;
     }
     s += at(top + boxH - 2, left) + panel + fit("", boxW);
-    s += at(top + boxH - 1, left) + panel + fg(C.overlay) + fit(`  ${footer}`, boxW) + RESET;
+    s += at(top + boxH - 1, left) + panel + fg(C.dim) + fit(`  ${footer}`, boxW) + RESET;
     return s + RESET;
   }
 

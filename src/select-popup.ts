@@ -5,6 +5,8 @@
 // set through the CSSOM (element.style), which a page's Content-Security-
 // Policy can't block, unlike a <style> element.
 
+import type { Palette } from "./theme";
+
 export const SELECT_POPUP = String.raw`(() => {
   if (window.__termiumSelectPopup) return;
   window.__termiumSelectPopup = true;
@@ -35,22 +37,25 @@ export const SELECT_POPUP = String.raw`(() => {
     host = document.createElement("termium-select");
     const root = host.attachShadow({ mode: "closed" });
     const css = (el, props) => { for (const k in props) el.style.setProperty(k, props[k], "important"); };
+    // termium's chrome colors (selectPopupColors below), else light ones.
+    const colors = () => Object.assign({ bg: "#fff", text: "#111", border: "#888", group: "#555", off: "#999", on: "#1a73e8", onText: "#fff" }, window.__termiumColors);
+    let k = colors();
     const menu = document.createElement("div");
     css(menu, {
-      position: "fixed", "z-index": "2147483647", "box-sizing": "border-box", background: "#fff", color: "#111",
-      border: "1px solid #888", "box-shadow": "0 4px 14px rgba(0,0,0,.35)", font: "14px system-ui, sans-serif",
+      position: "fixed", "z-index": "2147483647", "box-sizing": "border-box", background: k.bg, color: k.text,
+      border: "1px solid " + k.border, "box-shadow": "0 4px 14px rgba(0,0,0,.35)", font: "14px system-ui, sans-serif",
       "overflow-y": "auto", padding: "4px 0", "border-radius": "4px",
     });
     const rowCss = (el, extra) => css(el, Object.assign({
       padding: "0 10px", height: itemH + "px", "line-height": itemH + "px", "white-space": "nowrap",
-      overflow: "hidden", "text-overflow": "ellipsis", background: "transparent", color: "#111",
+      overflow: "hidden", "text-overflow": "ellipsis", background: "transparent", color: k.text,
     }, extra));
-    const rows = [];
+    const rows = [], heads = [];
     let active = -1, lastGroup = null;
     const disabled = [];
     const paint = (i, on) => {
       if (!rows[i]) return;
-      css(rows[i], on ? { background: "#1a73e8", color: "#fff" } : { background: "transparent", color: disabled[i] ? "#999" : "#111" });
+      css(rows[i], on ? { background: k.on, color: k.onText } : { background: "transparent", color: disabled[i] ? k.off : k.text });
     };
     const setActive = (i) => {
       paint(active, false);
@@ -64,14 +69,15 @@ export const SELECT_POPUP = String.raw`(() => {
       if (o.hidden || (g && g.hidden) || getComputedStyle(o).display === "none") return;
       if (g && g !== lastGroup) {
         const gh = document.createElement("div");
-        rowCss(gh, { "font-weight": "600", color: "#555" });
+        rowCss(gh, { "font-weight": "600", color: k.group });
+        heads.push(gh);
         gh.textContent = g.label;
         menu.appendChild(gh);
       }
       lastGroup = g;
       const d = document.createElement("div");
       disabled[i] = !!(o.disabled || (g && g.disabled));
-      rowCss(d, { "padding-left": g ? "22px" : "10px", color: disabled[i] ? "#999" : "#111" });
+      rowCss(d, { "padding-left": g ? "22px" : "10px", color: disabled[i] ? k.off : k.text });
       d.textContent = o.label || o.text || " ";
       d.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); });
       d.addEventListener("mouseup", (e) => { e.preventDefault(); e.stopPropagation(); if (enabled(i)) choose(sel, i); });
@@ -137,7 +143,15 @@ export const SELECT_POPUP = String.raw`(() => {
     addEventListener("wheel", outside, true);
     addEventListener("blur", close);
     addEventListener("resize", close);
+    // New colors (another terminal attached) apply to the open menu too.
+    window.__termiumRestyle = () => {
+      k = colors();
+      css(menu, { background: k.bg, color: k.text, border: "1px solid " + k.border });
+      heads.forEach((h) => css(h, { color: k.group }));
+      rows.forEach((_, i) => paint(i, i === active));
+    };
     cleanup = () => {
+      window.__termiumRestyle = null;
       removeEventListener("keydown", onKey, true);
       removeEventListener("mousedown", outside, true);
       removeEventListener("wheel", outside, true);
@@ -177,3 +191,13 @@ export const SELECT_POPUP = String.raw`(() => {
     }
   }, true);
 })();`;
+
+/**
+ * A script for the same isolated world that gives the popup the chrome's
+ * colors (read each time a popup opens).
+ */
+export function selectPopupColors(p: Palette): string {
+  const k = { bg: p.background, text: p.text, border: p.hover, group: p.muted, off: p.dim, on: p.accent, onText: p.onAccent };
+  const css = Object.fromEntries(Object.entries(k).map(([name, hex]) => [name, `#${hex}`]));
+  return `window.__termiumColors = ${JSON.stringify(css)}; if (window.__termiumRestyle) window.__termiumRestyle();`;
+}
