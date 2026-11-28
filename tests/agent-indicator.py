@@ -105,6 +105,28 @@ try:
     ctl("eval", "document.title = '● not an agent'", "1")
     h.wait_text("● not an agent", 5); time.sleep(0.5)
     check("an idle tab's own ● keeps the title's colour", fg_at("● not") not in (None, "cba6f7"), (tab_bar(), fg_at("● not")))
+
+    ctl("eval", "document.title = 'Agent fixture'", "1")
+
+    # --- a stale id is refused before anything is done: nothing marked
+    old_btn = btn
+    ctl("eval", "location.reload()", str(bg)); time.sleep(1.5)
+    r = ctl("click", old_btn)
+    check("a stale id is refused", r.returncode != 0 and "stale id" in r.stderr, (r.returncode, r.stdout, r.stderr))
+    time.sleep(0.4)
+    check("and doesn't mark the tab", not tab_dot(2) and not space_dot(1), (tab_bar(), space_row(1)))
+
+    # --- input still being handled after the command's time is up keeps the mark
+    ctl("eval", "document.body.insertAdjacentHTML('afterbegin', `<button onclick=\"const e = Date.now() + 6000; while (Date.now() < e); window.slowDone = 1\">Very slow</button>`)", "1")
+    slow = ref(ctl("snapshot", "1").stdout, "button", "Very slow")
+    time.sleep(3.5)  # (the snapshot is reading, but earlier marks on tab 1 must be gone)
+    t0 = time.time()
+    r = ctl("click", slow, "--timeout", "1")
+    returned = time.time() - t0
+    check("the click returns before the page has handled it", returned < 4, (returned, r.returncode, r.stderr))
+    time.sleep(max(0, 4.5 - returned))
+    check("the tab is still marked while the page handles it (4.5 s in)", tab_dot(1) and space_dot(1), (tab_bar(), space_row(1)))
+    check("the mark clears a few seconds after the page is done", h.wait_for(lambda: not tab_dot(1) and not space_dot(1), 8), (tab_bar(), space_row(1)))
 finally:
     if h:
         h.stop_server(SESSION)

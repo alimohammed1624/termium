@@ -55,7 +55,8 @@ export interface Page {
   sizeRecheck?: ReturnType<typeof setTimeout>;
   /** An agent is closing it (see agentClose): "refused" once the page said it has unsaved changes. */
   agentClosing?: "yes" | "force" | "refused";
-  /** Marked as agent-driven until then (Infinity while a command acts on it): see agentDriving. */
+  /** Agents' commands acting on it now, and when its agent-driven mark ends after them: see agentDriving. */
+  agentActs?: number;
   agentUntil?: number;
   /** Its browser context (another DevTools client's newContext() makes others). */
   contextId?: string;
@@ -3872,7 +3873,8 @@ export class App {
    * AGENT_LINGER_MS after, so the person knows not to type into it.
    */
   agentDriving(page: Page, on: boolean): void {
-    page.agentUntil = on ? Infinity : Date.now() + AGENT_LINGER_MS;
+    page.agentActs = Math.max(0, (page.agentActs ?? 0) + (on ? 1 : -1));
+    if (!on) page.agentUntil = Date.now() + AGENT_LINGER_MS;
     this.agentPulse ??= setInterval(() => {
       if ([...this.pages.values()].some((p) => this.agentDriven(p))) this.agentBeat = !this.agentBeat;
       else {
@@ -3889,7 +3891,7 @@ export class App {
   private agentBeat = false;
 
   private agentDriven(page: Page): boolean {
-    return (page.agentUntil ?? 0) > Date.now();
+    return !!page.agentActs || (page.agentUntil ?? 0) > Date.now();
   }
 
   /** The agent dot's style this beat: the accent, bright then dim. */

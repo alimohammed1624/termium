@@ -88,8 +88,9 @@ export async function runCtl(app: App, cdp: CDP, req: CtlRequest, ctx: Ctx): Pro
     try {
       return await agent.run(req, timeoutMs);
     } finally {
-      ctx.hold?.(agent.underWay());
-      agent.release();
+      const underWay = agent.underWay();
+      ctx.hold?.(underWay);
+      void agent.release(underWay);
     }
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -291,7 +292,12 @@ class Agent {
 
   // ------------------------------------------------------------ pages
 
+  /** The page an acting command acts on, marked as agent-driven (see drive). */
   private page(tab: number | undefined, dialogOk = false): Page {
+    return this.drive(this.findPage(tab, dialogOk));
+  }
+
+  private findPage(tab: number | undefined, dialogOk = false): Page {
     let page: Page | undefined;
     if (tab === undefined) {
       page = this.app.activePage();
@@ -306,7 +312,7 @@ class Agent {
           "answer it first: termium ctl dialog accept|dismiss",
       );
     }
-    return this.drive(page);
+    return page;
   }
 
   /** Marks a page an acting command acts on as agent-driven, until a moment after it ends (see release). */
@@ -318,10 +324,19 @@ class Agent {
     return page;
   }
 
-  /** The command is over: its pages keep their mark for a moment more. */
-  release(): void {
-    for (const page of this.driven) this.app.agentDriving(page, false);
+  /**
+   * The command is over: its pages keep their mark while input it sent is
+   * still being handled (up to 10 s, as the queue waits; not while a dialog
+   * holds it), then for a moment more.
+   */
+  async release(underWay: Promise<unknown>): Promise<void> {
+    let settled = false;
+    void underWay.then(() => (settled = true));
+    const end = Date.now() + 10_000;
+    const pages = [...this.driven];
     this.driven.clear();
+    while (!settled && Date.now() < end && !pages.some((p) => p.dialog || !this.app.isOpen(p))) await Bun.sleep(100);
+    for (const page of pages) this.app.agentDriving(page, false);
   }
 
   private describe(page: Page): AgentTab {
@@ -339,7 +354,7 @@ class Agent {
   private element(ref: string | undefined): { page: Page; node: number } {
     const m = /^(\d+):(\d+)@(\d+)$/.exec(ref ?? "");
     if (!m) throw new CtlError(`bad element id "${ref ?? ""}": ids look like 3:142@2 (take them from \`termium ctl snapshot\`)`, EXIT.usage);
-    const page = this.page(Number(m[1]));
+    const page = this.findPage(Number(m[1]));
     const node = Number(m[2]);
     // Only for the document it was given in (its generation is in the id
     // itself): node numbers are reused by a new document, where the same
@@ -348,7 +363,7 @@ class Agent {
     if (Number(m[3]) !== (page.docGen ?? 0) || !ids || ids.gen !== Number(m[3]) || !ids.nodes.has(node)) {
       throw new CtlError(`stale id ${ref}: the page changed since that snapshot; take a new snapshot`);
     }
-    return { page, node };
+    return { page: this.drive(page), node };
   }
 
   private async open(req: CtlRequest, timeoutMs: number): Promise<unknown> {
