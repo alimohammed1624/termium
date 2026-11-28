@@ -65,8 +65,36 @@ PAGES = {
 for name, (d, _, head) in PAGES.items():
     with open(os.path.join(d, f"{name}.html"), "w") as f:
         f.write(f"<!doctype html><title>{name} page</title>{head}<h1>{name}</h1>")
+# A third origin whose server holds requests for /hang* (an icon that never comes).
+C = os.path.join(site, "c"); os.makedirs(C)
+PC = free_port()
+icon(os.path.join(C, "favicon.ico"), (60, 120, 230, 255), "ICO", [(16, 16), (32, 32)])
+Image.new("RGBA", (16, 16), (230, 60, 60, 255)).save(os.path.join(C, "red16.png"))
+SLOW = {
+    # Its link never answers: /favicon.ico still shows, without waiting for it.
+    "stall": '<link rel="icon" href="/hang.png">',
+    # A linked /favicon.ico (32px) outranks a 16px png.
+    "ranked": '<link rel="icon" sizes="16x16" href="/red16.png"><link rel="icon" sizes="32x32" href="/favicon.ico">',
+    # The icon changes while the first lookup still waits: the change isn't lost.
+    "swapbusy": '<link rel="icon" href="/hang2.png"><script>setTimeout(() => { document.querySelector("link").href = "/red16.png"; document.title = "swapbusy changed"; }, 1000)</script>',
+}
+for name, head in SLOW.items():
+    with open(os.path.join(C, f"{name}.html"), "w") as f:
+        f.write(f"<!doctype html><title>{name} page</title>{head}<h1>{name}</h1>")
+HANG = """
+import http.server, sys, time
+class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/hang"):
+            time.sleep(20); self.send_error(404); return
+        super().do_GET()
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer.daemon_threads = True
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), lambda *a: H(*a, directory=sys.argv[2])).serve_forever()
+"""
 servers = [subprocess.Popen([PY, "-m", "http.server", str(p), "--bind", "127.0.0.1", "--directory", d],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for d, p in ((A, PA), (B, PB))]
+servers.append(subprocess.Popen([PY, "-c", HANG, str(PC), C], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
 time.sleep(0.5)
 url = lambda name: f"http://127.0.0.1:{PAGES[name][1]}/{name}.html"
 
@@ -187,6 +215,25 @@ try:
             n = len(t.placements)
         check("no picture left behind", n == 3 + 1 + 1, n)  # 3 tab icons, 1 sidebar icon, 1 page
         t.shot(f"{OUT}/03-navigation.png")
+
+    # Icons that hang, a linked /favicon.ico, an icon changed during a lookup.
+    with Term(["bun", os.path.join(ROOT, "src/main.ts"), "--incognito"], cols=200, rows=40) as t:
+        curl = lambda name: f"http://127.0.0.1:{PC}/{name}.html"
+        t.type(curl("stall")); t.key("enter")
+        t0 = time.time()
+        for name in ("ranked", "swapbusy"):
+            time.sleep(0.4)
+            t.key("ctrl+t"); time.sleep(0.4); t.type(curl(name)); t.key("enter")
+        def tab_icon(title):
+            col = t.line(1).find(title if " " in title else f"{title} page") - 1
+            png = icons_on_row(t, 1).get(col)
+            return colour_of(png) if png else None
+        near = lambda got, rgb: got is not None and all(abs(a - b) < 40 for a, b in zip(got, rgb))
+        ok = t.wait_for(lambda: near(tab_icon("stall"), (60, 120, 230)), 12)
+        check("an icon that never answers doesn't hold up /favicon.ico", ok, (tab_icon("stall"), round(time.time() - t0, 1)))
+        check("a linked 32px /favicon.ico outranks a 16px png", t.wait_for(lambda: near(tab_icon("ranked"), (60, 120, 230)), 8), tab_icon("ranked"))
+        ok = t.wait_for(lambda: near(tab_icon("swapbusy changed"), (230, 60, 60)), 15)
+        check("an icon changed during a lookup still shows", ok, (tab_icon("swapbusy changed"), t.line(1)))
 
     # Through tmux (unicode placeholders), no pictures in the chrome: dots.
     with Term(["bun", os.path.join(ROOT, "src/main.ts"), "--incognito"], cols=200, rows=40,

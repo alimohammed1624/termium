@@ -18,6 +18,8 @@ const MAX_BYTES = 512 * 1024;
 
 /** Icons of a page tried in turn, at most (/favicon.ico always among them). */
 const MAX_TRIES = 4;
+/** How long one icon may take: one that never comes mustn't hold up the next. */
+const TRY_MS = 4000;
 
 /**
  * Run in an isolated world of the page (its scripts can't interfere): the
@@ -40,7 +42,7 @@ const FIND = `(() => {
   }
   const hrefs = found.sort((a, b) => b.score - a.score || b.i - a.i).map((f) => f.href);
   const fallback = /^https?:$/.test(location.protocol) ? location.origin + "/favicon.ico" : null;
-  return { href: location.href, hrefs: [...new Set(hrefs)].filter((h) => h !== fallback), fallback };
+  return { href: location.href, hrefs: [...new Set(hrefs)], fallback };
 })()`;
 
 /**
@@ -139,6 +141,8 @@ interface PageIcons {
   gen: number;
   /** A lookup is under way. */
   busy: boolean;
+  /** The page may have changed its icon links during that lookup: look again after it. */
+  again?: boolean;
   /** The candidates the last lookup found (a change means the page swapped its icon). */
   candidates?: string;
   icon: Icon | null;
@@ -177,11 +181,20 @@ export class Favicons {
       if (found && st.gen === g) {
         st.candidates = found.key;
         // The best links, and /favicon.ico in any case.
-        const tries = [...found.hrefs.slice(0, found.fallback ? MAX_TRIES - 1 : MAX_TRIES), ...(found.fallback ? [found.fallback] : [])];
+        const tries = found.hrefs.slice(0, MAX_TRIES);
+        if (found.fallback && !tries.includes(found.fallback)) {
+          if (tries.length === MAX_TRIES) tries.pop();
+          tries.push(found.fallback);
+        }
         for (const url of tries) {
           if (st.gen !== g) break;
-          // One that can't be fetched or decoded: the next.
-          const png = await this.render(page, url, w, h).catch(() => null);
+          // One that can't be fetched or decoded (or takes too long): the next.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const png = await Promise.race([
+            this.render(page, url, w, h).catch(() => null),
+            new Promise<null>((r) => (timer = setTimeout(() => r(null), TRY_MS))),
+          ]);
+          clearTimeout(timer);
           if (png) {
             icon = { site: siteOf(found.href), url, png, w, h, serial: ++this.serial };
             break;
@@ -196,14 +209,24 @@ export class Favicons {
     const before = st.icon;
     st.icon = icon;
     if (before || icon) this.changed();
+    if (st.again) {
+      st.again = false;
+      void this.recheck(page, w, h);
+    }
   }
 
   /** Looks up the page's icon again if it links other ones now (a script changed them). */
   async recheck(page: IconPage, w: number, h: number): Promise<void> {
     const st = this.state(page);
-    if (st.busy || st.candidates === undefined) return;
+    if (st.busy) {
+      st.again = true;
+      return;
+    }
+    if (st.candidates === undefined) return;
     const found = await this.find(page).catch(() => null);
-    if (found && !st.busy && found.key !== st.candidates) await this.refresh(page, w, h);
+    if (!found) return;
+    if (st.busy) st.again = true;
+    else if (found.key !== st.candidates) await this.refresh(page, w, h);
   }
 
   /**
