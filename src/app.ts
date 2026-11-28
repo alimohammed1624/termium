@@ -37,7 +37,7 @@ import {
   transmitVirtual,
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
-import { changedTiles, pngSize, tileCount } from "./dirty";
+import { changedTiles, opaque, pngSize, tileCount } from "./dirty";
 import { SELECT_POPUP } from "./select-popup";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
@@ -103,11 +103,8 @@ export interface Page {
    * index -> image id). Only valid while that full frame is imageIds[0].
    */
   shown?: { raster: Raster; base: number; patches: Map<number, number> };
-  /**
-   * Its changes last cost about a full frame (a video playing): how many
-   * tiles changed then (not tried again until fewer do), and frames since.
-   */
-  costly?: { tiles: number; frames: number };
+  /** Its changes last cost about a full frame (a video playing): frames painted since. */
+  costly?: { frames: number };
   /** Restart the screencast even if its size is unchanged (a terminal attached). */
   restartCast?: boolean;
   /** When its viewport or screencast last changed: frames of another size just after are stale. */
@@ -2050,7 +2047,7 @@ export class App {
     if (this.placeholders) return this.paintPlaceholders(page, r, done);
     // Decoded (to compare with the next) only when it fits the cell grid exactly: patches need that.
     // While changes cost about a full frame (a video), only one frame in four is kept to compare
-    // the next with, to notice when they get small again: decoding every one slows the frame rate.
+    // the next with (patches are tried again then): decoding and encoding every one slows the frame rate.
     const size = pngSize(page.lastFrame);
     const fits = size?.w === r.cols * this.cellW && size?.h === r.rows * this.cellH;
     const probe = !page.costly || page.costly.frames++ % 4 === 0;
@@ -2097,12 +2094,19 @@ export class App {
     const total = tileCount(r.cols, r.rows, this.cellW, this.cellH);
     const fresh = tiles.filter((t) => !shown.patches.has(t.index)).length;
     if (tiles.length > total / 2 || shown.patches.size + fresh > (total * 3) / 4) return null;
-    if (page.costly && tiles.length >= page.costly.tiles * 0.75) return null;
-    // (Small pictures: worth compressing harder than a whole frame.)
-    const data = tiles.map((t) => encodeRegion(raster, t.x, t.y, t.w, t.h, 6).toString("base64"));
-    if (data.reduce((n, d) => n + d.length, 0) > page.lastFrame!.length / 2) {
-      page.costly = { tiles: tiles.length, frames: 1 };
-      return null;
+    // A patch only covers what's under it: where the new picture isn't opaque, the old one would show through.
+    if (!tiles.every((t) => opaque(raster, t))) return null;
+    // (Small pictures: worth compressing harder than a whole frame.) Given
+    // up as soon as they'd cost more than half of it.
+    const data: string[] = [];
+    let bytes = 0;
+    for (const t of tiles) {
+      data.push(encodeRegion(raster, t.x, t.y, t.w, t.h, 6).toString("base64"));
+      bytes += data[data.length - 1]!.length;
+      if (bytes > page.lastFrame!.length / 2) {
+        page.costly = { frames: 1 };
+        return null;
+      }
     }
     page.costly = undefined;
     let s = "";

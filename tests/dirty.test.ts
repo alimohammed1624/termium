@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { changedTiles, pngSize, tileCells, tileCount } from "../src/dirty";
+import { changedTiles, opaque, pngSize, tileCells, tileCount } from "../src/dirty";
 import { encodeRegion } from "../src/png";
 import type { Raster } from "../src/png";
 
@@ -55,5 +55,18 @@ describe("changed tiles", () => {
     const png = encodeRegion(raster(200, 140), 0, 0, 200, 140).toString("base64");
     expect(pngSize(png)).toEqual({ w: 200, h: 140 });
     expect(pngSize("bm90IGEgUE5H")).toBeNull();
+  });
+
+  test("a tile is opaque only if every pixel's alpha is 255", () => {
+    const tile = { index: 0, x: 60, y: 60, w: 60, h: 60, col: 6, row: 3, cols: 6, rows: 3 };
+    expect(opaque(raster(200, 140), tile)).toBe(true); // no alpha channel
+    const a = raster(200, 140, 4);
+    for (let i = 3; i < a.data.length; i += 4) a.data[i] = 255;
+    expect(opaque(a, tile)).toBe(true);
+    a.data[(119 * 200 + 119) * 4 + 3] = 254; // the tile's last pixel
+    expect(opaque(a, tile)).toBe(false);
+    a.data[(119 * 200 + 119) * 4 + 3] = 255;
+    a.data[(59 * 200 + 119) * 4 + 3] = 0; // just above it
+    expect(opaque(a, tile)).toBe(true);
   });
 });

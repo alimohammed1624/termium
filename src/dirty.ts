@@ -68,6 +68,16 @@ export function changedTiles(a: Raster, b: Raster, cols: number, rows: number, c
   return out;
 }
 
+/** Whether every pixel of the tile is fully opaque (always, without an alpha channel). */
+export function opaque(r: Raster, t: Tile): boolean {
+  if (r.channels !== 4) return true;
+  for (let y = t.y; y < t.y + t.h; y++) {
+    const row = (y * r.width + t.x) * 4;
+    for (let i = row + 3, end = row + t.w * 4; i < end; i += 4) if (r.data[i] !== 255) return false;
+  }
+  return true;
+}
+
 /** A base64 PNG's size from its header, without decoding it (null if it isn't one). */
 export function pngSize(base64Png: string): { w: number; h: number } | null {
   const head = Buffer.from(base64Png.slice(0, 44), "base64");
