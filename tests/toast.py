@@ -5,7 +5,7 @@ headless Helium in a Ghostty-like PTY.
 
 Usage: python3 tests/toast.py
 """
-import os, shutil, socket, subprocess, sys, tempfile, time
+import json, os, shutil, socket, subprocess, sys, tempfile, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 from drive import Term
@@ -36,6 +36,11 @@ def toast_cell(s):
         if s in l:
             return l.index(s) + 1, i + 1
     return None
+
+def page_eval(expr):
+    r = subprocess.run(["bun", os.path.join(ROOT, "tests/support/cdp-eval.ts"), profile, expr], capture_output=True, text=True, timeout=20)
+    vals = [p["value"] for p in json.loads(r.stdout or "[]") if "page.html" in p["url"]]
+    return vals[0] if vals else None
 
 def hover(col, row):
     t.mouse((col - 1) * t.cell_w + 3, (row - 1) * t.cell_h + 3, action="move")
@@ -78,10 +83,20 @@ try:
     check("the other one moved down into its place", rows_with("Update news") and rows_with("Update news")[-1] >= ROWS - 4,
           rows_with("Update news"))
 
-    # A click dismisses.
+    # A click dismisses, and none of that click reaches the page under it.
+    page_eval("window.__ev = []; for (const k of ['mousedown', 'mouseup', 'click']) addEventListener(k, () => __ev.push(k), true); 1")
     col, row = toast_cell("Update news")
-    t.click_cell(col + 2, row)
+    x, y = (col + 1) * t.cell_w + 5, (row - 1) * t.cell_h + 8
+    t.mouse(x, y, action="press"); time.sleep(0.3)
+    t.mouse(x + 30, y, button=0, action="drag"); time.sleep(0.1)
+    t.mouse(x + 30, y, action="release")
     check("a click dismisses it", t.wait_for(lambda: OFF not in t.text(), 2), t.text()[-400:])
+    time.sleep(0.3)
+    check("...and the page under it gets none of that click", page_eval("__ev") == [], page_eval("__ev"))
+    c = page_eval("(() => { const r = document.getElementById('log').getBoundingClientRect(); return [r.x + 20, r.y + r.height / 2]; })()")
+    t.click(220 + int(c[0]), 40 + int(c[1])); time.sleep(0.3)
+    ev = page_eval("__ev")
+    check("...while the next click on the page reaches it", ev == ["mousedown", "mouseup", "click"], repr(ev))
     time.sleep(0.5)
     check("the corner is clear again", not any("▂" in l for l in t.screen.display[ROWS - 6:]), t.screen.display[ROWS - 6:])
 
@@ -91,6 +106,16 @@ try:
     t.key("ctrl+b"); t.key("shift+u")
     t.wait_text(OFF, 5)
     check("an untouched toast expires", t.wait_for(lambda: OFF not in t.text(), 8))
+
+    # While a long dialog message covers the page, toasts aren't drawn over it, and wait.
+    t.key("ctrl+b"); t.key("shift+u"); t.wait_text(OFF, 5)
+    c = page_eval("(() => { const r = document.getElementById('longmsg').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")
+    t.click(220 + int(c[0]), 40 + int(c[1]))
+    check("a long dialog message shows over the page", t.wait_text("END-OF-MESSAGE", 5), t.text()[-600:])
+    check("...with no toast over it", t.wait_for(lambda: OFF not in t.text(), 2), t.text()[-600:])
+    time.sleep(6)  # longer than the toast's 5 s
+    t.key("enter")
+    check("once it's answered, the toast is back (it waited)", t.wait_text(OFF, 4), t.text()[-600:])
 finally:
     t.close()
     srv.terminate()

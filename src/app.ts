@@ -38,7 +38,7 @@ import {
 } from "./terminal";
 import { decodePng, encodeRegion, type Raster } from "./png";
 import { SELECT_POPUP } from "./select-popup";
-import { TOAST_MAX, layoutToasts, pause, remaining, resume, timerBar, toastTail, type Toast, type ToastAction, type ToastBox } from "./toast";
+import { TOAST_MAX, layoutToasts, pause, remaining, resume, timerBar, type Toast, type ToastAction, type ToastBox } from "./toast";
 import { DEFAULT_SEARCH, LineEdit, fit, splitPaths, toUrl, truncate, width } from "./text";
 import type { SavedLayout, SavedNode } from "./session";
 import { UPGRADE_CMD, displayVersion, isNewer, parseVersion, stepLabel, type Step } from "./update";
@@ -367,6 +367,10 @@ export class App {
   private toastHover: Toast | null = null;
   /** The pointer's cell, to tell which toast is under it when they move. */
   private pointer: { col: number; row: number } | null = null;
+  /** A press on a toast: the rest of that click (moves, release) is the toast's too. */
+  private toastPressed = false;
+  /** Toasts can't be seen (a dialog's message or an overlay over the pages, or no terminal): their timers wait. */
+  private toastsHeld = false;
 
   private geom = new Map<Page, PaneGeom<Page>>();
   private seps: SepGeom<Page>[] = [];
@@ -2960,7 +2964,8 @@ export class App {
     // The same note again starts over rather than stacking a copy.
     const same = action ? -1 : this.toasts.findIndex((t) => t.text === text && !t.action);
     if (same >= 0) this.toasts.splice(same, 1);
-    const toast: Toast = { id: this.nextToast++, text, ms, left: ms, since: now, action };
+    this.holdToasts();
+    const toast: Toast = { id: this.nextToast++, text, ms, left: ms, since: this.toastsHeld ? null : now, action };
     this.toasts.push(toast);
     while (this.toasts.length > TOAST_MAX) this.toasts.shift();
     this.toastChanged();
@@ -2979,8 +2984,21 @@ export class App {
     this.queueChrome();
   }
 
+  /** Stops the toasts' timers while they can't be seen, and starts them again after. */
+  private holdToasts(): void {
+    const held = !this.attached || this.covered() || !!this.panelPage;
+    if (held === this.toastsHeld) return;
+    this.toastsHeld = held;
+    const now = Date.now();
+    for (const t of this.toasts) {
+      if (held) pause(t, now);
+      else if (t !== this.toastHover) resume(t, now);
+    }
+  }
+
   /** Shrinks the timer lines and lets expired toasts go. */
   private tickToasts(): void {
+    this.holdToasts();
     const now = Date.now();
     const live = this.toasts.filter((t) => remaining(t, now) > 0);
     if (live.length !== this.toasts.length) {
@@ -3002,12 +3020,13 @@ export class App {
    * the toasts drawn. Unless forced, "" when nothing changed.
    */
   private drawToasts(force: boolean): string {
+    this.holdToasts();
     const now = Date.now();
     const area = this.toastArea();
     const shown = this.toasts.filter((t) => remaining(t, now) > 0);
     // In placeholder cells, a row's cells count on from the one to their
     // left: there toasts keep to the right edge, with nothing after them.
-    const boxes = area && !this.covered() ? layoutToasts(shown, area, this.placeholders ? 0 : 1) : [];
+    const boxes = area && !this.toastsHeld ? layoutToasts(shown, area, this.placeholders ? 0 : 1) : [];
     // Toasts shift as others come and go: the one under the pointer now waits.
     const p = this.pointer;
     this.hoverToast((p && boxes.find((b) => inRect(b, p.col, p.row))?.toast) ?? null);
@@ -3025,7 +3044,7 @@ export class App {
     for (const b of boxes) {
       const t = b.toast;
       const boxBg = bg(t === this.toastHover ? C.surface1 : C.surface0);
-      const { action, close } = toastTail(t);
+      const { action, close } = b;
       const textW = b.cols - 1 - width(action + close);
       b.lines.forEach((line, i) => {
         s += at(b.row + i, b.col) + boxBg + fg(C.text) + " " + fit(line, textW);
@@ -3070,7 +3089,7 @@ export class App {
   private hoverToast(t: Toast | null): boolean {
     if (t === this.toastHover) return false;
     const now = Date.now();
-    if (this.toastHover) resume(this.toastHover, now);
+    if (this.toastHover && !this.toastsHeld) resume(this.toastHover, now);
     if (t) pause(t, now);
     this.toastHover = t;
     return true;
@@ -3777,8 +3796,19 @@ export class App {
       return;
     }
     // Toasts take clicks and motion over them; the wheel scrolls the page below.
+    // A click begun on a toast stays its own after the toast goes: the page
+    // under it gets neither the drag nor the release.
+    // (A new press, or a move with no button held, means its release was missed.)
+    if (ev.action === "press" || (ev.action === "move" && ev.button === 3)) this.toastPressed = false;
+    if (this.toastPressed && (ev.action === "move" || ev.action === "release")) {
+      if (ev.action === "release") this.toastPressed = false;
+      return;
+    }
     if (toast && ev.action !== "wheel") {
-      if (ev.action === "press") this.toastClick(ev, toast, col, row);
+      if (ev.action === "press") {
+        this.toastPressed = true;
+        this.toastClick(ev, toast, col, row);
+      }
       return;
     }
 

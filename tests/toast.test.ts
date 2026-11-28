@@ -79,5 +79,12 @@ describe("layoutToasts", () => {
     expect(end - start).toBe(width(" Undo "));
     expect(end).toBeLessThan(b!.col + b!.cols);
     expect(layoutToasts([toast(2, "plain")], area, 1)[0]!.actionHit).toBeNull();
+    // A label too long for the toast is cut: the text and the close mark keep their room.
+    const narrow = { row: 3, col: 1, cols: 30, rows: 10 };
+    const [w] = layoutToasts([toast(3, "Closed tab", 5000, "x".repeat(60))], narrow, 0);
+    expect(width(w!.action)).toBeLessThanOrEqual(15);
+    expect(w!.col + w!.cols).toBe(narrow.col + narrow.cols);
+    expect(1 + width(w!.lines[0]!) + width(w!.action) + width(w!.close)).toBeLessThanOrEqual(w!.cols);
+    expect(w!.actionHit![1]).toBeLessThanOrEqual(w!.col + w!.cols - width(w!.close));
   });
 });

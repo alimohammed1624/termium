@@ -29,6 +29,9 @@ export interface ToastBox {
   cols: number;
   rows: number;
   lines: string[];
+  /** What ends the first row: the action's label as shown ("" if none), then the close mark. */
+  action: string;
+  close: string;
   /** Columns [start, end) of the action label on the first row. */
   actionHit: [number, number] | null;
 }
@@ -39,10 +42,6 @@ export const TOAST_MAX_LINES = 3;
 export const TOAST_MAX = 5;
 const CLOSE = " ✕ ";
 
-/** What ends a toast's first row: its action label, if any, then the close mark. */
-export function toastTail(t: Toast): { action: string; close: string } {
-  return { action: t.action ? ` ${t.action.label} ` : "", close: CLOSE };
-}
 
 export function remaining(t: Toast, now: number): number {
   return t.since === null ? t.left : t.left - (now - t.since);
@@ -102,7 +101,9 @@ export function layoutToasts(toasts: Toast[], area: Rect, margin: number): Toast
   let bottom = area.row + area.rows - 1; // last row free for a toast
   for (let i = toasts.length - 1; i >= 0; i--) {
     const t = toasts[i]!;
-    const { action, close } = toastTail(t);
+    // The label gets at most half the room, the text the rest.
+    const action = t.action ? ` ${truncate(t.action.label, Math.floor((maxCols - 1 - width(CLOSE)) / 2) - 2)} ` : "";
+    const close = CLOSE;
     const tail = action + close;
     const textMax = maxCols - 1 - width(tail);
     const lines = wrap(t.text, Math.max(4, textMax), TOAST_MAX_LINES);
@@ -119,6 +120,8 @@ export function layoutToasts(toasts: Toast[], area: Rect, margin: number): Toast
       cols,
       rows,
       lines,
+      action,
+      close,
       actionHit: action ? [actionStart, actionStart + width(action)] : null,
     });
     bottom = row - 2; // a blank row between toasts
